@@ -1,7 +1,7 @@
 ---
 id: gateway-20260822-050
 title: Phase 5 Runway Native Video Generation Foundation
-status: accepted
+status: completed
 created_at: 2026-08-22T11:00:00+09:00
 updated_at: 2026-08-22T11:00:00+09:00
 owners:
@@ -193,20 +193,24 @@ Provider origin은 `https://api.dev.runwayml.com`로 고정하며 설정으로 U
 
 ## 완료 조건
 
-- [ ] 공식 Runway Python/JavaScript SDK가 Key와 Base URL만 변경해 native task API를 사용함
-- [ ] text-to-video와 image-to-video가 exact capability/model로 dispatch됨
-- [ ] Gateway/Provider task identity와 tenant ownership이 분리·보존됨
-- [ ] submit idempotency와 polling/cancel이 재시작·동시성 환경에서 exactly-once로 수렴함
-- [ ] timeout/response loss가 실패나 자동 retry로 잘못 처리되지 않음
-- [ ] 대용량/악성 URI와 secret/content가 request boundary 및 telemetry에서 차단됨
-- [ ] billing-required mode에서 미정산 Provider task가 생성되지 않음
-- [ ] native status/output/error wire와 204/404 cancel 의미가 SDK 호환됨
-- [ ] 전체 unit/race/integration/SDK 회귀가 통과함
-- [ ] README, migration, multi-repo handoff와 검증 증거가 갱신됨
+- [x] 공식 Runway Python/JavaScript SDK가 Key와 Base URL만 변경해 native task API를 사용함
+- [x] text-to-video와 image-to-video가 exact capability/model로 dispatch됨
+- [x] Gateway/Provider task identity와 tenant ownership이 분리·보존됨
+- [x] submit idempotency와 polling/cancel이 재시작·동시성 환경에서 exactly-once로 수렴함
+- [x] timeout/response loss가 실패나 자동 retry로 잘못 처리되지 않음
+- [x] 대용량/악성 URI와 secret/content가 request boundary 및 telemetry에서 차단됨
+- [x] billing-required mode에서 미정산 Provider task가 생성되지 않음
+- [x] native status/output/error wire와 204/404 cancel 의미가 SDK 호환됨
+- [x] 전체 unit/race/integration/SDK 회귀가 통과함
+- [x] README, migration, multi-repo handoff와 검증 증거가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 커밋: `7adec41` (`feat: add Runway native video foundation`)
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과: format, vet, 전체 race unit test와 모든 binary build.
+- fresh PostgreSQL `gateway_plan050` 및 Redis DB 14에서 전체 `make integration-test` 통과. `000044_runway_video_protocol.sql` upgrade와 기존 durable Job 회귀 포함.
+- 공식 Runway Python SDK `5.15.0` sync/async 및 JavaScript SDK `4.15.0`으로 `text_to_video`/`image_to_video` submit, task retrieve/delete를 Base URL과 Key 교체만으로 검증.
+- fixed Runway origin, Bearer 교체, exact `X-Runway-Version`, Gateway/Provider task ID 분리, 5초 최소 poll, 204/404 cancel 수렴과 billing-required pre-dispatch 차단을 단위 테스트로 검증.
 
 ## Rollback 계획
 

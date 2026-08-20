@@ -12,6 +12,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
+	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 )
 
 type ProviderAvailability interface {
@@ -29,6 +30,13 @@ type ModelsHandler struct {
 	responses    interface {
 		List() []responsesoperation.Model
 	}
+	video interface{ List() []videooperation.Route }
+}
+
+func NewModelsHandlerWithAll(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
+	List() []responsesoperation.Model
+}, video interface{ List() []videooperation.Route }, availability ProviderAvailability) *ModelsHandler {
+	return &ModelsHandler{common: NewImagesHandler(logger, authenticator, models, nil, 1), chat: chat, responses: responses, video: video, availability: availability}
 }
 
 func NewModelsHandlerWithChatAndResponses(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
@@ -172,6 +180,21 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 			if available {
 				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})
 				seen[model.ID] = true
+			}
+		}
+	}
+	if handler.video != nil {
+		for _, model := range handler.video.List() {
+			if seen[model.Model] || !principal.AuthorizeModel("runway", string(videooperation.Generate), model.Model) {
+				continue
+			}
+			available := configured[model.Provider]
+			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
+				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
+			}
+			if available {
+				data = append(data, modelObject{model.Model, "model", 0, "runway"})
+				seen[model.Model] = true
 			}
 		}
 	}

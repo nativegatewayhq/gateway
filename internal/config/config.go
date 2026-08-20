@@ -19,6 +19,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 )
 
 const (
@@ -49,6 +50,8 @@ const (
 	defaultFalJWKSTimeout      = 5 * time.Second
 	defaultFalJWKSCacheTTL     = 24 * time.Hour
 	defaultFalJWKSRefresh      = time.Minute
+	defaultRunwayTimeout       = 2 * time.Minute
+	defaultRunwayBodyBytes     = int64(8 * 1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -148,6 +151,12 @@ type Config struct {
 	FalJWKSTimeout                 time.Duration
 	FalJWKSCacheTTL                time.Duration
 	FalJWKSRefreshCooldown         time.Duration
+	RunwayEnabled                  bool
+	RunwayModels                   []string
+	RunwayModelCapabilities        map[string]videooperation.ModelCapability
+	RunwayTimeout                  time.Duration
+	RunwayBodyBytes                int64
+	RunwayPollInterval             time.Duration
 	PublicBaseURL                  string
 	JobManagementMode              JobManagementMode
 	JobManagementCursorSecrets     [][]byte
@@ -257,6 +266,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		FalJWKSTimeout:               defaultFalJWKSTimeout,
 		FalJWKSCacheTTL:              defaultFalJWKSCacheTTL,
 		FalJWKSRefreshCooldown:       defaultFalJWKSRefresh,
+		RunwayTimeout:                defaultRunwayTimeout,
+		RunwayBodyBytes:              defaultRunwayBodyBytes,
+		RunwayPollInterval:           5 * time.Second,
 		JobManagementMode:            JobManagementDisabled,
 	}
 
@@ -623,6 +635,9 @@ func Load(lookup LookupEnv) (Config, error) {
 	if err := loadFal(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
+	if err := loadRunway(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
 	if value, ok := lookup("GATEWAY_JOB_MANAGEMENT_MODE"); ok {
 		cfg.JobManagementMode = JobManagementMode(strings.TrimSpace(value))
 	}
@@ -686,7 +701,7 @@ func Load(lookup LookupEnv) (Config, error) {
 	if cfg.JobManagementMode == JobManagementRequired && len(cfg.JobManagementCursorSecrets) == 0 {
 		return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS: required when Job management is required")
 	}
-	if cfg.JobManagementMode == JobManagementRequired && !cfg.ReplicateEnabled && !cfg.FalEnabled {
+	if cfg.JobManagementMode == JobManagementRequired && !cfg.ReplicateEnabled && !cfg.FalEnabled && !cfg.RunwayEnabled {
 		return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_MODE: requires an asynchronous provider")
 	}
 	if cfg.BillingMode == BillingRequired && len(cfg.OpenAIChatModels) > 0 {
@@ -731,6 +746,52 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadRunway(cfg *Config, lookup LookupEnv) error {
+	_, cfg.RunwayEnabled = lookup("GATEWAY_RUNWAY_API_KEY")
+	if value, ok := lookup("GATEWAY_RUNWAY_MODELS"); ok {
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || strings.ContainsAny(model, "\r\n") {
+				return fmt.Errorf("GATEWAY_RUNWAY_MODELS: invalid model")
+			}
+			cfg.RunwayModels = append(cfg.RunwayModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_RUNWAY_MODEL_CAPABILITIES_JSON"); ok {
+		if json.Unmarshal([]byte(value), &cfg.RunwayModelCapabilities) != nil || len(cfg.RunwayModelCapabilities) > 64 {
+			return fmt.Errorf("GATEWAY_RUNWAY_MODEL_CAPABILITIES_JSON: invalid capability map")
+		}
+	}
+	if value, ok := lookup("GATEWAY_RUNWAY_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return fmt.Errorf("GATEWAY_RUNWAY_REQUEST_TIMEOUT: invalid duration")
+		}
+		cfg.RunwayTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_RUNWAY_MAX_BODY_BYTES"); ok {
+		limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || limit < 1024 || limit > 256*1024*1024 {
+			return fmt.Errorf("GATEWAY_RUNWAY_MAX_BODY_BYTES: invalid limit")
+		}
+		cfg.RunwayBodyBytes = limit
+	}
+	if value, ok := lookup("GATEWAY_RUNWAY_POLL_INTERVAL"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration < 5*time.Second || duration > 10*time.Minute {
+			return fmt.Errorf("GATEWAY_RUNWAY_POLL_INTERVAL: must be between 5s and 10m")
+		}
+		cfg.RunwayPollInterval = duration
+	}
+	if cfg.RunwayEnabled && len(cfg.RunwayModels) == 0 {
+		return fmt.Errorf("GATEWAY_RUNWAY_MODELS: must not be empty when Runway is enabled")
+	}
+	if _, err := videooperation.NewRegistryWithCapabilities(cfg.RunwayModels, cfg.RunwayModelCapabilities); err != nil {
+		return fmt.Errorf("GATEWAY_RUNWAY_MODEL_CAPABILITIES_JSON: invalid model capability")
+	}
+	return nil
 }
 
 func loadReplicate(cfg *Config, lookup LookupEnv) error {

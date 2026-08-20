@@ -13,6 +13,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
+	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 )
 
 type availability []providercredentials.ProviderID
@@ -149,6 +150,20 @@ func TestModelsHandlerListsLogicalChatWhenAnyCandidateIsConfigured(t *testing.T)
 		t.Fatal(err)
 	}
 	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "logical-chat" {
+		t.Fatalf("list=%+v", list)
+	}
+}
+
+func TestModelsHandlerIncludesAuthorizedConfiguredRunwayVideo(t *testing.T) {
+	video, _ := videooperation.NewRegistry([]string{"logical-video"})
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "runway", Operation: "video.generate", Model: "logical-video"}}}
+	handler := NewModelsHandlerWithAll(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), nil, nil, nil, video, channelAvailability{"channel_00000000000000000000000000000007": true})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || len(list.Data) != 1 || list.Data[0].ID != "logical-video" || list.Data[0].OwnedBy != "runway" {
 		t.Fatalf("list=%+v", list)
 	}
 }

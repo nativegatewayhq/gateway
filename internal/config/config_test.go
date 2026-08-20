@@ -429,6 +429,21 @@ func TestLoadFalQueueConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadRunwayConfiguration(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_RUNWAY_API_KEY": "secret", "GATEWAY_RUNWAY_MODELS": "logical", "GATEWAY_RUNWAY_MODEL_CAPABILITIES_JSON": `{"logical":{"provider_model":"gen4_turbo","text_to_video":true}}`, "GATEWAY_RUNWAY_POLL_INTERVAL": "7s"}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RunwayEnabled || cfg.RunwayPollInterval != 7*time.Second || cfg.RunwayModelCapabilities["logical"].ProviderModel != "gen4_turbo" {
+		t.Fatalf("config=%+v", cfg)
+	}
+	values["GATEWAY_RUNWAY_POLL_INTERVAL"] = "4s"
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("unsafe poll interval accepted")
+	}
+}
+
 func TestLoadFalRequiresModelsAndPublicOrigin(t *testing.T) {
 	_, err := Load(func(key string) (string, bool) {
 		if key == "GATEWAY_DATABASE_URL" {
