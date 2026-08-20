@@ -10,10 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/jobs"
+	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	joboperation "github.com/nativegatewayhq/gateway/operations/job"
 )
@@ -101,7 +103,7 @@ func (client *Client) Poll(ctx context.Context, attempt jobs.ProviderAttempt) (j
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return joboperation.Observation{}, providerFailure(response.StatusCode, body)
 	}
-	return observation(attempt.JobID, response.StatusCode, body)
+	return observation(attempt.JobID, response.StatusCode, body, "poll")
 }
 
 func (client *Client) Cancel(ctx context.Context, attempt jobs.ProviderAttempt) (joboperation.Observation, error) {
@@ -158,7 +160,7 @@ func (client *Client) do(request *http.Request) (*http.Response, []byte, error) 
 	return response, body, nil
 }
 
-func observation(jobID string, statusCode int, body []byte) (joboperation.Observation, error) {
+func observation(jobID string, statusCode int, body []byte, source string) (joboperation.Observation, error) {
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(body, &envelope) != nil {
 		return joboperation.Observation{}, &jobs.ProviderError{Category: "invalid_response"}
@@ -177,10 +179,57 @@ func observation(jobID string, statusCode int, body []byte) (joboperation.Observ
 		return joboperation.Observation{}, err
 	}
 	result := joboperation.Observation{Status: mapped, FailureCategory: category}
+	if mapped.Terminal() {
+		if rawCost, ok := envelope["cost"]; ok {
+			if quantity, ok := parseCostMicros(rawCost); ok {
+				result.Usage = &joboperation.Usage{Dimension: "provider_credit", Unit: "microcredit", Quantity: quantity, Provenance: source, ExtractorVersion: "runway-task-cost-v1"}
+			}
+		}
+	}
 	if mapped == joboperation.Succeeded || mapped == joboperation.Failed {
 		result.Snapshot = joboperation.Snapshot{Status: statusCode, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: sanitized, SHA256: sha256.Sum256(sanitized)}
 	}
 	return result, nil
+}
+
+func parseCostMicros(raw json.RawMessage) (int64, bool) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return 0, false
+	}
+	number := strings.TrimSpace(string(object["credits"]))
+	if number == "" || strings.HasPrefix(number, "-") || strings.ContainsAny(number, "eE+") {
+		return 0, false
+	}
+	whole, fraction, has := strings.Cut(number, ".")
+	if whole == "" {
+		return 0, false
+	}
+	if !has {
+		fraction = ""
+	}
+	if len(fraction) > 6 {
+		return 0, false
+	}
+	for len(fraction) < 6 {
+		fraction += "0"
+	}
+	wholeValue, err := strconv.ParseInt(whole, 10, 64)
+	if err != nil || wholeValue > pricing.MaxProviderCreditMicros/pricing.ProviderCreditScale {
+		return 0, false
+	}
+	fractionValue := int64(0)
+	if fraction != "" {
+		fractionValue, err = strconv.ParseInt(fraction, 10, 64)
+		if err != nil {
+			return 0, false
+		}
+	}
+	if wholeValue > (pricing.MaxProviderCreditMicros-fractionValue)/pricing.ProviderCreditScale {
+		return 0, false
+	}
+	value := wholeValue*pricing.ProviderCreditScale + fractionValue
+	return value, value <= pricing.MaxProviderCreditMicros
 }
 
 func mapStatus(status string) (joboperation.Status, string, bool) {

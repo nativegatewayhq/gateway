@@ -911,6 +911,18 @@ func usageReason(current joboperation.Job, observation joboperation.Observation)
 	if current.EstimatedUsage == nil || !observation.Status.Terminal() {
 		return ""
 	}
+	if current.EstimatedUsage.Dimension == "provider_credit" && current.EstimatedUsage.Unit == "microcredit" {
+		if observation.Usage == nil {
+			return "usage_unknown"
+		}
+		if observation.Usage.Dimension != current.EstimatedUsage.Dimension || observation.Usage.Unit != current.EstimatedUsage.Unit || observation.Usage.ExtractorVersion != current.EstimatedUsage.ResultExtractorVersion {
+			return "usage_identity_mismatch"
+		}
+		if observation.Usage.Quantity > current.EstimatedUsage.Quantity {
+			return "usage_exceeds_estimate"
+		}
+		return ""
+	}
 	if observation.Status == joboperation.Succeeded {
 		if observation.Usage == nil || observation.Usage.Quantity == 0 {
 			return "usage_unknown"

@@ -23,6 +23,45 @@ import (
 
 const openAIChannel = "channel_00000000000000000000000000000001"
 const falChannel = "channel_00000000000000000000000000000005"
+const runwayChannel = "channel_00000000000000000000000000000007"
+
+func TestRunwayProviderCreditReservationAndSettlement(t *testing.T) {
+	service, pool := billingFixture(t, 2_000_000)
+	estimator, err := pricing.NewService(pool, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	price := pricing.VideoPrice{
+		Price:                  pricing.Price{ChannelID: runwayChannel, Protocol: "runway", Operation: "video.generate", Model: "gateway-video", Size: "text_to_video", Quality: "ratio=1280:720;audio=false", UnitCost: 10_000, UnitSale: 12_500, EffectiveFrom: time.Now().Add(-time.Hour)},
+		CreditsPerSecondMicros: 5 * pricing.ProviderCreditScale,
+	}
+	if _, err = estimator.PublishVideo(context.Background(), price, "runway-billing-v1"); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(context.Background(), BeginRequest{RequestID: "runway-request", OrganizationID: "org_billing", ProjectID: "project_billing", APIKeyID: "key_billing", Protocol: "runway", Operation: "video.generate", Model: "gateway-video", ChannelID: runwayChannel, Quantity: 5, Size: "text_to_video", Quality: "ratio=1280:720;audio=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if charge.PricingQuantity != 5 || charge.Quantity != 25*pricing.ProviderCreditScale || charge.ReservedSale != 312_500 {
+		t.Fatalf("reserved charge=%+v", charge)
+	}
+	snapshot := ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"id":"gateway-job","status":"SUCCEEDED","cost":{"credits":10}}`)}
+	completed, err := service.CompleteWithProviderCredits(context.Background(), charge.ID, 10*pricing.ProviderCreditScale, snapshot)
+	if err != nil || completed.CapturedSale != 125_000 || completed.ActualCost == nil || *completed.ActualCost != 100_000 {
+		t.Fatalf("completed=%+v err=%v", completed, err)
+	}
+	replayed, err := service.CompleteWithProviderCredits(context.Background(), charge.ID, 10*pricing.ProviderCreditScale, snapshot)
+	if err != nil || replayed.CapturedSale != 125_000 {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+	if _, err = service.CompleteWithProviderCredits(context.Background(), charge.ID, 26*pricing.ProviderCreditScale, snapshot); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("over-estimate error=%v", err)
+	}
+	var available, reserved int64
+	if err = pool.QueryRow(context.Background(), `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_billing'`).Scan(&available, &reserved); err != nil || available != 1_875_000 || reserved != 0 {
+		t.Fatalf("wallet=%d/%d err=%v", available, reserved, err)
+	}
+}
 
 func billingPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()

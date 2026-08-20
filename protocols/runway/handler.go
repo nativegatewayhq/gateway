@@ -7,18 +7,22 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/jobs"
+	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	joboperation "github.com/nativegatewayhq/gateway/operations/job"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
@@ -36,6 +40,9 @@ type JobService interface {
 type ModelRegistry interface {
 	Resolve(string) (videooperation.Route, error)
 }
+type Billing interface {
+	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
+}
 
 type Handler struct {
 	logger           *slog.Logger
@@ -44,6 +51,7 @@ type Handler struct {
 	jobs             JobService
 	maximumBodyBytes int64
 	billingRequired  bool
+	billing          Billing
 }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, service JobService, maximumBodyBytes int64) *Handler {
@@ -51,6 +59,10 @@ func NewHandler(logger *slog.Logger, authenticator Authenticator, models ModelRe
 }
 
 func (handler *Handler) SetBillingRequired(required bool) { handler.billingRequired = required }
+func (handler *Handler) SetBilling(service Billing) {
+	handler.billing = service
+	handler.billingRequired = service != nil
+}
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if handler == nil || handler.authenticator == nil || handler.models == nil || handler.jobs == nil || handler.maximumBodyBytes < 1 {
@@ -78,7 +90,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 }
 
 func (handler *Handler) create(writer http.ResponseWriter, request *http.Request, principal apikey.Principal) {
-	if handler.billingRequired {
+	if handler.billingRequired && handler.billing == nil {
 		writeError(writer, http.StatusServiceUnavailable, "video billing is not configured")
 		return
 	}
@@ -112,8 +124,31 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	fingerprint := sha256.Sum256(body)
+	chargeID := ""
+	var estimatedUsage *joboperation.Usage
+	if handler.billingRequired {
+		duration, size, quality, extractErr := videoBillingDimensions(body, request.URL.Path)
+		if extractErr != nil {
+			writeError(writer, http.StatusBadRequest, "billable video dimensions are required")
+			return
+		}
+		charge, beginErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "runway", Operation: string(videooperation.Generate), Model: model, ChannelID: route.ChannelID, Quantity: duration, Size: size, Quality: quality, IdempotencyKey: key, RequestFingerprint: fingerprint})
+		if beginErr != nil {
+			switch {
+			case errors.Is(beginErr, billing.ErrRequestConflict):
+				writeError(writer, http.StatusConflict, "idempotency conflict")
+			case errors.Is(beginErr, billing.ErrRequestPending):
+				writeError(writer, http.StatusConflict, "video task is pending")
+			default:
+				writeError(writer, http.StatusPaymentRequired, "video price or balance is unavailable")
+			}
+			return
+		}
+		chargeID = charge.ID
+		estimatedUsage = &joboperation.Usage{Dimension: "provider_credit", Unit: "microcredit", Quantity: charge.Quantity, Provenance: "request", ExtractorVersion: "runway-request-cost-v1", ResultExtractorVersion: "runway-task-cost-v1"}
+	}
 	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
-	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "runway", Operation: string(videooperation.Generate), Model: model, Provider: string(route.Provider), ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint}, providerrunway.SubmitPayload{Path: request.URL.Path, Body: outbound})
+	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "runway", Operation: string(videooperation.Generate), Model: model, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: estimatedUsage}, providerrunway.SubmitPayload{Path: request.URL.Path, Body: outbound})
 	if errors.Is(err, joboperation.ErrConflict) {
 		writeError(writer, http.StatusConflict, "idempotency conflict")
 		return
@@ -123,6 +158,31 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"id": created.ID})
+}
+
+func videoBillingDimensions(body []byte, path string) (int64, string, string, error) {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil {
+		return 0, "", "", errors.New("invalid json")
+	}
+	var duration int64
+	var ratio string
+	if json.Unmarshal(envelope["duration"], &duration) != nil || duration < 1 || duration > 60 {
+		return 0, "", "", errors.New("invalid duration")
+	}
+	if json.Unmarshal(envelope["ratio"], &ratio) != nil || ratio == "" || len(ratio) > 32 {
+		return 0, "", "", errors.New("invalid ratio")
+	}
+	audio := false
+	if raw, ok := envelope["audio"]; ok && json.Unmarshal(raw, &audio) != nil {
+		return 0, "", "", errors.New("invalid audio")
+	}
+	kind := strings.TrimPrefix(path, "/v1/")
+	quality := "ratio=" + ratio + ";audio=" + strconv.FormatBool(audio)
+	if len(kind) > 80 || len(quality) > 80 {
+		return 0, "", "", errors.New("invalid dimensions")
+	}
+	return duration, kind, quality, nil
 }
 
 func (handler *Handler) get(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, id string) {
@@ -145,14 +205,29 @@ func (handler *Handler) get(writer http.ResponseWriter, request *http.Request, p
 	response := map[string]any{"id": value.ID, "status": nativeStatus(value.Status), "createdAt": value.CreatedAt.UTC().Format(time.RFC3339Nano)}
 	switch value.Status {
 	case joboperation.Pending, joboperation.Queued:
-		response["estimatedCost"] = map[string]any{"credits": 0}
+		if value.EstimatedUsage != nil {
+			response["estimatedCost"] = map[string]any{"credits": creditNumber(value.EstimatedUsage.Quantity)}
+		}
 	case joboperation.Processing, joboperation.Reconciling:
-		response["estimatedCost"] = map[string]any{"credits": 0}
+		if value.EstimatedUsage != nil {
+			response["estimatedCost"] = map[string]any{"credits": creditNumber(value.EstimatedUsage.Quantity)}
+		}
 		response["progress"] = 0
 	case joboperation.Canceled:
-		response["cost"] = map[string]any{"credits": 0}
+		if value.ActualUsage != nil {
+			response["cost"] = map[string]any{"credits": creditNumber(value.ActualUsage.Quantity)}
+		}
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func creditNumber(micros int64) json.Number {
+	whole := micros / pricing.ProviderCreditScale
+	fraction := micros % pricing.ProviderCreditScale
+	if fraction == 0 {
+		return json.Number(strconv.FormatInt(whole, 10))
+	}
+	return json.Number(strconv.FormatInt(whole, 10) + "." + strings.TrimRight(fmt.Sprintf("%06d", fraction), "0"))
 }
 
 func (handler *Handler) cancel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, id string) {

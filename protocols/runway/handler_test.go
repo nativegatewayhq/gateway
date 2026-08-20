@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/jobs"
 	joboperation "github.com/nativegatewayhq/gateway/operations/job"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
@@ -27,17 +28,53 @@ func (a authStub) Authenticate(context.Context, string) (apikey.Principal, error
 type jobsStub struct {
 	submitted int
 	payload   any
+	request   jobs.CreateRequest
 	job       joboperation.Job
 }
 
-func (j *jobsStub) Submit(_ context.Context, _ jobs.CreateRequest, p any) (joboperation.Job, error) {
+func (j *jobsStub) Submit(_ context.Context, request jobs.CreateRequest, p any) (joboperation.Job, error) {
 	j.submitted++
 	j.payload = p
+	j.request = request
 	if j.job.Status.Terminal() {
 		j.job.Status = joboperation.Processing
 		j.job.Snapshot = joboperation.Snapshot{}
 	}
 	return j.job, nil
+}
+
+type billingStub struct {
+	request billing.BeginRequest
+	charge  billing.Charge
+}
+
+func (stub *billingStub) Begin(_ context.Context, request billing.BeginRequest) (billing.Charge, error) {
+	stub.request = request
+	return stub.charge, nil
+}
+
+func TestManagedSubmitBindsPriceDimensionsChargeAndUsage(t *testing.T) {
+	registry, _ := videooperation.NewRegistryWithCapabilities([]string{"logical-video"}, map[string]videooperation.ModelCapability{"logical-video": {ProviderModel: "gen4_turbo", TextToVideo: true}})
+	principal := apikey.Principal{OrganizationID: "org", ProjectID: "project", APIKeyID: "key", ModelAccessMode: apikey.ModelAccessAll}
+	service := &jobsStub{job: joboperation.Job{ID: "job_0123456789abcdef0123456789abcdef", Protocol: "runway", Status: joboperation.Queued}}
+	biller := &billingStub{charge: billing.Charge{ID: "charge_0123456789abcdef0123456789abcdef", Quantity: 25_000_000}}
+	handler := NewHandler(slog.Default(), authStub{principal}, registry, service, 1<<20)
+	handler.SetBilling(biller)
+	request := httptest.NewRequest(http.MethodPost, "/v1/text_to_video", strings.NewReader(`{"model":"logical-video","duration":5,"ratio":"1280:720","audio":false,"promptText":"private"}`))
+	request.Header.Set("Authorization", "Bearer key")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Runway-Version", "2024-11-06")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || service.submitted != 1 {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if biller.request.Quantity != 5 || biller.request.Size != "text_to_video" || biller.request.Quality != "ratio=1280:720;audio=false" {
+		t.Fatalf("billing request=%+v", biller.request)
+	}
+	if service.request.ChargeID != biller.charge.ID || service.request.EstimatedUsage == nil || service.request.EstimatedUsage.Quantity != 25_000_000 {
+		t.Fatalf("job request=%+v", service.request)
+	}
 }
 func (j *jobsStub) Get(context.Context, joboperation.Owner, string) (joboperation.Job, error) {
 	return j.job, nil

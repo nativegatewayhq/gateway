@@ -492,7 +492,9 @@ func run(stdout, stderr io.Writer) int {
 		}
 		if cfg.RunwayEnabled {
 			handler := runwayProtocol.NewHandler(logger, apiKeyAuthenticator, videoModels, jobService, cfg.RunwayBodyBytes)
-			handler.SetBillingRequired(cfg.BillingMode == config.BillingRequired)
+			if cfg.BillingMode == config.BillingRequired {
+				handler.SetBilling(billingService)
+			}
 			runwayHandler = handler
 		}
 		readinessChecks = append(readinessChecks, jobRepository.Ready)

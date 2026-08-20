@@ -107,6 +107,43 @@ func TestPublishEstimateVersionAndAppendOnlyAudit(t *testing.T) {
 	}
 }
 
+func TestPublishAndEstimateRunwayVideoCredits(t *testing.T) {
+	pool := pricingPool(t)
+	service, _ := NewService(pool, 2_000)
+	ctx := context.Background()
+	start := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	price := VideoPrice{Price: Price{ChannelID: "channel_00000000000000000000000000000007", Protocol: "runway", Operation: "video.generate", Model: "logical-video", Size: "text_to_video", Quality: "ratio=1280:720;audio=false", UnitCost: 10_000, UnitSale: 12_500, EffectiveFrom: start}, CreditsPerSecondMicros: 5 * ProviderCreditScale}
+	published, err := service.PublishVideo(ctx, price, "runway-gen4-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := service.PublishVideo(ctx, price, "runway-gen4-v1")
+	if err != nil || retry.ID != published.ID {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+	estimate, err := service.Estimate(ctx, Request{ChannelID: price.ChannelID, Protocol: "runway", Operation: "video.generate", Model: price.Model, Size: price.Size, Quality: price.Quality, Quantity: 5, At: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if estimate.Quantity != 25*ProviderCreditScale || estimate.EstimatedCost != 250_000 || estimate.MaximumSale != 312_500 {
+		t.Fatalf("estimate=%+v", estimate)
+	}
+	minimum := price
+	minimum.Model = "minimum-video"
+	minimum.CreditsPerSecondMicros = 2 * ProviderCreditScale
+	minimum.MinimumCreditsMicros = 64 * ProviderCreditScale
+	if _, err = service.PublishVideo(ctx, minimum, "runway-minimum-v1"); err != nil {
+		t.Fatal(err)
+	}
+	estimate, err = service.Estimate(ctx, Request{ChannelID: minimum.ChannelID, Protocol: "runway", Operation: "video.generate", Model: minimum.Model, Size: minimum.Size, Quality: minimum.Quality, Quantity: 5, At: start})
+	if err != nil || estimate.Quantity != 64*ProviderCreditScale {
+		t.Fatalf("minimum=%+v err=%v", estimate, err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE video_credit_prices SET minimum_credits_micros=0 WHERE price_id=$1`, published.ID); err == nil {
+		t.Fatal("video price mutation accepted")
+	}
+}
+
 func TestPriceAvailabilityMarginAndOverlap(t *testing.T) {
 	pool := pricingPool(t)
 	service, _ := NewService(pool, 2_001)

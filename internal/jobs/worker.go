@@ -17,6 +17,9 @@ type Settler interface {
 type UsageSettler interface {
 	CompleteWithQuantity(context.Context, string, int64, billing.ResponseSnapshot) (billing.Charge, error)
 }
+type ProviderCreditSettler interface {
+	CompleteWithProviderCredits(context.Context, string, int64, billing.ResponseSnapshot) (billing.Charge, error)
+}
 
 type WorkerConfig struct {
 	Interval, Lease, PollDelay, BaseBackoff, MaximumBackoff time.Duration
@@ -175,6 +178,17 @@ func (worker *Worker) settle(ctx context.Context, lease SettlementLease) error {
 	snapshot := billing.ResponseSnapshot{Status: lease.Job.Snapshot.Status, Headers: lease.Job.Snapshot.Headers, Body: lease.Job.Snapshot.Body}
 	if lease.Job.Status == joboperation.Canceled {
 		snapshot = billing.ResponseSnapshot{Status: 204, Headers: map[string][]string{}, Body: []byte{}}
+	}
+	if lease.Job.EstimatedUsage != nil && lease.Job.EstimatedUsage.Dimension == "provider_credit" && lease.Job.EstimatedUsage.Unit == "microcredit" {
+		if lease.Job.ActualUsage == nil || lease.Job.UsageReconciliationReason != "" || lease.Job.ActualUsage.Quantity < 0 || lease.Job.ActualUsage.Quantity > lease.Job.EstimatedUsage.Quantity {
+			return errors.New("job provider credit unavailable")
+		}
+		settler, ok := worker.settler.(ProviderCreditSettler)
+		if !ok {
+			return errors.New("provider-credit settlement unavailable")
+		}
+		_, err := settler.CompleteWithProviderCredits(ctx, lease.Job.ChargeID, lease.Job.ActualUsage.Quantity, snapshot)
+		return err
 	}
 	if lease.Job.Status == joboperation.Succeeded && lease.Job.EstimatedUsage != nil {
 		if lease.Job.ActualUsage == nil || lease.Job.UsageReconciliationReason != "" || lease.Job.ActualUsage.Quantity <= 0 || lease.Job.ActualUsage.Quantity > lease.Job.EstimatedUsage.Quantity {
