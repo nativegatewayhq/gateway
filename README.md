@@ -193,6 +193,12 @@ Phase 1 includes an internal organization wallet with append-only accounting ent
 
 This is currently an internal domain boundary only. No public wallet endpoint exists, inference requests are not charged yet, and self-hosted operators must not treat the Deposit command as proof of payment. A managed Cloud service must validate payment events before calling Deposit.
 
+## Provider pricing foundation
+
+Provider channels can publish append-only, time-versioned image prices through the internal pricing domain. Cost and sale amounts use `USD_TICKS`; estimates match channel, protocol, operation, model, size, and quality exactly, enforce a configured minimum margin, and retain the selected price ID for later audit.
+
+Pricing is not connected to native inference handlers yet. There is no public price-management endpoint, and clients cannot supply trusted prices or historical evaluation times. A managed Cloud service must authenticate and audit price publications through the internal domain rather than modifying pricing tables directly.
+
 ## Verify
 
 Run all required checks:
