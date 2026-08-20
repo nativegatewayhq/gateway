@@ -27,7 +27,7 @@ func TestRunFailsWhenPortIsInUse(t *testing.T) {
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: time.Second,
 	}
-	err = Run(context.Background(), cfg, observability.NewLogger(&bytes.Buffer{}, slog.LevelInfo))
+	err = Run(context.Background(), cfg, observability.NewLogger(&bytes.Buffer{}, slog.LevelInfo), nil)
 	if err == nil || !strings.Contains(err.Error(), "listen failed") {
 		t.Fatalf("Run() error = %v, want listen error", err)
 	}

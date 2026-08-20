@@ -30,14 +30,14 @@ func runtimeError(kind string, err error) error {
 }
 
 // Run starts the HTTP server and blocks until it fails or ctx is canceled.
-func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, ready httpserver.ReadyFunc) error {
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		return runtimeError("listen failed", err)
 	}
 
 	server := &http.Server{
-		Handler:           httpserver.NewHandler(logger, nil),
+		Handler:           httpserver.NewHandler(logger, ready),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
