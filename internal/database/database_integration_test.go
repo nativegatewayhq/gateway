@@ -5,6 +5,7 @@ package database
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 )
 
@@ -21,6 +22,19 @@ func TestMigrateIsRepeatable(t *testing.T) {
 	defer pool.Close()
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	errors := make(chan error, 4)
+	for range 4 {
+		wait.Add(1)
+		go func() { defer wait.Done(); errors <- Migrate(ctx, pool) }()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("concurrent Migrate()=%v", err)
+		}
 	}
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
