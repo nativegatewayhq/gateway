@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"io"
 	"net"
 	"net/http"
@@ -17,9 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/httpserver"
 	"github.com/nativegatewayhq/gateway/internal/observability"
+	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 )
 
 func TestRunRejectsInvalidConfigWithoutEchoingValue(t *testing.T) {
@@ -76,6 +79,8 @@ func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 		"GATEWAY_GOOGLE_API_KEY=google-process-secret",
 		"GATEWAY_OPENAI_API_KEY=openai-process-secret",
 		"GATEWAY_XAI_API_KEY=xai-process-secret",
+		"GATEWAY_RATE_LIMIT_MODE=required",
+		"GATEWAY_REDIS_URL="+os.Getenv("TEST_REDIS_URL"),
 	)
 	var output bytes.Buffer
 	command.Stdout = &output
@@ -127,6 +132,71 @@ func TestGatewayProcessFailsFastWhenPortIsInUse(t *testing.T) {
 	}
 }
 
+func TestGatewayProcessEnforcesStoredAPIKeyRateLimit(t *testing.T) {
+	databaseURL, redisURL := os.Getenv("TEST_DATABASE_URL"), os.Getenv("TEST_REDIS_URL")
+	if databaseURL == "" || redisURL == "" {
+		t.Skip("TEST_DATABASE_URL and TEST_REDIS_URL are required")
+	}
+	ctx := context.Background()
+	pool, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	record, raw, err := apikey.GenerateForProjectWithPolicy(rand.Reader, "process limited", "project_legacy", nil, apikey.RateLimitPolicy{RequestsPerMinute: 1, Burst: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apikey.NewPostgresStore(pool).Create(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Exec(ctx, `DELETE FROM service_api_keys WHERE id=$1`, record.ID)
+	limiter, err := ratelimit.NewRedis(redisURL, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer limiter.Close()
+	decision, err := limiter.Allow(ctx, record.ID, ratelimit.Policy{RequestsPerMinute: 1, Burst: 1})
+	if err != nil || !decision.Allowed {
+		t.Fatalf("preconsume=%+v error=%v", decision, err)
+	}
+
+	executable, address := buildGateway(t), availableAddress(t)
+	command := exec.Command(executable)
+	command.Env = append(gatewayEnvironment(address), "GATEWAY_RATE_LIMIT_MODE=required", "GATEWAY_REDIS_URL="+redisURL)
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForHealth(t, "http://"+address+"/health/ready", command, &output)
+	request, _ := http.NewRequest(http.MethodGet, "http://"+address+"/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer "+raw)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		_ = command.Process.Kill()
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") == "" || !strings.Contains(string(body), "rate_limit_exceeded") {
+		_ = command.Process.Kill()
+		t.Fatalf("response=%d headers=%v body=%s logs=%s", response.StatusCode, response.Header, body, output.String())
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("exit=%v logs=%s", err, output.String())
+	}
+	if strings.Contains(output.String(), raw) {
+		t.Fatal("process logs leaked API key")
+	}
+}
+
 func TestDatabaseConnectionLossMakesReadinessUnavailable(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -147,6 +217,38 @@ func TestDatabaseConnectionLossMakesReadinessUnavailable(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), url) {
 		t.Fatalf("readiness response leaked database URL: %s", response.Body.String())
+	}
+}
+
+func TestGatewayProcessRedisLossKeepsLivenessAndFailsReadiness(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	executable, address := buildGateway(t), availableAddress(t)
+	command := exec.Command(executable)
+	command.Env = append(gatewayEnvironment(address), "GATEWAY_RATE_LIMIT_MODE=required", "GATEWAY_REDIS_URL=redis://127.0.0.1:1/0", "GATEWAY_RATE_LIMIT_TIMEOUT=20ms")
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForHealth(t, "http://"+address+"/health/live", command, &output)
+	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + address + "/health/ready")
+	if err != nil {
+		_ = command.Process.Kill()
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		_ = command.Process.Kill()
+		t.Fatalf("ready=%d logs=%s", response.StatusCode, output.String())
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("exit=%v logs=%s", err, output.String())
 	}
 }
 

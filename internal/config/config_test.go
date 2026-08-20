@@ -49,6 +49,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ReconcileInterval != 5*time.Second || cfg.ReconcileLease != 30*time.Second || cfg.ReconcileBackoff != 5*time.Second || cfg.ReconcileMaxBackoff != time.Hour || cfg.ReconcileBatchSize != 10 || cfg.ReconcileMaxAttempts != 5 {
 		t.Errorf("reconciliation config = %+v", cfg)
 	}
+	if cfg.RateLimitMode != RateLimitDisabled || cfg.RedisURL != "" || cfg.RateLimitTimeout != 100*time.Millisecond {
+		t.Errorf("rate limit config = %+v", cfg)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -74,6 +77,9 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_RECONCILIATION_MAX_BACKOFF":           "30m",
 		"GATEWAY_RECONCILIATION_BATCH_SIZE":            "20",
 		"GATEWAY_RECONCILIATION_MAX_ATTEMPTS":          "7",
+		"GATEWAY_RATE_LIMIT_MODE":                      "required",
+		"GATEWAY_REDIS_URL":                            "rediss://user:secret@redis.example:6380/1",
+		"GATEWAY_RATE_LIMIT_TIMEOUT":                   "250ms",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -108,6 +114,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ReconcileInterval != 2*time.Second || cfg.ReconcileLease != 20*time.Second || cfg.ReconcileBackoff != 3*time.Second || cfg.ReconcileMaxBackoff != 30*time.Minute || cfg.ReconcileBatchSize != 20 || cfg.ReconcileMaxAttempts != 7 {
 		t.Errorf("reconciliation overrides = %+v", cfg)
+	}
+	if cfg.RateLimitMode != RateLimitRequired || cfg.RedisURL != values["GATEWAY_REDIS_URL"] || cfg.RateLimitTimeout != 250*time.Millisecond {
+		t.Errorf("rate limit overrides=%+v", cfg)
 	}
 }
 
@@ -146,6 +155,9 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "invalid reconciliation interval", key: "GATEWAY_RECONCILIATION_INTERVAL", value: "secret-duration", marker: "secret-duration"},
 		{name: "invalid reconciliation batch", key: "GATEWAY_RECONCILIATION_BATCH_SIZE", value: "secret-count", marker: "secret-count"},
 		{name: "invalid reconciliation attempts", key: "GATEWAY_RECONCILIATION_MAX_ATTEMPTS", value: "101", marker: ""},
+		{name: "invalid rate limit mode", key: "GATEWAY_RATE_LIMIT_MODE", value: "secret-mode", marker: "secret-mode"},
+		{name: "invalid Redis URL", key: "GATEWAY_REDIS_URL", value: "http://secret-password", marker: "secret-password"},
+		{name: "invalid rate limit timeout", key: "GATEWAY_RATE_LIMIT_TIMEOUT", value: "secret-timeout", marker: "secret-timeout"},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +178,21 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 				t.Fatalf("error leaked invalid value %q: %v", tt.marker, err)
 			}
 		})
+	}
+}
+
+func TestRateLimitRequiredNeedsRedisURL(t *testing.T) {
+	_, err := Load(func(key string) (string, bool) {
+		switch key {
+		case "GATEWAY_DATABASE_URL":
+			return "postgres://gateway:test@localhost/gateway", true
+		case "GATEWAY_RATE_LIMIT_MODE":
+			return "required", true
+		}
+		return "", false
+	})
+	if err == nil || !strings.Contains(err.Error(), "GATEWAY_REDIS_URL") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

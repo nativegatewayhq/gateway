@@ -12,9 +12,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/providers/google"
 )
 
@@ -38,6 +40,10 @@ type stubExecutor struct {
 	calls    int
 	panic    bool
 }
+
+type geminiPanicReader struct{}
+
+func (geminiPanicReader) Read([]byte) (int, error) { panic("body read before rate limit response") }
 
 func (executor *stubExecutor) GenerateContent(_ context.Context, request google.GenerateContentRequest) (*http.Response, error) {
 	executor.calls++
@@ -101,6 +107,33 @@ func TestGenerateContentNativeSuccessPassThrough(t *testing.T) {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("logs leaked %q: %s", secret, logs.String())
 		}
+	}
+}
+
+func TestGenerateContentMapsRateLimitBeforeBodyAndProvider(t *testing.T) {
+	reset := time.Unix(2_000_000_000, 0)
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		marker string
+	}{
+		{"limited", &ratelimit.LimitError{Decision: ratelimit.Decision{Limit: 30, RetryAfter: time.Second, ResetAt: reset}}, 429, "RESOURCE_EXHAUSTED"},
+		{"unavailable", ratelimit.ErrUnavailable, 503, "UNAVAILABLE"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &stubExecutor{}
+			handler := NewHandler(testLogger(io.Discard), &stubAuthenticator{err: test.err}, executor, 1024)
+			request := geminiRequest(geminiPanicReader{})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.status || !strings.Contains(response.Body.String(), test.marker) || executor.calls != 0 {
+				t.Fatalf("response=%d %s calls=%d", response.Code, response.Body.String(), executor.calls)
+			}
+			if test.status == 429 && (response.Header().Get("Retry-After") != "1" || response.Header().Get("X-RateLimit-Limit") != "30") {
+				t.Fatalf("headers=%v", response.Header())
+			}
+		})
 	}
 }
 

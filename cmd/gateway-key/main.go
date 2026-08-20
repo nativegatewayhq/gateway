@@ -23,6 +23,8 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 	name := flags.String("name", "", "non-secret key name")
 	expires := flags.String("expires-at", "", "optional RFC3339 expiration")
 	projectID := flags.String("project-id", "project_legacy", "owning active project ID")
+	rpm := flags.Int64("requests-per-minute", 0, "optional per-key requests per minute")
+	burst := flags.Int64("burst", 0, "optional token bucket burst")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -40,7 +42,7 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 		}
 		expiresAt = &parsed
 	}
-	record, raw, err := apikey.GenerateForProject(entropy, *name, *projectID, expiresAt)
+	record, raw, err := apikey.GenerateForProjectWithPolicy(entropy, *name, *projectID, expiresAt, apikey.RateLimitPolicy{RequestsPerMinute: *rpm, Burst: *burst})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
@@ -60,6 +62,11 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 	if err := apikey.NewPostgresStore(pool).Create(ctx, record); err != nil {
 		_, _ = fmt.Fprintln(stderr, "API key creation failed")
 		return 1
+	}
+	if record.RateLimit.Enabled() {
+		_, _ = fmt.Fprintf(stderr, "rate limit: %d requests/minute, burst %d\n", record.RateLimit.RequestsPerMinute, record.RateLimit.Burst)
+	} else {
+		_, _ = fmt.Fprintln(stderr, "rate limit: unlimited")
 	}
 	_, _ = fmt.Fprintln(stdout, raw)
 	return 0

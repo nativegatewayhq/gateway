@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -26,16 +27,20 @@ const (
 	defaultReconcileLease      = 30 * time.Second
 	defaultReconcileBackoff    = 5 * time.Second
 	defaultReconcileMaxBackoff = time.Hour
+	defaultRateLimitTimeout    = 100 * time.Millisecond
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
 type LookupEnv func(string) (string, bool)
 
 type BillingMode string
+type RateLimitMode string
 
 const (
-	BillingDisabled BillingMode = "disabled"
-	BillingRequired BillingMode = "required"
+	BillingDisabled   BillingMode   = "disabled"
+	BillingRequired   BillingMode   = "required"
+	RateLimitDisabled RateLimitMode = "disabled"
+	RateLimitRequired RateLimitMode = "required"
 )
 
 // Config contains non-provider process settings. Provider credentials remain
@@ -60,6 +65,9 @@ type Config struct {
 	ReconcileMaxBackoff  time.Duration
 	ReconcileBatchSize   int
 	ReconcileMaxAttempts int
+	RateLimitMode        RateLimitMode
+	RedisURL             string
+	RateLimitTimeout     time.Duration
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -83,6 +91,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		ReconcileMaxBackoff:  defaultReconcileMaxBackoff,
 		ReconcileBatchSize:   10,
 		ReconcileMaxAttempts: 5,
+		RateLimitMode:        RateLimitDisabled,
+		RateLimitTimeout:     defaultRateLimitTimeout,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -174,12 +184,41 @@ func Load(lookup LookupEnv) (Config, error) {
 	if err := loadReconciliation(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
+	if value, ok := lookup("GATEWAY_RATE_LIMIT_MODE"); ok {
+		switch RateLimitMode(strings.ToLower(strings.TrimSpace(value))) {
+		case RateLimitDisabled:
+			cfg.RateLimitMode = RateLimitDisabled
+		case RateLimitRequired:
+			cfg.RateLimitMode = RateLimitRequired
+		default:
+			return Config{}, fmt.Errorf("GATEWAY_RATE_LIMIT_MODE: must be disabled or required")
+		}
+	}
+	if value, ok := lookup("GATEWAY_REDIS_URL"); ok {
+		cfg.RedisURL = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("GATEWAY_RATE_LIMIT_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > time.Second {
+			return Config{}, fmt.Errorf("GATEWAY_RATE_LIMIT_TIMEOUT: must be a positive duration no greater than 1s")
+		}
+		cfg.RateLimitTimeout = duration
+	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {
 		return Config{}, fmt.Errorf("GATEWAY_HTTP_ADDR: %w", err)
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("GATEWAY_DATABASE_URL: must not be empty")
+	}
+	if cfg.RateLimitMode == RateLimitRequired && cfg.RedisURL == "" {
+		return Config{}, fmt.Errorf("GATEWAY_REDIS_URL: must not be empty when rate limiting is required")
+	}
+	if cfg.RedisURL != "" {
+		parsed, err := url.Parse(cfg.RedisURL)
+		if err != nil || (parsed.Scheme != "redis" && parsed.Scheme != "rediss") || parsed.Host == "" {
+			return Config{}, fmt.Errorf("GATEWAY_REDIS_URL: must be a valid redis or rediss URL")
+		}
 	}
 
 	return cfg, nil

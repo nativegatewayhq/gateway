@@ -20,11 +20,12 @@ The first accepted implementation plan is [Phase 0 Gateway Bootstrap](./plans/20
 ## Requirements
 
 - Go 1.25 or newer supported release
+- PostgreSQL 17; Redis 8 when distributed rate limiting is enabled
 
 ## Run locally
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres redis
 export GATEWAY_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway?sslmode=disable'
 go run ./cmd/gateway
 ```
@@ -70,8 +71,32 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_RECONCILIATION_MAX_BACKOFF` | `1h` | Retry backoff ceiling; maximum 24 hours |
 | `GATEWAY_RECONCILIATION_BATCH_SIZE` | `10` | Tasks claimed per cycle; range 1–100 |
 | `GATEWAY_RECONCILIATION_MAX_ATTEMPTS` | `5` | Attempts before manual review; range 1–100 |
+| `GATEWAY_RATE_LIMIT_MODE` | `disabled` | `disabled` ignores stored policies; `required` enforces them and fails closed when Redis is unavailable |
+| `GATEWAY_REDIS_URL` | unset | Secret Redis URL required by rate-limit `required` mode |
+| `GATEWAY_RATE_LIMIT_TIMEOUT` | `100ms` | Redis command timeout; maximum 1 second |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
+
+## API Key rate limiting
+
+Create an opt-in limited Key with the provisioning CLI:
+
+```bash
+go run ./cmd/gateway-key \
+  -name development \
+  -project-id project_legacy \
+  -requests-per-minute 60 \
+  -burst 10
+```
+
+Both policy values must be omitted for an unlimited Key or supplied together with `1 <= burst <= requests-per-minute <= 1000000`. Enable distributed enforcement with:
+
+```bash
+export GATEWAY_RATE_LIMIT_MODE=required
+export GATEWAY_REDIS_URL='redis://127.0.0.1:56379/0'
+```
+
+The token bucket is keyed only by the non-secret API Key ID and is shared across Gateway instances. Authentication failures do not consume a token. Authenticated generation, edit, Gemini, model-list and idempotent replay requests each consume one token before body parsing, price lookup, Wallet reservation or Provider dispatch. Rejected requests return native `429` errors plus `Retry-After` and `X-RateLimit-*` headers and never trigger routing fallback. Redis timeout or failure in required mode returns native `503`; `/health/live` stays live while `/health/ready` reports unavailable.
 
 ## Provider credentials
 
@@ -251,6 +276,7 @@ Run PostgreSQL integration and process tests with:
 
 ```bash
 export TEST_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway?sslmode=disable'
+export TEST_REDIS_URL='redis://127.0.0.1:56379/0'
 make integration-test
 ```
 

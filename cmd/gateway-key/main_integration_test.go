@@ -20,7 +20,7 @@ func TestRunStoresOnlyDigestAndPrintsKeyOnce(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	entropy := bytes.NewReader(bytes.Repeat([]byte{3}, 48))
-	code := run([]string{"-name", "cli integration"}, &stdout, &stderr, func(key string) string {
+	code := run([]string{"-name", "cli integration", "-requests-per-minute", "120", "-burst", "10"}, &stdout, &stderr, func(key string) string {
 		if key == "GATEWAY_DATABASE_URL" {
 			return url
 		}
@@ -33,6 +33,9 @@ func TestRunStoresOnlyDigestAndPrintsKeyOnce(t *testing.T) {
 	if raw == "" || strings.Count(stdout.String(), raw) != 1 || strings.Contains(stderr.String(), raw) {
 		t.Fatalf("unsafe output stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "120 requests/minute, burst 10") {
+		t.Fatalf("policy summary=%q", stderr.String())
+	}
 	digest := sha256.Sum256([]byte(raw))
 	ctx := context.Background()
 	pool, err := database.Open(ctx, url)
@@ -42,7 +45,7 @@ func TestRunStoresOnlyDigestAndPrintsKeyOnce(t *testing.T) {
 	defer pool.Close()
 	defer pool.Exec(ctx, `DELETE FROM service_api_keys WHERE key_digest=$1`, digest[:])
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM service_api_keys WHERE key_digest=$1 AND name='cli integration' AND project_id='project_legacy'`, digest[:]).Scan(&count); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM service_api_keys WHERE key_digest=$1 AND name='cli integration' AND project_id='project_legacy' AND requests_per_minute=120 AND burst=10`, digest[:]).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {

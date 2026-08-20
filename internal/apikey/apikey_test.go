@@ -47,6 +47,18 @@ func TestGenerateAndAuthenticate(t *testing.T) {
 	}
 }
 
+func TestGenerateForProjectWithRateLimitPolicy(t *testing.T) {
+	record, _, err := GenerateForProjectWithPolicy(bytes.NewReader(make([]byte, 64)), "limited", "project_test", nil, RateLimitPolicy{RequestsPerMinute: 60, Burst: 10})
+	if err != nil || record.RateLimit.RequestsPerMinute != 60 || record.RateLimit.Burst != 10 {
+		t.Fatalf("record=%+v error=%v", record, err)
+	}
+	for _, policy := range []RateLimitPolicy{{RequestsPerMinute: 60}, {Burst: 1}, {RequestsPerMinute: 10, Burst: 11}, {RequestsPerMinute: 1_000_001, Burst: 1}} {
+		if _, _, err := GenerateForProjectWithPolicy(bytes.NewReader(make([]byte, 64)), "invalid", "project_test", nil, policy); err == nil {
+			t.Fatalf("accepted policy=%+v", policy)
+		}
+	}
+}
+
 func TestGenerateRejectsInvalidNameAndEntropyFailure(t *testing.T) {
 	if _, _, err := Generate(bytes.NewReader(nil), "", nil); err == nil {
 		t.Fatal("empty name accepted")

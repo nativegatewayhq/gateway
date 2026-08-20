@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
@@ -25,6 +27,10 @@ func (function authFunc) Authenticate(ctx context.Context, key string) (apikey.P
 }
 
 type executorFunc func(context.Context, openaiimages.Request) (*http.Response, error)
+
+type panicReader struct{}
+
+func (panicReader) Read([]byte) (int, error) { panic("body read before rate limit response") }
 
 func (function executorFunc) Generate(ctx context.Context, request openaiimages.Request) (*http.Response, error) {
 	return function(ctx, request)
@@ -132,6 +138,50 @@ func TestImagesHandlerRejectsMissingAndAmbiguousCredentials(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != 400 || calls != 0 {
 		t.Fatalf("ambiguous credential status/calls = %d/%d", response.Code, calls)
+	}
+}
+
+func TestImagesHandlerMapsRateLimitBeforeBodyAndProvider(t *testing.T) {
+	reset := time.Unix(2_000_000_000, 0)
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"limited", &ratelimit.LimitError{Decision: ratelimit.Decision{Limit: 60, Remaining: 0, RetryAfter: 1500 * time.Millisecond, ResetAt: reset}}, 429, "rate_limit_exceeded"},
+		{"unavailable", ratelimit.ErrUnavailable, 503, "rate_limit_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			providerCalls := 0
+			handler := NewImagesHandler(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, test.err }), testRegistry(t), map[providercredentials.ProviderID]Executor{
+				providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+			}, 1024)
+			request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", panicReader{})
+			request.Header.Set("Authorization", "Bearer service-secret")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.status || !strings.Contains(response.Body.String(), test.code) || providerCalls != 0 {
+				t.Fatalf("response=%d %s calls=%d", response.Code, response.Body.String(), providerCalls)
+			}
+			if test.status == 429 && (response.Header().Get("Retry-After") != "2" || response.Header().Get("X-RateLimit-Limit") != "60" || response.Header().Get("X-RateLimit-Remaining") != "0" || response.Header().Get("X-RateLimit-Reset") != "2000000000") {
+				t.Fatalf("headers=%v", response.Header())
+			}
+		})
+	}
+}
+
+func TestImagesHandlerReturnsAllowedRateLimitHeaders(t *testing.T) {
+	principal := apikey.Principal{RateLimitState: &apikey.RateLimitState{Limit: 60, Remaining: 4, ResetAt: time.Unix(2_000_000_000, 0)}}
+	handler := NewImagesHandler(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}),
+	}, 1024)
+	response := requestImages(handler, http.MethodPost, `{"model":"gpt-image-1"}`, "Authorization", "Bearer service-secret")
+	if response.Code != 200 || response.Header().Get("X-RateLimit-Limit") != "60" || response.Header().Get("X-RateLimit-Remaining") != "4" {
+		t.Fatalf("response=%d headers=%v", response.Code, response.Header())
 	}
 }
 
