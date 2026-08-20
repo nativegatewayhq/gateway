@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-040
 title: Phase 4 OpenAI Responses Token Usage Billing and Settlement
-status: accepted
+status: completed
 created_at: 2026-08-21T08:00:00+09:00
-updated_at: 2026-08-21T12:10:00+09:00
+updated_at: 2026-08-21T12:30:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-token-settlement
@@ -187,6 +187,7 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponses
   - OpenAI Python 및 JavaScript Responses SDK 통과
 - 전체 병렬 `make integration-test`에서는 기존 migration 031의 schema-isolation race가 일부 패키지에서 재현됐으나, Plan 040 대상 패키지는 통과했고 새 전용 DB 순차 검증으로 migration 및 기능 결과를 확정했다.
 - Dashboard, Cloud와 Conformance에는 Responses managed billing 설정·가격 operation·usage evidence 계약을 이 문서의 `affected_repos` handoff로 남겼다.
+- PR [#48](https://github.com/nativegatewayhq/gateway/pull/48), squash merge `9d8a5445f35bc4f2a38d356b838b743cc525fb9c`, GitHub `check`와 `validate` 통과
 
 ## Rollback 계획
 
