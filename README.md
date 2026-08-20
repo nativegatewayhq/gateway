@@ -181,6 +181,8 @@ With `GATEWAY_DATABASE_URL` set, create a development key:
 go run ./cmd/gateway-key -name local-development
 ```
 
+Every service key belongs to a project. Self-hosted migrations create `org_legacy` and `project_legacy`, and the CLI uses that development project by default. Select another active project with `-project-id project_example`. Disabling a key, its project, or its organization immediately prevents authentication.
+
 The plaintext `ngw_sk_...` value is printed exactly once. Store it securely: PostgreSQL contains only its SHA-256 digest and a non-secret display prefix, so the plaintext cannot be recovered. An optional expiration can be supplied with `-expires-at 2026-09-01T00:00:00Z`.
 
 Protected native routes will accept exactly one of `Authorization: Bearer`, `x-api-key`, `x-goog-api-key`, or the Gemini-compatible `key` query parameter. Supplying credentials in multiple locations is rejected. Health endpoints remain unauthenticated.
