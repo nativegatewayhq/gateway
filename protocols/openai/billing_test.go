@@ -47,6 +47,8 @@ type billingFake struct {
 	quoteRequests []chargebilling.BeginRequest
 	beginSequence []error
 	beginCalls    int
+	completeOK    bool
+	snapshot      chargebilling.ResponseSnapshot
 }
 
 func weightedEntropy(values ...uint64) imageoperation.WeightedSampler {
@@ -104,6 +106,8 @@ func (fake *billingFake) MarkReconciling(_ context.Context, _ string, observatio
 	return nil
 }
 func (fake *billingFake) Complete(_ context.Context, _ string, success bool, snapshot chargebilling.ResponseSnapshot) (chargebilling.Charge, error) {
+	fake.completeOK = success
+	fake.snapshot = snapshot
 	if success {
 		fake.events = append(fake.events, "capture")
 		return chargebilling.Charge{Response: snapshot}, fake.captureErr

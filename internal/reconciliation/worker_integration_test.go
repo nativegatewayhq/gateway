@@ -16,11 +16,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/database"
+	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 )
 
 const reconciliationChannel = "channel_00000000000000000000000000000001"
+
+type reconciliationResults struct {
+	input imagestorage.TransformInput
+}
+
+func (results *reconciliationResults) Transform(_ context.Context, input imagestorage.TransformInput) ([]byte, error) {
+	results.input = input
+	return []byte(`{"data":[{"url":"https://cdn.example/image.png"}]}`), nil
+}
 
 func reconciliationFixture(t *testing.T) (*billing.Service, *pgxpool.Pool) {
 	t.Helper()
@@ -87,6 +97,38 @@ func TestKnownOutcomesResolveAndReplay(t *testing.T) {
 	replayed, err := service.Begin(ctx, retry)
 	if err != nil || !replayed.Replay || string(replayed.Response.Body) != string(successSnapshot.Body) {
 		t.Fatalf("replay=%+v error=%v", replayed, err)
+	}
+}
+
+func TestStorageFailureIsTransformedBeforeCapture(t *testing.T) {
+	service, pool := reconciliationFixture(t)
+	ctx := context.Background()
+	request := reconciliationRequest("storage-recovery")
+	request.IdempotencyKey = "storage-recovery-key"
+	request.RequestFingerprint = [32]byte{9}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerSnapshot := billing.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"data":[{"b64_json":"provider"}]}`)}
+	if err := service.MarkReconciling(ctx, charge.ID, billing.Observation{Outcome: billing.KnownSuccess, Reason: billing.StorageFailed, Snapshot: providerSnapshot}); err != nil {
+		t.Fatal(err)
+	}
+	results := &reconciliationResults{}
+	worker := testWorker(t, pool, service, time.Now)
+	worker.results = results
+	run, err := worker.RunOnce(ctx)
+	if err != nil || run.Resolved != 1 {
+		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	replayRequest := request
+	replayRequest.RequestID = "storage-recovery-retry"
+	replayed, err := service.Begin(ctx, replayRequest)
+	if err != nil || !replayed.Replay || string(replayed.Response.Body) != `{"data":[{"url":"https://cdn.example/image.png"}]}` {
+		t.Fatalf("replay=%+v err=%v", replayed, err)
+	}
+	if results.input.ChargeID != charge.ID || results.input.RequestID != "storage-recovery" || results.input.Provider != "openai" || results.input.ChannelID != reconciliationChannel {
+		t.Fatalf("input=%+v", results.input)
 	}
 }
 

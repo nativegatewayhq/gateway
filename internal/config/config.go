@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/clientip"
+	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 )
 
@@ -77,6 +78,7 @@ type Config struct {
 	RateLimitTimeout     time.Duration
 	ProviderHealthMode   ProviderHealthMode
 	ProviderHealth       providerhealth.Config
+	ImageStorage         imagestorage.Config
 	TrustedProxyPrefixes []netip.Prefix
 }
 
@@ -105,6 +107,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		RateLimitTimeout:     defaultRateLimitTimeout,
 		ProviderHealthMode:   ProviderHealthDisabled,
 		ProviderHealth:       providerhealth.DefaultConfig(),
+		ImageStorage:         imagestorage.DefaultConfig(),
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -219,6 +222,9 @@ func Load(lookup LookupEnv) (Config, error) {
 	if err := loadProviderHealth(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
+	if err := loadImageStorage(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
 	if value, ok := lookup("GATEWAY_TRUSTED_PROXY_CIDRS"); ok {
 		parts := strings.Split(value, ",")
 		if len(parts) > 128 {
@@ -257,8 +263,89 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_REDIS_URL: must be a valid redis or rediss URL")
 		}
 	}
+	if cfg.ImageStorage.Mode == imagestorage.Managed && cfg.BillingMode == BillingRequired && cfg.ReplayBodyBytes < cfg.ImageStorage.MaximumTotalBytes*4/3+1<<20 {
+		return Config{}, fmt.Errorf("GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES: must cover the managed image response limit")
+	}
 
 	return cfg, nil
+}
+
+func loadImageStorage(cfg *Config, lookup LookupEnv) error {
+	cfg.ImageStorage.FetchOrigins = map[string][]string{}
+	stringsSettings := []struct {
+		key    string
+		target *string
+	}{
+		{"GATEWAY_IMAGE_STORAGE_ENDPOINT", &cfg.ImageStorage.Endpoint},
+		{"GATEWAY_IMAGE_STORAGE_REGION", &cfg.ImageStorage.Region},
+		{"GATEWAY_IMAGE_STORAGE_BUCKET", &cfg.ImageStorage.Bucket},
+		{"GATEWAY_IMAGE_STORAGE_ACCESS_KEY_ID", &cfg.ImageStorage.AccessKeyID},
+		{"GATEWAY_IMAGE_STORAGE_SECRET_ACCESS_KEY", &cfg.ImageStorage.SecretAccessKey},
+		{"GATEWAY_IMAGE_STORAGE_CDN_BASE_URL", &cfg.ImageStorage.CDNBaseURL},
+		{"GATEWAY_IMAGE_STORAGE_TEMP_DIR", &cfg.ImageStorage.TemporaryDirectory},
+	}
+	if value, ok := lookup("GATEWAY_IMAGE_STORAGE_MODE"); ok {
+		cfg.ImageStorage.Mode = imagestorage.Mode(strings.ToLower(strings.TrimSpace(value)))
+	}
+	for _, setting := range stringsSettings {
+		if value, ok := lookup(setting.key); ok {
+			*setting.target = strings.TrimSpace(value)
+		}
+	}
+	integerSettings := []struct {
+		key    string
+		target *int64
+	}{
+		{"GATEWAY_IMAGE_STORAGE_MAX_IMAGE_BYTES", &cfg.ImageStorage.MaximumImageBytes},
+		{"GATEWAY_IMAGE_STORAGE_MAX_TOTAL_BYTES", &cfg.ImageStorage.MaximumTotalBytes},
+	}
+	for _, setting := range integerSettings {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded integer", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	if value, ok := lookup("GATEWAY_IMAGE_STORAGE_MAX_IMAGES"); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("GATEWAY_IMAGE_STORAGE_MAX_IMAGES: must be a valid bounded integer")
+		}
+		cfg.ImageStorage.MaximumImages = parsed
+	}
+	durations := []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"GATEWAY_IMAGE_STORAGE_FETCH_TIMEOUT", &cfg.ImageStorage.FetchTimeout},
+		{"GATEWAY_IMAGE_STORAGE_UPLOAD_TIMEOUT", &cfg.ImageStorage.UploadTimeout},
+	}
+	for _, setting := range durations {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded duration", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	for _, provider := range []string{"openai", "xai", "google"} {
+		key := "GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_" + strings.ToUpper(provider)
+		if value, ok := lookup(key); ok {
+			parts := strings.Split(value, ",")
+			origins := make([]string, 0, len(parts))
+			for _, part := range parts {
+				origins = append(origins, strings.TrimSpace(part))
+			}
+			cfg.ImageStorage.FetchOrigins[provider] = origins
+		}
+	}
+	if err := cfg.ImageStorage.Validate(); err != nil {
+		return fmt.Errorf("GATEWAY_IMAGE_STORAGE_*: settings are invalid")
+	}
+	return nil
 }
 
 func loadProviderHealth(cfg *Config, lookup LookupEnv) error {

@@ -55,6 +55,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ProviderHealthMode != ProviderHealthDisabled || !cfg.ProviderHealth.Valid() || cfg.ProviderHealth.Window != time.Minute || cfg.ProviderHealth.FailureThresholdBPS != 5_000 {
 		t.Errorf("provider health config = %+v", cfg)
 	}
+	if cfg.ImageStorage.Mode != "provider" || cfg.ImageStorage.MaximumImages != 10 || cfg.ImageStorage.MaximumImageBytes != 32<<20 {
+		t.Errorf("image storage config = %+v", cfg.ImageStorage)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -73,7 +76,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS":      "4",
 		"GATEWAY_BILLING_MODE":                          "required",
 		"GATEWAY_MINIMUM_MARGIN_BPS":                    "1250",
-		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":        "16777216",
+		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":        "134217728",
 		"GATEWAY_RECONCILIATION_INTERVAL":               "2s",
 		"GATEWAY_RECONCILIATION_LEASE":                  "20s",
 		"GATEWAY_RECONCILIATION_BASE_BACKOFF":           "3s",
@@ -93,6 +96,19 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_PROVIDER_HEALTH_PROBE_LEASE":           "5s",
 		"GATEWAY_PROVIDER_HEALTH_COMMAND_TIMEOUT":       "300ms",
 		"GATEWAY_PROVIDER_HEALTH_KEY_PREFIX":            "gateway:test:health",
+		"GATEWAY_IMAGE_STORAGE_MODE":                    "managed",
+		"GATEWAY_IMAGE_STORAGE_ENDPOINT":                "https://account.r2.cloudflarestorage.com",
+		"GATEWAY_IMAGE_STORAGE_REGION":                  "auto",
+		"GATEWAY_IMAGE_STORAGE_BUCKET":                  "gateway-images",
+		"GATEWAY_IMAGE_STORAGE_ACCESS_KEY_ID":           "storage-access",
+		"GATEWAY_IMAGE_STORAGE_SECRET_ACCESS_KEY":       "storage-secret",
+		"GATEWAY_IMAGE_STORAGE_CDN_BASE_URL":            "https://images.example.com",
+		"GATEWAY_IMAGE_STORAGE_MAX_IMAGES":              "8",
+		"GATEWAY_IMAGE_STORAGE_MAX_IMAGE_BYTES":         "16777216",
+		"GATEWAY_IMAGE_STORAGE_MAX_TOTAL_BYTES":         "67108864",
+		"GATEWAY_IMAGE_STORAGE_FETCH_TIMEOUT":           "20s",
+		"GATEWAY_IMAGE_STORAGE_UPLOAD_TIMEOUT":          "45s",
+		"GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_OPENAI":    "https://images.openai.com,https://cdn.openai.com",
 		"GATEWAY_TRUSTED_PROXY_CIDRS":                   "10.0.0.8/8, 2001:db8::1/32",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
@@ -123,7 +139,7 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.BillingMode != BillingRequired || cfg.MinimumMarginBPS != 1250 {
 		t.Errorf("Billing config = %q, %d", cfg.BillingMode, cfg.MinimumMarginBPS)
 	}
-	if cfg.ReplayBodyBytes != 16777216 {
+	if cfg.ReplayBodyBytes != 134217728 {
 		t.Errorf("ReplayBodyBytes = %d", cfg.ReplayBodyBytes)
 	}
 	if cfg.ReconcileInterval != 2*time.Second || cfg.ReconcileLease != 20*time.Second || cfg.ReconcileBackoff != 3*time.Second || cfg.ReconcileMaxBackoff != 30*time.Minute || cfg.ReconcileBatchSize != 20 || cfg.ReconcileMaxAttempts != 7 {
@@ -134,6 +150,12 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ProviderHealthMode != ProviderHealthRequired || cfg.ProviderHealth.Window != 2*time.Minute || cfg.ProviderHealth.Bucket != 5*time.Second || cfg.ProviderHealth.MinimumSamples != 20 || cfg.ProviderHealth.FailureThresholdBPS != 6_000 || cfg.ProviderHealth.OpenDuration != 20*time.Second || cfg.ProviderHealth.MaximumOpenDuration != 2*time.Minute || cfg.ProviderHealth.ProbeLease != 5*time.Second || cfg.ProviderHealth.CommandTimeout != 300*time.Millisecond || cfg.ProviderHealth.KeyPrefix != "gateway:test:health" {
 		t.Errorf("provider health overrides=%+v", cfg.ProviderHealth)
+	}
+	if cfg.ImageStorage.Mode != "managed" || cfg.ImageStorage.Bucket != "gateway-images" || cfg.ImageStorage.MaximumImages != 8 || cfg.ImageStorage.MaximumImageBytes != 16777216 || cfg.ImageStorage.FetchTimeout != 20*time.Second || cfg.ImageStorage.UploadTimeout != 45*time.Second {
+		t.Errorf("image storage overrides=%+v", cfg.ImageStorage)
+	}
+	if len(cfg.ImageStorage.FetchOrigins["openai"]) != 2 {
+		t.Errorf("fetch origins=%v", cfg.ImageStorage.FetchOrigins)
 	}
 	if len(cfg.TrustedProxyPrefixes) != 2 || cfg.TrustedProxyPrefixes[0].String() != "10.0.0.0/8" || cfg.TrustedProxyPrefixes[1].String() != "2001:db8::/32" {
 		t.Errorf("trusted proxies=%v", cfg.TrustedProxyPrefixes)
@@ -152,6 +174,27 @@ func TestLoadRejectsInvalidTrustedProxyWithoutEcho(t *testing.T) {
 		return "", false
 	})
 	if err == nil || strings.Contains(err.Error(), value) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestLoadRejectsInvalidManagedStorageWithoutEchoingSecrets(t *testing.T) {
+	secret := "storage-secret-marker"
+	_, err := Load(func(key string) (string, bool) {
+		values := map[string]string{
+			"GATEWAY_DATABASE_URL":                    "postgres://gateway:test@localhost/gateway",
+			"GATEWAY_IMAGE_STORAGE_MODE":              "managed",
+			"GATEWAY_IMAGE_STORAGE_ENDPOINT":          "http://public.example.com",
+			"GATEWAY_IMAGE_STORAGE_REGION":            "auto",
+			"GATEWAY_IMAGE_STORAGE_BUCKET":            "gateway-images",
+			"GATEWAY_IMAGE_STORAGE_ACCESS_KEY_ID":     "access",
+			"GATEWAY_IMAGE_STORAGE_SECRET_ACCESS_KEY": secret,
+			"GATEWAY_IMAGE_STORAGE_CDN_BASE_URL":      "https://images.example.com",
+		}
+		value, ok := values[key]
+		return value, ok
+	})
+	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("error=%v", err)
 	}
 }

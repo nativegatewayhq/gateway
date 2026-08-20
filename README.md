@@ -87,6 +87,22 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_PROVIDER_HEALTH_PROBE_LEASE` | `10s` | Distributed half-open single-probe lease; no longer than the initial open duration |
 | `GATEWAY_PROVIDER_HEALTH_COMMAND_TIMEOUT` | `100ms` | Health Redis command timeout; maximum 1 second |
 | `GATEWAY_PROVIDER_HEALTH_KEY_PREFIX` | `gateway:provider-health:v1` | Non-secret Redis key namespace using channel hash tags |
+| `GATEWAY_IMAGE_STORAGE_MODE` | `provider` | `provider` preserves native Provider results; `managed` persists generated images and returns CDN URLs |
+| `GATEWAY_IMAGE_STORAGE_ENDPOINT` | unset | S3-compatible HTTPS endpoint; loopback HTTP is accepted only for local testing |
+| `GATEWAY_IMAGE_STORAGE_REGION` | unset | S3 signing region; use `auto` for R2 |
+| `GATEWAY_IMAGE_STORAGE_BUCKET` | unset | Private internal object bucket name |
+| `GATEWAY_IMAGE_STORAGE_ACCESS_KEY_ID` | unset | Secret-manager supplied least-privilege S3/R2 access key ID |
+| `GATEWAY_IMAGE_STORAGE_SECRET_ACCESS_KEY` | unset | Secret-manager supplied S3/R2 secret access key; never logged |
+| `GATEWAY_IMAGE_STORAGE_CDN_BASE_URL` | unset | Public HTTPS CDN origin used to construct result URLs |
+| `GATEWAY_IMAGE_STORAGE_MAX_IMAGES` | `10` | Maximum managed images in one Provider response; maximum 100 |
+| `GATEWAY_IMAGE_STORAGE_MAX_IMAGE_BYTES` | `33554432` | Maximum decoded bytes per image; maximum 256 MiB |
+| `GATEWAY_IMAGE_STORAGE_MAX_TOTAL_BYTES` | `67108864` | Maximum decoded bytes across one response; maximum 512 MiB |
+| `GATEWAY_IMAGE_STORAGE_FETCH_TIMEOUT` | `30s` | Provider asset download timeout; maximum 5 minutes |
+| `GATEWAY_IMAGE_STORAGE_UPLOAD_TIMEOUT` | `1m` | Object upload/readiness timeout; maximum 10 minutes |
+| `GATEWAY_IMAGE_STORAGE_TEMP_DIR` | system temp | Directory for bounded mode-0600 image spools |
+| `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_OPENAI` | unset | Exact comma-separated HTTPS origins allowed for OpenAI result URL collection |
+| `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_XAI` | unset | Exact comma-separated HTTPS origins allowed for xAI result URL collection |
+| `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_GOOGLE` | unset | Exact comma-separated HTTPS origins allowed for Google result URL collection |
 | `GATEWAY_TRUSTED_PROXY_CIDRS` | unset | Comma-separated reverse-proxy CIDRs allowed to supply `Forwarded` or `X-Forwarded-For` |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
@@ -329,7 +345,15 @@ const response = await client.images.generate({
 });
 ```
 
-The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, post-dispatch retries, and storage remain excluded; billing is opt-in through the required mode described below.
+In the default `provider` storage mode, the Gateway preserves native success/error response bytes, including URL, `b64_json`, usage, and Provider extension fields. Provider credentials are applied only to their fixed origins. Redirects and post-dispatch Provider retries remain excluded; billing is opt-in through the required mode described below.
+
+## Managed image storage
+
+`GATEWAY_IMAGE_STORAGE_MODE=managed` copies OpenAI/xAI URL or Base64 image results and Gemini inline image parts to an S3-compatible bucket, then stores and returns a native response containing the configured CDN URL. Unknown response fields, result order, text parts and revised prompts are preserved. The final managed response—not the temporary Provider response—is captured for idempotent replay, so replay performs no Provider fetch or object upload.
+
+Provider URL collection is opt-in per Provider through exact HTTPS origin lists. The collector rejects URL credentials, IP literals, redirects, DNS answers containing private, loopback, link-local, multicast or reserved addresses, oversized bodies, and mismatched image MIME/magic bytes. Inbound authorization, cookies and tracing headers are never forwarded. Images are streamed through bounded mode-`0600` temporary files and uploaded under deterministic content-addressed keys; prompts, customer IDs and original URLs are not object metadata.
+
+Managed mode adds object-store readiness to `/health/ready` while `/health/live` remains process-only. A Provider success followed by storage uncertainty is not refunded: the original bounded Provider response enters durable reconciliation, a leased worker retries the idempotent upload, and Capture stores the managed response only after persistence succeeds. Repeated failures remain reserved and eventually require manual review. Set the mode back to `provider` to bypass storage without deleting existing objects or asset history. Cloud deployments must configure bucket lifecycle, a CDN domain, least-privilege credentials and `GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES` large enough for the configured decoded response limit.
 
 ## Image editing
 
