@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-010
 title: Phase 1 Provider Pricing and Request Cost Estimates
-status: in_progress
+status: completed
 created_at: 2026-08-20T14:56:26+09:00
-updated_at: 2026-08-20T14:56:26+09:00
+updated_at: 2026-08-20T15:07:29+09:00
 owners:
   - gateway
 initiative: phase-1-provider-pricing
@@ -187,23 +187,31 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] Provider channel과 append-only versioned 가격 schema가 존재함
-- [ ] 현재 시점의 active exact price만 결정적으로 선택됨
-- [ ] 원가·판매가·합계가 정수 USD_TICKS로만 계산됨
-- [ ] 수량 계산과 margin 비교에서 overflow가 차단됨
-- [ ] 최소 마진 미달 가격이 견적되지 않음
-- [ ] 동일 publication retry가 중복 가격을 만들지 않음
-- [ ] 유효 구간 중복과 publication 충돌이 거부됨
-- [ ] OpenAI/xAI 이미지 요청 가격 차원이 안전하게 추출됨
-- [ ] Estimate가 price/channel ID와 평가 시각을 보존함
-- [ ] 가격 row UPDATE/DELETE가 DB에서 거부됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Cloud 게시 계약이 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] Provider channel과 append-only versioned 가격 schema가 존재함
+- [x] 현재 시점의 active exact price만 결정적으로 선택됨
+- [x] 원가·판매가·합계가 정수 USD_TICKS로만 계산됨
+- [x] 수량 계산과 margin 비교에서 overflow가 차단됨
+- [x] 최소 마진 미달 가격이 견적되지 않음
+- [x] 동일 publication retry가 중복 가격을 만들지 않음
+- [x] 유효 구간 중복과 publication 충돌이 거부됨
+- [x] OpenAI/xAI 이미지 요청 가격 차원이 안전하게 추출됨
+- [x] Estimate가 price/channel ID와 평가 시각을 보존함
+- [x] 가격 row UPDATE/DELETE가 DB에서 거부됨
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Cloud 게시 계약이 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 계획 commit: `4a674cb771ec49053126f93b002f95911a9bbe6a`
+- 구현 commit: `72500f236071f9ccb7c6665341d951e527718e80`
+- Pull Request: `https://github.com/nativegatewayhq/gateway/pull/10`
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- `GOCACHE=/private/tmp/gateway-go-cache TEST_DATABASE_URL=postgres://gateway:***@127.0.0.1:55433/gateway?sslmode=disable make integration-test` 통과
+- PostgreSQL integration에서 현재·미래·만료·연속 가격, exact selector, margin, channel 상태, overflow, overlap exclusion, append-only trigger와 concurrent publication 검증 통과
+- OpenAI/xAI JSON 및 OpenAI multipart selector 단위 테스트와 Gemini unavailable 계약 검증 통과
+- GitHub Actions `check` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32338177797/job/96331667298`
+- GitHub Actions `validate` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32338177795/job/96331665791`
 
 ## Rollback 계획
 
