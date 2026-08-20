@@ -191,6 +191,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260822-049` | completed | [Phase 4 OpenAI Responses Protocol-compatible Provider Routing](./20260822_070000_plan_phase4_openai_responses_provider_routing.md) | `phase-4-openai-responses-provider-routing` |
 | `gateway-20260822-050` | completed | [Phase 5 Runway Native Video Generation Foundation](./20260822_110000_plan_phase5_runway_native_video_foundation.md) | `phase-5-runway-native-video-foundation` |
 | `gateway-20260822-051` | completed | [Phase 5 Runway Video Credit Billing and Settlement](./20260822_143000_plan_phase5_runway_video_billing_settlement.md) | `phase-5-runway-video-billing-settlement` |
-| `gateway-20260822-052` | accepted | [Phase 5 Runway Native Ephemeral Uploads and Tenant Asset Binding](./20260822_170000_plan_phase5_runway_ephemeral_uploads.md) | `phase-5-runway-ephemeral-uploads` |
+| `gateway-20260822-052` | completed | [Phase 5 Runway Native Ephemeral Uploads and Tenant Asset Binding](./20260822_170000_plan_phase5_runway_ephemeral_uploads.md) | `phase-5-runway-ephemeral-uploads` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

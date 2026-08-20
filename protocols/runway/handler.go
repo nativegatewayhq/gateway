@@ -23,6 +23,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/jobs"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	joboperation "github.com/nativegatewayhq/gateway/operations/job"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
@@ -43,6 +44,13 @@ type ModelRegistry interface {
 type Billing interface {
 	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
 }
+type Uploader interface {
+	CreateEphemeralUpload(context.Context, string, []byte) (providerrunway.UploadResponse, error)
+}
+type AssetAuthorizer interface {
+	Bind(context.Context, joboperation.Owner, string, string, time.Time) error
+	Authorize(context.Context, joboperation.Owner, string, string) error
+}
 
 type Handler struct {
 	logger           *slog.Logger
@@ -52,6 +60,8 @@ type Handler struct {
 	maximumBodyBytes int64
 	billingRequired  bool
 	billing          Billing
+	uploader         Uploader
+	assets           AssetAuthorizer
 }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, service JobService, maximumBodyBytes int64) *Handler {
@@ -62,6 +72,10 @@ func (handler *Handler) SetBillingRequired(required bool) { handler.billingRequi
 func (handler *Handler) SetBilling(service Billing) {
 	handler.billing = service
 	handler.billingRequired = service != nil
+}
+func (handler *Handler) SetUploads(uploader Uploader, assets AssetAuthorizer) {
+	handler.uploader = uploader
+	handler.assets = assets
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -78,6 +92,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	switch {
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/uploads":
+		handler.createUpload(writer, request, principal)
 	case request.Method == http.MethodPost && (request.URL.Path == "/v1/text_to_video" || request.URL.Path == "/v1/image_to_video"):
 		handler.create(writer, request, principal)
 	case strings.HasPrefix(request.URL.Path, "/v1/tasks/") && request.Method == http.MethodGet:
@@ -86,6 +102,95 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		handler.cancel(writer, request, principal, strings.TrimPrefix(request.URL.Path, "/v1/tasks/"))
 	default:
 		writeError(writer, http.StatusNotFound, "not found")
+	}
+}
+
+func (handler *Handler) createUpload(writer http.ResponseWriter, request *http.Request, principal apikey.Principal) {
+	if handler.uploader == nil || handler.assets == nil {
+		writeError(writer, http.StatusServiceUnavailable, "upload service unavailable")
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeError(writer, http.StatusBadRequest, "Content-Type must be application/json")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, 4097))
+	if err != nil || len(body) > 4096 {
+		writeError(writer, http.StatusRequestEntityTooLarge, "request body is too large")
+		return
+	}
+	if err = validateUploadRequest(body); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid upload request")
+		return
+	}
+	channelID, _ := providercredentials.LegacyChannel(providercredentials.Runway)
+	response, err := handler.uploader.CreateEphemeralUpload(request.Context(), channelID, body)
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "upload bootstrap unavailable")
+		return
+	}
+	if response.Status < 200 || response.Status > 299 {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(response.Status)
+		_, _ = writer.Write(response.Body)
+		return
+	}
+	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
+	if err = handler.assets.Bind(request.Context(), owner, channelID, response.URI, time.Now().UTC().Add(24*time.Hour)); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "upload binding unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(response.Body)
+}
+
+func validateUploadRequest(body []byte) error {
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return errors.New("object required")
+	}
+	seen := map[string]bool{}
+	filename, kind := "", ""
+	for decoder.More() {
+		keyToken, tokenErr := decoder.Token()
+		key, ok := keyToken.(string)
+		if tokenErr != nil || !ok || seen[key] || (key != "filename" && key != "type") {
+			return errors.New("invalid field")
+		}
+		seen[key] = true
+		var value string
+		if decoder.Decode(&value) != nil {
+			return errors.New("invalid value")
+		}
+		if key == "filename" {
+			filename = value
+		} else {
+			kind = value
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') || decoder.Decode(&struct{}{}) != io.EOF || kind != "ephemeral" || !validUploadFilename(filename) {
+		return errors.New("invalid upload")
+	}
+	return nil
+}
+
+func validUploadFilename(value string) bool {
+	if len(value) < 3 || len(value) > 255 || strings.TrimSpace(value) != value || strings.ContainsAny(value, "/\\") || strings.Contains(value, "..") || strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return false
+	}
+	dot := strings.LastIndexByte(value, '.')
+	if dot < 1 || dot == len(value)-1 {
+		return false
+	}
+	extension := strings.ToLower(value[dot+1:])
+	switch extension {
+	case "jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "webm", "mp3", "wav", "m4a", "aac", "flac":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -118,6 +223,13 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, "model does not support this video operation")
 		return
 	}
+	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
+	for _, uri := range runwayAssetURIs(body) {
+		if handler.assets == nil || handler.assets.Authorize(request.Context(), owner, route.ChannelID, uri) != nil {
+			writeError(writer, http.StatusForbidden, "Runway upload asset is not permitted")
+			return
+		}
+	}
 	key := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
 	if key != "" && !idempotency.Valid(key) {
 		writeError(writer, http.StatusBadRequest, "invalid Idempotency-Key")
@@ -147,7 +259,6 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		chargeID = charge.ID
 		estimatedUsage = &joboperation.Usage{Dimension: "provider_credit", Unit: "microcredit", Quantity: charge.Quantity, Provenance: "request", ExtractorVersion: "runway-request-cost-v1", ResultExtractorVersion: "runway-task-cost-v1"}
 	}
-	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
 	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "runway", Operation: string(videooperation.Generate), Model: model, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: estimatedUsage}, providerrunway.SubmitPayload{Path: request.URL.Path, Body: outbound})
 	if errors.Is(err, joboperation.ErrConflict) {
 		writeError(writer, http.StatusConflict, "idempotency conflict")
@@ -315,6 +426,9 @@ func validAssetValue(raw json.RawMessage) bool {
 	return false
 }
 func validAsset(value string) bool {
+	if strings.HasPrefix(value, "runway://") {
+		return len(value) >= 13 && len(value) <= 5000 && strings.TrimSpace(value) == value && strings.IndexFunc(value, func(r rune) bool { return r < 0x21 || r == 0x7f }) == -1
+	}
 	if strings.HasPrefix(value, "data:image/") {
 		prefix, encoded, ok := strings.Cut(value, ",")
 		if !ok || !strings.HasSuffix(prefix, ";base64") || (prefix != "data:image/png;base64" && prefix != "data:image/jpeg;base64" && prefix != "data:image/webp;base64") {
@@ -330,6 +444,36 @@ func validAsset(value string) bool {
 	_, ipErr := netip.ParseAddr(parsed.Hostname())
 	host := strings.ToLower(parsed.Hostname())
 	return ipErr != nil && strings.Contains(host, ".") && host != "localhost"
+}
+
+func runwayAssetURIs(body []byte) []string {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil {
+		return nil
+	}
+	var result []string
+	for _, field := range []string{"promptImage", "referenceImage"} {
+		raw, ok := envelope[field]
+		if !ok {
+			continue
+		}
+		var single string
+		if json.Unmarshal(raw, &single) == nil {
+			if strings.HasPrefix(single, "runway://") {
+				result = append(result, single)
+			}
+			continue
+		}
+		var multiple []string
+		if json.Unmarshal(raw, &multiple) == nil {
+			for _, value := range multiple {
+				if strings.HasPrefix(value, "runway://") {
+					result = append(result, value)
+				}
+			}
+		}
+	}
+	return result
 }
 
 func rewriteTopLevelModel(body []byte, providerModel string) ([]byte, error) {

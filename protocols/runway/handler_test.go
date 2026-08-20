@@ -3,6 +3,7 @@ package runway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -46,6 +47,80 @@ func (j *jobsStub) Submit(_ context.Context, request jobs.CreateRequest, p any) 
 type billingStub struct {
 	request billing.BeginRequest
 	charge  billing.Charge
+}
+
+type uploaderStub struct {
+	response providerrunway.UploadResponse
+	body     []byte
+}
+
+func (stub *uploaderStub) CreateEphemeralUpload(_ context.Context, _ string, body []byte) (providerrunway.UploadResponse, error) {
+	stub.body = append([]byte(nil), body...)
+	return stub.response, nil
+}
+
+type assetsStub struct {
+	bound, authorized string
+	deny              bool
+}
+
+func (stub *assetsStub) Bind(_ context.Context, _ joboperation.Owner, _ string, uri string, _ time.Time) error {
+	stub.bound = uri
+	return nil
+}
+func (stub *assetsStub) Authorize(_ context.Context, _ joboperation.Owner, _ string, uri string) error {
+	stub.authorized = uri
+	if stub.deny {
+		return errors.New("denied")
+	}
+	return nil
+}
+
+func TestNativeUploadBootstrapBindsURIWithoutReceivingMedia(t *testing.T) {
+	registry, _ := videooperation.NewRegistry([]string{"model"})
+	principal := apikey.Principal{OrganizationID: "org", ProjectID: "project", APIKeyID: "key", ModelAccessMode: apikey.ModelAccessAll}
+	uploader := &uploaderStub{response: providerrunway.UploadResponse{Status: http.StatusOK, Body: []byte(`{"uploadUrl":"https://storage.example","fields":{"key":"secret-form"},"runwayUri":"runway://uploads/asset"}`), URI: "runway://uploads/asset"}}
+	assets := &assetsStub{}
+	handler := NewHandler(slog.Default(), authStub{principal}, registry, &jobsStub{}, 1<<20)
+	handler.SetUploads(uploader, assets)
+	request := httptest.NewRequest(http.MethodPost, "/v1/uploads", strings.NewReader(`{"filename":"input.mp4","type":"ephemeral"}`))
+	request.Header.Set("Authorization", "Bearer key")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Runway-Version", "2024-11-06")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || assets.bound != "runway://uploads/asset" || !strings.Contains(recorder.Body.String(), "secret-form") {
+		t.Fatalf("status=%d body=%s bound=%s", recorder.Code, recorder.Body.String(), assets.bound)
+	}
+	for _, invalid := range []string{`{"filename":"../input.mp4","type":"ephemeral"}`, `{"filename":"input.exe","type":"ephemeral"}`, `{"filename":"input.mp4","filename":"other.mp4","type":"ephemeral"}`} {
+		request = httptest.NewRequest(http.MethodPost, "/v1/uploads", strings.NewReader(invalid))
+		request.Header.Set("Authorization", "Bearer key")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Runway-Version", "2024-11-06")
+		recorder = httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("invalid status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestRunwayURIRequiresAssetAuthorizationBeforeBillingAndDispatch(t *testing.T) {
+	registry, _ := videooperation.NewRegistry([]string{"model"})
+	principal := apikey.Principal{OrganizationID: "org", ProjectID: "project", APIKeyID: "key", ModelAccessMode: apikey.ModelAccessAll}
+	service := &jobsStub{job: joboperation.Job{ID: "job_0123456789abcdef0123456789abcdef", Status: joboperation.Queued}}
+	assets := &assetsStub{deny: true}
+	handler := NewHandler(slog.Default(), authStub{principal}, registry, service, 1<<20)
+	handler.SetUploads(&uploaderStub{}, assets)
+	request := httptest.NewRequest(http.MethodPost, "/v1/image_to_video", strings.NewReader(`{"model":"model","promptImage":"runway://uploads/private"}`))
+	request.Header.Set("Authorization", "Bearer key")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Runway-Version", "2024-11-06")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || service.submitted != 0 || assets.authorized != "runway://uploads/private" {
+		t.Fatalf("status=%d submitted=%d uri=%s", recorder.Code, service.submitted, assets.authorized)
+	}
 }
 
 func (stub *billingStub) Begin(_ context.Context, request billing.BeginRequest) (billing.Charge, error) {

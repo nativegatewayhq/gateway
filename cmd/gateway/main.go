@@ -30,6 +30,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
+	"github.com/nativegatewayhq/gateway/internal/runwayassets"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	anthropicoperation "github.com/nativegatewayhq/gateway/operations/anthropic"
@@ -392,6 +393,7 @@ func run(stdout, stderr io.Writer) int {
 	var replicateAdapter *replicateProvider.Client
 	var falAdapter *falProvider.Client
 	var runwayAdapter *runwayProvider.Client
+	var runwayAssetStore *runwayassets.Store
 	if cfg.ReplicateEnabled {
 		var replicateErr error
 		replicateAdapter, replicateErr = replicateProvider.New(replicateProvider.Config{Endpoint: cfg.ReplicateEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.ReplicateTimeout, MaximumBodyBytes: cfg.ReplicateBodyBytes}, providerCredentialRegistry)
@@ -417,7 +419,13 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway Runway provider initialization failed")
 			return 1
 		}
+		runwayAssetStore, runwayErr = runwayassets.NewStore(pool)
+		if runwayErr != nil {
+			logger.Error("gateway Runway asset store initialization failed")
+			return 1
+		}
 		asyncProviders["runway"] = runwayAdapter
+		readinessChecks = append(readinessChecks, runwayAssetStore.Ready)
 	}
 	if len(asyncProviders) > 0 {
 		jobRepository, repositoryErr := jobs.NewRepository(pool, cfg.ReplayBodyBytes)
@@ -492,6 +500,7 @@ func run(stdout, stderr io.Writer) int {
 		}
 		if cfg.RunwayEnabled {
 			handler := runwayProtocol.NewHandler(logger, apiKeyAuthenticator, videoModels, jobService, cfg.RunwayBodyBytes)
+			handler.SetUploads(runwayAdapter, runwayAssetStore)
 			if cfg.BillingMode == config.BillingRequired {
 				handler.SetBilling(billingService)
 			}
