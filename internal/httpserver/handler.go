@@ -14,15 +14,18 @@ import (
 type ReadyFunc func(context.Context) error
 
 type Routes struct {
-	Gemini http.Handler
+	Gemini       http.Handler
+	OpenAIImages http.Handler
 }
 
-// NewHandler builds the Gateway-owned HTTP routes. Provider-native routes are
-// intentionally excluded until their protocol plans are accepted.
+// NewHandler builds the Gateway-owned and accepted provider-native routes.
 func NewHandler(logger *slog.Logger, ready ReadyFunc, routeSets ...Routes) http.Handler {
 	mux := http.NewServeMux()
 	if len(routeSets) > 0 && routeSets[0].Gemini != nil {
 		mux.Handle("/v1beta/models/", routeSets[0].Gemini)
+	}
+	if len(routeSets) > 0 && routeSets[0].OpenAIImages != nil {
+		mux.Handle("/v1/images/generations", routeSets[0].OpenAIImages)
 	}
 	mux.HandleFunc("GET /health/live", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})

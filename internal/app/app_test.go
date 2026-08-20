@@ -36,6 +36,7 @@ func TestRunFailsWhenPortIsInUse(t *testing.T) {
 	err = Run(context.Background(), cfg, observability.NewLogger(&bytes.Buffer{}, slog.LevelInfo), Dependencies{
 		ProviderCredentials: registry,
 		Gemini:              http.NotFoundHandler(),
+		OpenAIImages:        http.NotFoundHandler(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "listen failed") {
 		t.Fatalf("Run() error = %v, want listen error", err)
