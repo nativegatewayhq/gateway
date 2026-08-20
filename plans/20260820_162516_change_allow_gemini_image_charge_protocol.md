@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-015
 title: Allow Gemini Protocol in Image Charge Schema
-status: in_progress
+status: completed
 created_at: 2026-08-20T16:25:16+09:00
-updated_at: 2026-08-20T16:25:16+09:00
+updated_at: 2026-08-20T16:33:11+09:00
 owners:
   - gateway
 initiative: phase-1-gemini-image-billing
@@ -106,16 +106,21 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] forward-only migration이 OpenAI와 Gemini protocol만 허용함
-- [ ] 기존 OpenAI row와 lifecycle이 보존됨
-- [ ] Gemini charge lifecycle이 PostgreSQL에서 동작함
-- [ ] protocol identity의 append-only 불변 조건이 유지됨
-- [ ] fresh/upgrade migration과 전체 CI가 통과함
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] forward-only migration이 OpenAI와 Gemini protocol만 허용함
+- [x] 기존 OpenAI row와 lifecycle이 보존됨
+- [x] Gemini charge lifecycle이 PostgreSQL에서 동작함
+- [x] protocol identity의 append-only 불변 조건이 유지됨
+- [x] fresh/upgrade migration과 전체 CI가 통과함
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- change plan commit: `535fbc8`
+- 구현 commit: `a08a1ad2c825a21f7a4460720032febf5175097c`
+- Pull Request: [#14](https://github.com/nativegatewayhq/gateway/pull/14)
+- CI: [check run 32344425839](https://github.com/nativegatewayhq/gateway/actions/runs/32344425839) 및 Plan policy 통과
+- `make check`와 전체 PostgreSQL `make integration-test` 통과
+- fresh schema Gemini lifecycle, migration 반복·동시 실행, constraint definition과 protocol identity update 거부를 검증함
 
 ## Rollback 계획
 

@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-014
 title: Phase 1 Gemini Image Billing and Idempotency
-status: in_progress
+status: completed
 created_at: 2026-08-20T16:13:42+09:00
-updated_at: 2026-08-20T16:13:42+09:00
+updated_at: 2026-08-20T16:33:11+09:00
 owners:
   - gateway
 initiative: phase-1-gemini-image-billing
@@ -200,23 +200,31 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] Google image model/channel/capability가 Registry에서 resolve됨
-- [ ] Gemini selector가 path model과 canonical 가격 차원을 안전하게 추출함
-- [ ] 등록된 Gemini image request만 이미지 과금 lifecycle로 진입함
-- [ ] billing required의 Reserve→Capture/Release가 Wallet/Ledger와 일치함
-- [ ] Reserve 이전 실패에서 Google Provider가 호출되지 않음
-- [ ] native Gemini 성공·오류 response가 정산 이후 보존됨
-- [ ] Idempotency-Key 동일 retry가 response를 replay하고 이중 과금하지 않음
-- [ ] credential 위치 차이가 fingerprint나 저장 데이터에 secret을 남기지 않음
-- [ ] known/unknown outcome이 reconciliation 불변 조건대로 처리됨
-- [ ] billing disabled mode와 OpenAI/xAI 경로 회귀가 없음
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Conformance/Cloud 계약이 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] Google image model/channel/capability가 Registry에서 resolve됨
+- [x] Gemini selector가 path model과 canonical 가격 차원을 안전하게 추출함
+- [x] 등록된 Gemini image request만 이미지 과금 lifecycle로 진입함
+- [x] billing required의 Reserve→Capture/Release가 Wallet/Ledger와 일치함
+- [x] Reserve 이전 실패에서 Google Provider가 호출되지 않음
+- [x] native Gemini 성공·오류 response가 정산 이후 보존됨
+- [x] Idempotency-Key 동일 retry가 response를 replay하고 이중 과금하지 않음
+- [x] credential 위치 차이가 fingerprint나 저장 데이터에 secret을 남기지 않음
+- [x] known/unknown outcome이 reconciliation 불변 조건대로 처리됨
+- [x] billing disabled mode와 OpenAI/xAI 경로 회귀가 없음
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Conformance/Cloud 계약이 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 계획 commit: `3e1ad3ad0cdd47666f5020a315f35114a2c9623d`
+- schema change 계획 commit: `535fbc8`
+- 구현 commit: `a08a1ad2c825a21f7a4460720032febf5175097c`
+- Pull Request: [#14](https://github.com/nativegatewayhq/gateway/pull/14)
+- CI: [check run 32344425839](https://github.com/nativegatewayhq/gateway/actions/runs/32344425839) 및 [Plan policy run 32344447958](https://github.com/nativegatewayhq/gateway/actions/runs/32344447958) 통과
+- 로컬 `make check` 통과
+- `TEST_DATABASE_URL=... make integration-test` 통과
+- PostgreSQL integration에서 default 및 16:9/2K exact price, Capture, native 429 Release/replay, timeout UNKNOWN reservation, response-loss known-success resolve/replay와 protocol identity immutability를 검증함
+- 단위/race test에서 protocol namespace 격리, duplicate/type selector 거부, credential-location-independent fingerprint, panic/cancel/settlement outcome 분류와 billing-disabled pass-through 회귀를 검증함
 
 ## Rollback 계획
 
