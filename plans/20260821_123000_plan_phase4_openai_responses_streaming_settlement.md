@@ -209,7 +209,7 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponses
 
 ## 검증 증거
 
-- 구현 commit `cbb3134`, PR [#50](https://github.com/nativegatewayhq/gateway/pull/50)
+- 구현 commit `cbb3134`, squash merge `7d6c7c9b6dd2e7ab0ae32495cf3865af5abf40a9`, PR [#50](https://github.com/nativegatewayhq/gateway/pull/50)
 - `GOCACHE=/private/tmp/nativegateway-go-cache make check`
   - gofmt, vet, 전체 race unit test와 모든 Gateway binary build 통과
 - fresh PostgreSQL `gateway_plan041`과 Redis에서 `make integration-test`
