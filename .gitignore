@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 bin/
+/gateway
 build/
 dist/
 coverage/

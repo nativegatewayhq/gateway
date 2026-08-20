@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-001
 title: Phase 0 Gateway Bootstrap
-status: accepted
+status: in_progress
 created_at: 2026-08-20T11:38:25+09:00
-updated_at: 2026-08-20T12:10:00+09:00
+updated_at: 2026-08-20T12:24:33+09:00
 owners:
   - gateway
 initiative: phase-0-native-sdk-validation
