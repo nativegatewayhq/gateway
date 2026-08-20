@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-021
 title: Phase 1 Hierarchical Cost Quotas
-status: in_progress
+status: completed
 created_at: 2026-08-20T18:11:08+09:00
-updated_at: 2026-08-20T18:11:08+09:00
+updated_at: 2026-08-20T18:34:42+09:00
 owners:
   - gateway
 initiative: phase-1-cost-quotas
@@ -195,23 +195,31 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] 기존 설치와 policy 없는 tenant가 unlimited로 동일하게 동작함
-- [ ] organization/project/API Key/model 한도가 계층적으로 모두 적용됨
-- [ ] day/month bucket과 reset이 UTC 기준으로 정확함
-- [ ] 동시 요청에서도 reserved+captured가 limit을 초과하지 않음
-- [ ] Wallet과 모든 quota scope가 한 transaction에서 reserve/rollback됨
-- [ ] 성공, 실패, 차액과 timeout reconciliation 정산이 정확히 한 번 수행됨
-- [ ] idempotency replay와 fallback이 quota를 중복 소비하지 않음
-- [ ] native 429가 body/Provider effect 전에 반환됨
-- [ ] 정책 mutation audit와 tenant ownership이 검증됨
-- [ ] 민감한 금액·credential·request content가 log/response에 노출되지 않음
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] 기존 설치와 policy 없는 tenant가 unlimited로 동일하게 동작함
+- [x] organization/project/API Key/model 한도가 계층적으로 모두 적용됨
+- [x] day/month bucket과 reset이 UTC 기준으로 정확함
+- [x] 동시 요청에서도 reserved+captured가 limit을 초과하지 않음
+- [x] Wallet과 모든 quota scope가 한 transaction에서 reserve/rollback됨
+- [x] 성공, 실패, 차액과 timeout reconciliation 정산이 정확히 한 번 수행됨
+- [x] idempotency replay와 fallback이 quota를 중복 소비하지 않음
+- [x] native 429가 body/Provider effect 전에 반환됨
+- [x] 정책 mutation audit와 tenant ownership이 검증됨
+- [x] 민감한 금액·credential·request content가 log/response에 노출되지 않음
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `9c302723e5f9f9438f04298de2cdc4246f215dd8`
+- PR: `https://github.com/nativegatewayhq/gateway/pull/20`
+- 로컬 release gate: `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과
+- 로컬 통합 검증: PostgreSQL `127.0.0.1:55433`, Redis `127.0.0.1:56379`를 사용한 `make integration-test` 통과
+- 계층/원자성: organization, project, API Key+logical-model 정책과 2개 Billing service의 8개 동시 요청에서 3개만 예약됨을 실제 PostgreSQL에서 검증
+- 정산: capture, release, estimate 차액, idempotent retry, unknown reconciliation과 service restart 후 bucket/Wallet 일치 검증
+- 운영 계약: `gateway-quota` create/update/disable, append-only audit, ownership FK와 current usage 조회 검증
+- Native 계약: OpenAI `quota_exceeded`, Gemini `RESOURCE_EXHAUSTED`, reset header, Provider 미호출 및 response/log redaction 검증
+- GitHub Actions: `check` pass (`32354408509`), `validate` pass (`32354428177`)
 
 ## Rollback 계획
 
