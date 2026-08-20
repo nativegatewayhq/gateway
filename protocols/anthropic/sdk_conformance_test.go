@@ -53,6 +53,32 @@ asyncio.run(main())`
 	}
 }
 
+func TestOfficialAnthropicManagedMessagesSDKs(t *testing.T) {
+	models, _ := operation.NewRegistryWithLimits([]string{"claude-test"}, map[string]operation.Limits{"claude-test": {MaximumInputTokens: 8192, MaximumOutputTokens: 100}})
+	charges := &billingStub{}
+	handler := NewBillableHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), sdkAuth{}, models, &managedExecutor{}, sdkAvailable{}, nil, 8192, charges)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from anthropic import Anthropic
+c=Anthropic(api_key="service-key",base_url="` + server.URL + `")
+r=c.messages.create(model="claude-test",max_tokens=16,messages=[{"role":"user","content":"hello"}])
+assert r.content[0].text == "ok"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/anthropic-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python managed SDK: %v: %s", err, output)
+	}
+	javascript := `const Anthropic=require('@anthropic-ai/sdk').default;const c=new Anthropic({apiKey:'service-key',baseURL:'` + server.URL + `'});c.messages.create({model:'claude-test',max_tokens:16,messages:[{role:'user',content:'hello'}]}).then(r=>{if(r.content[0].text!=='ok')process.exit(2)}).catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/anthropic-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("TypeScript managed SDK: %v: %s", err, output)
+	}
+	if charges.complete != 2 || charges.usage.CacheWriteTokens != 2 || charges.usage.CachedInputTokens != 3 {
+		t.Fatalf("billing=%+v", charges)
+	}
+}
+
 type sdkAuth struct{}
 
 func (sdkAuth) Authenticate(context.Context, string) (apikey.Principal, error) {

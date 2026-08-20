@@ -20,8 +20,8 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	flags := flag.NewFlagSet("gateway-chat-price", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	channel := flags.String("channel-id", "", "Provider channel ID")
-	protocol := flags.String("protocol", "openai", "Protocol: openai or gemini")
-	operation := flags.String("operation", "chat.completions", "Operation: chat.completions or responses.create")
+	protocol := flags.String("protocol", "openai", "Protocol: openai, gemini, or anthropic")
+	operation := flags.String("operation", "chat.completions", "Operation: chat.completions, responses.create, or messages.create")
 	model := flags.String("model", "", "logical model")
 	publication := flags.String("publication-key", "", "idempotent publication key")
 	effective := flags.String("effective-from", "", "RFC3339 effective time")
@@ -29,6 +29,8 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	inputSale := flags.String("input-sale", "", "input sale per million tokens")
 	cachedCost := flags.String("cached-input-cost", "", "cached input cost per million tokens")
 	cachedSale := flags.String("cached-input-sale", "", "cached input sale per million tokens")
+	cacheWriteCost := flags.String("cache-write-cost", "0", "cache write cost per million tokens")
+	cacheWriteSale := flags.String("cache-write-sale", "0", "cache write sale per million tokens")
 	outputCost := flags.String("output-cost", "", "output cost per million tokens")
 	outputSale := flags.String("output-sale", "", "output sale per million tokens")
 	if flags.Parse(args) != nil {
@@ -44,8 +46,10 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	cs, ok4 := parse(*cachedSale)
 	oc, ok5 := parse(*outputCost)
 	osale, ok6 := parse(*outputSale)
+	wc, ok7 := parse(*cacheWriteCost)
+	ws, ok8 := parse(*cacheWriteSale)
 	at, err := time.Parse(time.RFC3339, *effective)
-	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || is == 0 || cs == 0 || osale == 0 || err != nil || *channel == "" || *model == "" || *publication == "" {
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || !ok8 || is == 0 || cs == 0 || osale == 0 || (*protocol == "anthropic" && ws == 0) || err != nil || *channel == "" || *model == "" || *publication == "" {
 		_, _ = fmt.Fprintln(stderr, "chat price arguments are invalid")
 		return 2
 	}
@@ -75,7 +79,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		_, _ = fmt.Fprintln(stderr, "chat pricing configuration invalid")
 		return 1
 	}
-	price, err := service.Publish(ctx, chatpricing.Price{ChannelID: *channel, Protocol: *protocol, Operation: *operation, Model: *model, EffectiveFrom: at, Rates: chatpricing.Rates{InputCost: ic, InputSale: is, CachedInputCost: cc, CachedInputSale: cs, OutputCost: oc, OutputSale: osale}}, *publication)
+	price, err := service.Publish(ctx, chatpricing.Price{ChannelID: *channel, Protocol: *protocol, Operation: *operation, Model: *model, EffectiveFrom: at, Rates: chatpricing.Rates{InputCost: ic, InputSale: is, CachedInputCost: cc, CachedInputSale: cs, CacheWriteCost: wc, CacheWriteSale: ws, OutputCost: oc, OutputSale: osale}}, *publication)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "chat price publication failed")
 		return 1

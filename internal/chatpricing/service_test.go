@@ -37,3 +37,21 @@ func TestMarginAppliesToEveryDimension(t *testing.T) {
 		t.Fatal("invalid cached margin accepted")
 	}
 }
+
+func TestCalculateAnthropicCacheWriteDimension(t *testing.T) {
+	rates := Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 500_000, CachedInputSale: 1_000_000, CacheWriteCost: 1_250_000, CacheWriteSale: 2_500_000, OutputCost: 3_000_000, OutputSale: 6_000_000}
+	amounts, err := Calculate(rates, Usage{PromptTokens: 10, CachedInputTokens: 3, CacheWriteTokens: 2, CompletionTokens: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if amounts.Cost != 22 || amounts.Sale != 42 {
+		t.Fatalf("amounts=%+v", amounts)
+	}
+}
+
+func TestCalculateRejectsOverlappingInputDimensions(t *testing.T) {
+	_, err := Calculate(Rates{InputSale: 1, CachedInputSale: 1, CacheWriteSale: 1, OutputSale: 1}, Usage{PromptTokens: 3, CachedInputTokens: 2, CacheWriteTokens: 2})
+	if err == nil {
+		t.Fatal("expected invalid usage")
+	}
+}

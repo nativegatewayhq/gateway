@@ -273,7 +273,7 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 	} else if charge.Protocol == "gemini" {
 		schemaVersion = "gemini-stream-usage-v1"
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,schema_version,body_sha256,delivery_mode,terminal_event_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'stream',$8) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, schemaVersion, terminalDigest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,cache_write_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,schema_version,body_sha256,delivery_mode,terminal_event_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'stream',$9) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, schemaVersion, terminalDigest[:])
 	if err != nil {
 		return Charge{}, err
 	}
@@ -289,10 +289,10 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 }
 
 func sameStreamEvidence(ctx context.Context, tx pgx.Tx, id string, usage chatpricing.Usage, digest [32]byte) bool {
-	var prompt, cached, completion, toolUse, thoughts int64
+	var prompt, cached, cacheWrite, completion, toolUse, thoughts int64
 	var storedDigest []byte
-	err := tx.QueryRow(ctx, `SELECT prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,terminal_event_sha256 FROM chat_usage_evidence WHERE charge_id=$1 AND delivery_mode='stream'`, id).Scan(&prompt, &cached, &completion, &toolUse, &thoughts, &storedDigest)
-	return err == nil && prompt == usage.PromptTokens && cached == usage.CachedInputTokens && completion == usage.CompletionTokens && toolUse == usage.ToolUsePromptTokens && thoughts == usage.ThoughtsTokens && bytes.Equal(storedDigest, digest[:])
+	err := tx.QueryRow(ctx, `SELECT prompt_tokens,cached_input_tokens,cache_write_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,terminal_event_sha256 FROM chat_usage_evidence WHERE charge_id=$1 AND delivery_mode='stream'`, id).Scan(&prompt, &cached, &cacheWrite, &completion, &toolUse, &thoughts, &storedDigest)
+	return err == nil && prompt == usage.PromptTokens && cached == usage.CachedInputTokens && cacheWrite == usage.CacheWriteTokens && completion == usage.CompletionTokens && toolUse == usage.ToolUsePromptTokens && thoughts == usage.ThoughtsTokens && bytes.Equal(storedDigest, digest[:])
 }
 func (s *Service) CompleteUsage(ctx context.Context, id string, usage chatpricing.Usage, snapshot billing.ResponseSnapshot) (Charge, error) {
 	if !validUsage(usage) {
@@ -355,8 +355,10 @@ func (s *Service) CompleteUsage(ctx context.Context, id string, usage chatpricin
 		schemaVersion = "openai-responses-usage-v1"
 	} else if charge.Protocol == "gemini" {
 		schemaVersion = "gemini-usage-v1"
+	} else if charge.Protocol == "anthropic" {
+		schemaVersion = "anthropic-usage-v1"
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,schema_version,body_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, schemaVersion, digest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,cache_write_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,schema_version,body_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, schemaVersion, digest[:])
 	if err != nil {
 		return Charge{}, err
 	}
@@ -454,7 +456,7 @@ func (s *Service) MarkStreamReconcilingUsage(ctx context.Context, id string, usa
 	if result.RowsAffected() == 0 {
 		return ErrState
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,terminal_category,terminal_event_sha256) VALUES($1,'settlement_failed',$2,$3,$4,$5,$6,'complete',$7) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, terminalDigest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,prompt_tokens,cached_input_tokens,cache_write_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,terminal_category,terminal_event_sha256) VALUES($1,'settlement_failed',$2,$3,$4,$5,$6,$7,'complete',$8) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, terminalDigest[:])
 	if err != nil {
 		return err
 	}
@@ -509,15 +511,15 @@ func (s *Service) markReconciling(ctx context.Context, id, reason string, snapsh
 	if result.RowsAffected() == 0 {
 		return ErrState
 	}
-	var prompt, cached, completion any
+	var prompt, cached, cacheWrite, completion any
 	if usage != nil {
-		prompt, cached, completion = usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens
+		prompt, cached, cacheWrite, completion = usage.PromptTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.CompletionTokens
 	}
 	var tool, thoughts any
 	if usage != nil {
 		tool, thoughts = usage.ToolUsePromptTokens, usage.ThoughtsTokens
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,response_status,response_headers,response_body,response_body_sha256,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens) VALUES($1,$2,$3,$4::text::jsonb,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(charge_id) DO NOTHING`, id, reason, status, headers, body, digest, prompt, cached, completion, tool, thoughts)
+	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,response_status,response_headers,response_body,response_body_sha256,prompt_tokens,cached_input_tokens,cache_write_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens) VALUES($1,$2,$3,$4::text::jsonb,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(charge_id) DO NOTHING`, id, reason, status, headers, body, digest, prompt, cached, cacheWrite, completion, tool, thoughts)
 	if err != nil {
 		return err
 	}
@@ -530,7 +532,7 @@ func (s *Service) snapshot(v billing.ResponseSnapshot) (billing.ResponseSnapshot
 	c := billing.ResponseSnapshot{Status: v.Status, Headers: map[string][]string{}, Body: append([]byte(nil), v.Body...)}
 	for k, values := range v.Headers {
 		key := strings.ToLower(strings.TrimSpace(k))
-		if key != "content-type" && key != "retry-after" {
+		if key != "content-type" && key != "retry-after" && key != "request-id" {
 			continue
 		}
 		c.Headers[key] = append([]string(nil), values...)
@@ -542,14 +544,14 @@ func (s *Service) snapshot(v billing.ResponseSnapshot) (billing.ResponseSnapshot
 	return c, h, sha256.Sum256(c.Body), nil
 }
 
-const chargeSelect = `SELECT c.id,c.protocol,c.operation,c.request_id,c.organization_id,c.project_id,c.api_key_id,c.model,c.channel_id,c.price_id,c.currency,c.reservation_id,c.state,c.idempotency_key,c.request_fingerprint,c.maximum_input_tokens,c.maximum_output_tokens,c.estimated_cost,c.reserved_sale,c.actual_cost,c.captured_sale,c.response_snapshot_version,c.response_status,c.response_headers,c.response_body,c.delivery_mode,c.stream_completed,p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.output_cost_per_million,p.output_sale_per_million FROM chat_request_charges c JOIN chat_token_prices p ON p.id=c.price_id`
+const chargeSelect = `SELECT c.id,c.protocol,c.operation,c.request_id,c.organization_id,c.project_id,c.api_key_id,c.model,c.channel_id,c.price_id,c.currency,c.reservation_id,c.state,c.idempotency_key,c.request_fingerprint,c.maximum_input_tokens,c.maximum_output_tokens,c.estimated_cost,c.reserved_sale,c.actual_cost,c.captured_sale,c.response_snapshot_version,c.response_status,c.response_headers,c.response_body,c.delivery_mode,c.stream_completed,p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.cache_write_cost_per_million,p.cache_write_sale_per_million,p.output_cost_per_million,p.output_sale_per_million FROM chat_request_charges c JOIN chat_token_prices p ON p.id=c.price_id`
 
 func scan(row pgx.Row) (Charge, bool, error) {
 	var c Charge
 	var key *string
 	var fp, headers, body []byte
 	var status *int
-	err := row.Scan(&c.ID, &c.Protocol, &c.Operation, &c.RequestID, &c.OrganizationID, &c.ProjectID, &c.APIKeyID, &c.Model, &c.ChannelID, &c.PriceID, &c.Currency, &c.ReservationID, &c.State, &key, &fp, &c.MaximumInputTokens, &c.MaximumOutputTokens, &c.EstimatedCost, &c.ReservedSale, &c.ActualCost, &c.CapturedSale, &c.SnapshotVersion, &status, &headers, &body, &c.DeliveryMode, &c.StreamCompleted, &c.Rates.InputCost, &c.Rates.InputSale, &c.Rates.CachedInputCost, &c.Rates.CachedInputSale, &c.Rates.OutputCost, &c.Rates.OutputSale)
+	err := row.Scan(&c.ID, &c.Protocol, &c.Operation, &c.RequestID, &c.OrganizationID, &c.ProjectID, &c.APIKeyID, &c.Model, &c.ChannelID, &c.PriceID, &c.Currency, &c.ReservationID, &c.State, &key, &fp, &c.MaximumInputTokens, &c.MaximumOutputTokens, &c.EstimatedCost, &c.ReservedSale, &c.ActualCost, &c.CapturedSale, &c.SnapshotVersion, &status, &headers, &body, &c.DeliveryMode, &c.StreamCompleted, &c.Rates.InputCost, &c.Rates.InputSale, &c.Rates.CachedInputCost, &c.Rates.CachedInputSale, &c.Rates.CacheWriteCost, &c.Rates.CacheWriteSale, &c.Rates.OutputCost, &c.Rates.OutputSale)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Charge{}, false, nil
 	}
@@ -584,7 +586,7 @@ func loadID(ctx context.Context, tx pgx.Tx, id string, lock bool) (Charge, bool,
 }
 func validBegin(r BeginRequest) bool {
 	has := r.Fingerprint != ([32]byte{})
-	return ((r.Protocol == "openai" && (r.Operation == "chat.completions" || r.Operation == "responses.create")) || (r.Protocol == "gemini" && r.Operation == "chat.completions")) && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
+	return ((r.Protocol == "openai" && (r.Operation == "chat.completions" || r.Operation == "responses.create")) || (r.Protocol == "gemini" && r.Operation == "chat.completions") || (r.Protocol == "anthropic" && r.Operation == "messages.create")) && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
 }
 func sameRequest(c Charge, r BeginRequest) bool {
 	identity := c.RequestID == r.RequestID
@@ -604,7 +606,7 @@ func validReason(v string) bool {
 	return false
 }
 func validUsage(usage chatpricing.Usage) bool {
-	return usage.PromptTokens >= 0 && usage.CachedInputTokens >= 0 && usage.CachedInputTokens <= usage.PromptTokens && usage.CompletionTokens >= 0 && usage.ToolUsePromptTokens >= 0 && usage.ToolUsePromptTokens <= usage.PromptTokens && usage.ThoughtsTokens >= 0 && usage.ThoughtsTokens <= usage.CompletionTokens
+	return usage.PromptTokens >= 0 && usage.CachedInputTokens >= 0 && usage.CacheWriteTokens >= 0 && usage.CachedInputTokens <= usage.PromptTokens-usage.CacheWriteTokens && usage.CompletionTokens >= 0 && usage.ToolUsePromptTokens >= 0 && usage.ToolUsePromptTokens <= usage.PromptTokens && usage.ThoughtsTokens >= 0 && usage.ThoughtsTokens <= usage.CompletionTokens
 }
 func validStreamMetadata(side, category string) bool {
 	if side != "" && side != "client" && side != "provider" {

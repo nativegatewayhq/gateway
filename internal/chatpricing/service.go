@@ -25,7 +25,10 @@ var (
 	ErrMargin      = errors.New("chat token price margin violation")
 )
 
-type Rates struct{ InputCost, InputSale, CachedInputCost, CachedInputSale, OutputCost, OutputSale int64 }
+type Rates struct {
+	InputCost, InputSale, CachedInputCost, CachedInputSale int64
+	CacheWriteCost, CacheWriteSale, OutputCost, OutputSale int64
+}
 type Price struct {
 	ID, ChannelID, Protocol, Operation, Model, Currency string
 	Rates                                               Rates
@@ -42,8 +45,8 @@ type Estimate struct {
 	EstimatedCost, MaximumSale int64
 }
 type Usage struct {
-	PromptTokens, CachedInputTokens, CompletionTokens int64
-	ToolUsePromptTokens, ThoughtsTokens               int64
+	PromptTokens, CachedInputTokens, CacheWriteTokens, CompletionTokens int64
+	ToolUsePromptTokens, ThoughtsTokens                                 int64
 }
 type Amounts struct{ Cost, Sale int64 }
 type Service struct {
@@ -88,7 +91,7 @@ func (s *Service) Publish(ctx context.Context, p Price, key string) (Price, erro
 	if err != nil {
 		return Price{}, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_token_prices(id,channel_id,protocol,operation,model,currency,input_cost_per_million,input_sale_per_million,cached_input_cost_per_million,cached_input_sale_per_million,output_cost_per_million,output_sale_per_million,effective_from,effective_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, p.ID, p.ChannelID, p.Protocol, p.Operation, p.Model, p.Currency, p.Rates.InputCost, p.Rates.InputSale, p.Rates.CachedInputCost, p.Rates.CachedInputSale, p.Rates.OutputCost, p.Rates.OutputSale, p.EffectiveFrom, p.EffectiveUntil)
+	_, err = tx.Exec(ctx, `INSERT INTO chat_token_prices(id,channel_id,protocol,operation,model,currency,input_cost_per_million,input_sale_per_million,cached_input_cost_per_million,cached_input_sale_per_million,cache_write_cost_per_million,cache_write_sale_per_million,output_cost_per_million,output_sale_per_million,effective_from,effective_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, p.ID, p.ChannelID, p.Protocol, p.Operation, p.Model, p.Currency, p.Rates.InputCost, p.Rates.InputSale, p.Rates.CachedInputCost, p.Rates.CachedInputSale, p.Rates.CacheWriteCost, p.Rates.CacheWriteSale, p.Rates.OutputCost, p.Rates.OutputSale, p.EffectiveFrom, p.EffectiveUntil)
 	if err != nil {
 		return Price{}, err
 	}
@@ -138,8 +141,8 @@ func (s *Service) estimate(ctx context.Context, q rowQuerier, r Request) (Estima
 	if !ratesMargin(p.Rates, s.minimumMarginBPS) {
 		return Estimate{}, ErrMargin
 	}
-	inputCost := max(p.Rates.InputCost, p.Rates.CachedInputCost)
-	inputSale := max(p.Rates.InputSale, p.Rates.CachedInputSale)
+	inputCost := max(p.Rates.InputCost, p.Rates.CachedInputCost, p.Rates.CacheWriteCost)
+	inputSale := max(p.Rates.InputSale, p.Rates.CachedInputSale, p.Rates.CacheWriteSale)
 	cost, ok := sumTokenAmounts(r.MaximumInputTokens, inputCost, r.MaximumOutputTokens, p.Rates.OutputCost)
 	if !ok {
 		return Estimate{}, ErrInvalid
@@ -151,15 +154,15 @@ func (s *Service) estimate(ctx context.Context, q rowQuerier, r Request) (Estima
 	return Estimate{Price: p, EstimatedCost: cost, MaximumSale: sale}, nil
 }
 func Calculate(r Rates, u Usage) (Amounts, error) {
-	if u.PromptTokens < 0 || u.CachedInputTokens < 0 || u.CachedInputTokens > u.PromptTokens || u.CompletionTokens < 0 || u.ToolUsePromptTokens < 0 || u.ToolUsePromptTokens > u.PromptTokens || u.ThoughtsTokens < 0 || u.ThoughtsTokens > u.CompletionTokens {
+	if u.PromptTokens < 0 || u.CachedInputTokens < 0 || u.CacheWriteTokens < 0 || u.CachedInputTokens > u.PromptTokens-u.CacheWriteTokens || u.CompletionTokens < 0 || u.ToolUsePromptTokens < 0 || u.ToolUsePromptTokens > u.PromptTokens || u.ThoughtsTokens < 0 || u.ThoughtsTokens > u.CompletionTokens {
 		return Amounts{}, ErrInvalid
 	}
-	regular := u.PromptTokens - u.CachedInputTokens
-	cost, ok := sum3(regular, r.InputCost, u.CachedInputTokens, r.CachedInputCost, u.CompletionTokens, r.OutputCost)
+	regular := u.PromptTokens - u.CachedInputTokens - u.CacheWriteTokens
+	cost, ok := sum4(regular, r.InputCost, u.CachedInputTokens, r.CachedInputCost, u.CacheWriteTokens, r.CacheWriteCost, u.CompletionTokens, r.OutputCost)
 	if !ok {
 		return Amounts{}, ErrInvalid
 	}
-	sale, ok := sum3(regular, r.InputSale, u.CachedInputTokens, r.CachedInputSale, u.CompletionTokens, r.OutputSale)
+	sale, ok := sum4(regular, r.InputSale, u.CachedInputTokens, r.CachedInputSale, u.CacheWriteTokens, r.CacheWriteSale, u.CompletionTokens, r.OutputSale)
 	if !ok || sale < 1 {
 		return Amounts{}, ErrInvalid
 	}
@@ -202,8 +205,19 @@ func sum3(a, ar, b, br, c, cr int64) (int64, bool) {
 	}
 	return x + y, true
 }
+func sum4(a, ar, b, br, c, cr, d, dr int64) (int64, bool) {
+	x, ok := sum3(a, ar, b, br, c, cr)
+	if !ok {
+		return 0, false
+	}
+	y, ok := tokenAmount(d, dr)
+	if !ok || x > int64(^uint64(0)>>1)-y {
+		return 0, false
+	}
+	return x + y, true
+}
 func ratesMargin(r Rates, bps int64) bool {
-	return margin(r.InputCost, r.InputSale, bps) && margin(r.CachedInputCost, r.CachedInputSale, bps) && margin(r.OutputCost, r.OutputSale, bps)
+	return margin(r.InputCost, r.InputSale, bps) && margin(r.CachedInputCost, r.CachedInputSale, bps) && margin(r.CacheWriteCost, r.CacheWriteSale, bps) && margin(r.OutputCost, r.OutputSale, bps)
 }
 func margin(cost, sale, bps int64) bool {
 	left := new(big.Int).Mul(big.NewInt(sale), big.NewInt(10000))
@@ -211,10 +225,10 @@ func margin(cost, sale, bps int64) bool {
 	return left.Cmp(right) >= 0
 }
 
-const selectPrice = `SELECT p.id,p.channel_id,p.protocol,p.operation,p.model,p.currency,p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.output_cost_per_million,p.output_sale_per_million,p.effective_from,p.effective_until FROM chat_token_prices p`
+const selectPrice = `SELECT p.id,p.channel_id,p.protocol,p.operation,p.model,p.currency,p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.cache_write_cost_per_million,p.cache_write_sale_per_million,p.output_cost_per_million,p.output_sale_per_million,p.effective_from,p.effective_until FROM chat_token_prices p`
 
 func scanPrice(p *Price) []any {
-	return []any{&p.ID, &p.ChannelID, &p.Protocol, &p.Operation, &p.Model, &p.Currency, &p.Rates.InputCost, &p.Rates.InputSale, &p.Rates.CachedInputCost, &p.Rates.CachedInputSale, &p.Rates.OutputCost, &p.Rates.OutputSale, &p.EffectiveFrom, &p.EffectiveUntil}
+	return []any{&p.ID, &p.ChannelID, &p.Protocol, &p.Operation, &p.Model, &p.Currency, &p.Rates.InputCost, &p.Rates.InputSale, &p.Rates.CachedInputCost, &p.Rates.CachedInputSale, &p.Rates.CacheWriteCost, &p.Rates.CacheWriteSale, &p.Rates.OutputCost, &p.Rates.OutputSale, &p.EffectiveFrom, &p.EffectiveUntil}
 }
 func canonical(p Price) Price {
 	p.ID = ""
@@ -233,13 +247,13 @@ func canonical(p Price) Price {
 	return p
 }
 func validPrice(p Price) bool {
-	return validProtocolOperation(p.Protocol, p.Operation) && validID(p.ChannelID, "channel_") && validText(p.Model, 200) && p.Currency == ledger.Currency && p.EffectiveFrom != time.Time{} && (p.EffectiveUntil == nil || p.EffectiveUntil.After(p.EffectiveFrom)) && p.Rates.InputCost >= 0 && p.Rates.InputSale > 0 && p.Rates.CachedInputCost >= 0 && p.Rates.CachedInputSale > 0 && p.Rates.OutputCost >= 0 && p.Rates.OutputSale > 0 && p.Rates.InputSale >= p.Rates.InputCost && p.Rates.CachedInputSale >= p.Rates.CachedInputCost && p.Rates.OutputSale >= p.Rates.OutputCost
+	return validProtocolOperation(p.Protocol, p.Operation) && validID(p.ChannelID, "channel_") && validText(p.Model, 200) && p.Currency == ledger.Currency && p.EffectiveFrom != time.Time{} && (p.EffectiveUntil == nil || p.EffectiveUntil.After(p.EffectiveFrom)) && p.Rates.InputCost >= 0 && p.Rates.InputSale > 0 && p.Rates.CachedInputCost >= 0 && p.Rates.CachedInputSale > 0 && p.Rates.CacheWriteCost >= 0 && p.Rates.CacheWriteSale >= 0 && p.Rates.OutputCost >= 0 && p.Rates.OutputSale > 0 && p.Rates.InputSale >= p.Rates.InputCost && p.Rates.CachedInputSale >= p.Rates.CachedInputCost && p.Rates.CacheWriteSale >= p.Rates.CacheWriteCost && p.Rates.OutputSale >= p.Rates.OutputCost && (p.Protocol != "anthropic" || p.Rates.CacheWriteSale > 0)
 }
 func samePrice(a, b Price) bool {
 	return a.ChannelID == b.ChannelID && a.Protocol == b.Protocol && a.Operation == b.Operation && a.Model == b.Model && a.Rates == b.Rates && a.EffectiveFrom.Equal(b.EffectiveFrom) && ((a.EffectiveUntil == nil && b.EffectiveUntil == nil) || (a.EffectiveUntil != nil && b.EffectiveUntil != nil && a.EffectiveUntil.Equal(*b.EffectiveUntil)))
 }
 func validProtocolOperation(protocol, operation string) bool {
-	return (protocol == "openai" && (operation == "chat.completions" || operation == "responses.create")) || (protocol == "gemini" && operation == "chat.completions")
+	return (protocol == "openai" && (operation == "chat.completions" || operation == "responses.create")) || (protocol == "gemini" && operation == "chat.completions") || (protocol == "anthropic" && operation == "messages.create")
 }
 func validText(v string, n int) bool { return v != "" && len(v) <= n && strings.TrimSpace(v) == v }
 func validID(v, prefix string) bool {

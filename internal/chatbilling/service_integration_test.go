@@ -100,6 +100,31 @@ func TestReserveUsageSettlementAndReplayAreExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestAnthropicFourAxisSettlementIsProtocolIsolated(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	_, err := prices.Publish(ctx, chatpricing.Price{Protocol: "anthropic", Operation: "messages.create", ChannelID: "channel_00000000000000000000000000000006", Model: "claude-test", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 1_000_000, CachedInputSale: 1_000_000, CacheWriteCost: 2_000_000, CacheWriteSale: 3_000_000, OutputCost: 4_000_000, OutputSale: 5_000_000}}, "anthropic-test-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := BeginRequest{Protocol: "anthropic", Operation: "messages.create", RequestID: "anthropic-request", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "claude-test", ChannelID: "channel_00000000000000000000000000000006", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "anthropic-idempotency", Fingerprint: [32]byte{9}}
+	charge, err := service.Begin(ctx, request)
+	if err != nil || charge.ReservedSale != 550 || charge.EstimatedCost != 400 {
+		t.Fatalf("charge=%+v err=%v", charge, err)
+	}
+	snapshot := billing.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"usage":{"input_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":4}}`)}
+	settled, err := service.CompleteUsage(ctx, charge.ID, chatpricing.Usage{PromptTokens: 10, CachedInputTokens: 3, CacheWriteTokens: 2, CompletionTokens: 4}, snapshot)
+	if err != nil || settled.CapturedSale != 39 || settled.ActualCost == nil || *settled.ActualCost != 28 {
+		t.Fatalf("settled=%+v err=%v", settled, err)
+	}
+	var schema string
+	var writes int64
+	if err = pool.QueryRow(ctx, `SELECT schema_version,cache_write_tokens FROM chat_usage_evidence WHERE charge_id=$1`, charge.ID).Scan(&schema, &writes); err != nil || schema != "anthropic-usage-v1" || writes != 2 {
+		t.Fatalf("schema=%s writes=%d err=%v", schema, writes, err)
+	}
+}
+
 func TestResponsesOperationPriceSettlementAndEvidenceAreIsolated(t *testing.T) {
 	service, pool := chatBillingFixture(t)
 	ctx := context.Background()

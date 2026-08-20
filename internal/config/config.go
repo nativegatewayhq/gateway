@@ -100,6 +100,7 @@ type Config struct {
 	AnthropicTimeout               time.Duration
 	AnthropicBodyBytes             int64
 	AnthropicMessagesModels        []string
+	AnthropicMessagesModelLimits   map[string]ChatModelLimit
 	ImageEditsBodyBytes            int64
 	ImageEditSpoolLimit            int
 	BillingMode                    BillingMode
@@ -151,57 +152,58 @@ type ChatModelLimit struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 // the server starts. Errors name the setting but never echo its value.
 func Load(lookup LookupEnv) (Config, error) {
 	cfg := Config{
-		HTTPAddr:                   defaultHTTPAddr,
-		LogLevel:                   slog.LevelInfo,
-		ShutdownTimeout:            defaultShutdownTimeout,
-		GoogleTimeout:              defaultGoogleTimeout,
-		GeminiStreamIdleTimeout:    30 * time.Second,
-		GeminiBodyBytes:            defaultGeminiBodyBytes,
-		ImagesTimeout:              defaultImagesTimeout,
-		ImagesBodyBytes:            defaultImagesBodyBytes,
-		ChatTimeout:                defaultImagesTimeout,
-		ChatStreamIdleTimeout:      30 * time.Second,
-		ChatBodyBytes:              defaultChatBodyBytes,
-		OpenAIChatModelLimits:      map[string]ChatModelLimit{},
-		GeminiLLMModelLimits:       map[string]ChatModelLimit{},
-		OpenAIResponsesModelLimits: map[string]ChatModelLimit{},
-		ResponsesTimeout:           defaultImagesTimeout,
-		ResponsesStreamIdleTimeout: 30 * time.Second,
-		ResponsesBodyBytes:         defaultChatBodyBytes,
-		AnthropicTimeout:           defaultImagesTimeout,
-		AnthropicBodyBytes:         defaultChatBodyBytes,
-		ImageEditsBodyBytes:        defaultImageEditsBodyBytes,
-		ImageEditSpoolLimit:        8,
-		BillingMode:                BillingDisabled,
-		ReplayBodyBytes:            defaultReplayBodyBytes,
-		ReconcileInterval:          defaultReconcileInterval,
-		ReconcileLease:             defaultReconcileLease,
-		ReconcileBackoff:           defaultReconcileBackoff,
-		ReconcileMaxBackoff:        defaultReconcileMaxBackoff,
-		ReconcileBatchSize:         10,
-		ReconcileMaxAttempts:       5,
-		RateLimitMode:              RateLimitDisabled,
-		RateLimitTimeout:           defaultRateLimitTimeout,
-		ProviderHealthMode:         ProviderHealthDisabled,
-		ProviderHealth:             providerhealth.DefaultConfig(),
-		ImageStorage:               imagestorage.DefaultConfig(),
-		Telemetry:                  telemetry.DefaultConfig(),
-		ReplicateEndpoint:          "https://api.replicate.com",
-		ReplicateTimeout:           defaultReplicateTimeout,
-		ReplicateBodyBytes:         defaultReplicateBodyBytes,
-		ReplicateWebhookMode:       ReplicateWebhookDisabled,
-		ReplicateWebhookTolerance:  defaultWebhookTolerance,
-		ReplicateWebhookBindingTTL: defaultWebhookBindingTTL,
-		FalEndpoint:                "https://queue.fal.run",
-		FalTimeout:                 defaultFalTimeout,
-		FalBodyBytes:               defaultFalBodyBytes,
-		FalWebhookMode:             FalWebhookDisabled,
-		FalWebhookBindingTTL:       defaultWebhookBindingTTL,
-		FalJWKSURL:                 defaultFalJWKSURL,
-		FalJWKSTimeout:             defaultFalJWKSTimeout,
-		FalJWKSCacheTTL:            defaultFalJWKSCacheTTL,
-		FalJWKSRefreshCooldown:     defaultFalJWKSRefresh,
-		JobManagementMode:          JobManagementDisabled,
+		HTTPAddr:                     defaultHTTPAddr,
+		LogLevel:                     slog.LevelInfo,
+		ShutdownTimeout:              defaultShutdownTimeout,
+		GoogleTimeout:                defaultGoogleTimeout,
+		GeminiStreamIdleTimeout:      30 * time.Second,
+		GeminiBodyBytes:              defaultGeminiBodyBytes,
+		ImagesTimeout:                defaultImagesTimeout,
+		ImagesBodyBytes:              defaultImagesBodyBytes,
+		ChatTimeout:                  defaultImagesTimeout,
+		ChatStreamIdleTimeout:        30 * time.Second,
+		ChatBodyBytes:                defaultChatBodyBytes,
+		OpenAIChatModelLimits:        map[string]ChatModelLimit{},
+		GeminiLLMModelLimits:         map[string]ChatModelLimit{},
+		OpenAIResponsesModelLimits:   map[string]ChatModelLimit{},
+		ResponsesTimeout:             defaultImagesTimeout,
+		ResponsesStreamIdleTimeout:   30 * time.Second,
+		ResponsesBodyBytes:           defaultChatBodyBytes,
+		AnthropicTimeout:             defaultImagesTimeout,
+		AnthropicBodyBytes:           defaultChatBodyBytes,
+		AnthropicMessagesModelLimits: map[string]ChatModelLimit{},
+		ImageEditsBodyBytes:          defaultImageEditsBodyBytes,
+		ImageEditSpoolLimit:          8,
+		BillingMode:                  BillingDisabled,
+		ReplayBodyBytes:              defaultReplayBodyBytes,
+		ReconcileInterval:            defaultReconcileInterval,
+		ReconcileLease:               defaultReconcileLease,
+		ReconcileBackoff:             defaultReconcileBackoff,
+		ReconcileMaxBackoff:          defaultReconcileMaxBackoff,
+		ReconcileBatchSize:           10,
+		ReconcileMaxAttempts:         5,
+		RateLimitMode:                RateLimitDisabled,
+		RateLimitTimeout:             defaultRateLimitTimeout,
+		ProviderHealthMode:           ProviderHealthDisabled,
+		ProviderHealth:               providerhealth.DefaultConfig(),
+		ImageStorage:                 imagestorage.DefaultConfig(),
+		Telemetry:                    telemetry.DefaultConfig(),
+		ReplicateEndpoint:            "https://api.replicate.com",
+		ReplicateTimeout:             defaultReplicateTimeout,
+		ReplicateBodyBytes:           defaultReplicateBodyBytes,
+		ReplicateWebhookMode:         ReplicateWebhookDisabled,
+		ReplicateWebhookTolerance:    defaultWebhookTolerance,
+		ReplicateWebhookBindingTTL:   defaultWebhookBindingTTL,
+		FalEndpoint:                  "https://queue.fal.run",
+		FalTimeout:                   defaultFalTimeout,
+		FalBodyBytes:                 defaultFalBodyBytes,
+		FalWebhookMode:               FalWebhookDisabled,
+		FalWebhookBindingTTL:         defaultWebhookBindingTTL,
+		FalJWKSURL:                   defaultFalJWKSURL,
+		FalJWKSTimeout:               defaultFalJWKSTimeout,
+		FalJWKSCacheTTL:              defaultFalJWKSCacheTTL,
+		FalJWKSRefreshCooldown:       defaultFalJWKSRefresh,
+		JobManagementMode:            JobManagementDisabled,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -389,6 +391,23 @@ func Load(lookup LookupEnv) (Config, error) {
 			}
 			seen[model] = true
 			cfg.AnthropicMessagesModels = append(cfg.AnthropicMessagesModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS"); ok {
+		for _, part := range strings.Split(value, ",") {
+			fields := strings.Split(strings.TrimSpace(part), ":")
+			if len(fields) != 3 {
+				return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS: expected model:maximum_input:maximum_output")
+			}
+			input, inputErr := strconv.ParseInt(fields[1], 10, 64)
+			output, outputErr := strconv.ParseInt(fields[2], 10, 64)
+			if fields[0] == "" || inputErr != nil || outputErr != nil || input < 1 || output < 1 || input > 10_000_000 || output > 1_000_000 {
+				return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS: invalid model limit")
+			}
+			if _, exists := cfg.AnthropicMessagesModelLimits[fields[0]]; exists {
+				return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS: duplicate model")
+			}
+			cfg.AnthropicMessagesModelLimits[fields[0]] = ChatModelLimit{input, output}
 		}
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS"); ok {
@@ -594,6 +613,16 @@ func Load(lookup LookupEnv) (Config, error) {
 		for _, model := range cfg.GeminiLLMModels {
 			if _, ok := cfg.GeminiLLMModelLimits[model]; !ok {
 				return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODEL_LIMITS: every paid Gemini LLM model requires limits")
+			}
+		}
+	}
+	if cfg.BillingMode == BillingRequired && len(cfg.AnthropicMessagesModels) > 0 {
+		if len(cfg.AnthropicMessagesModelLimits) != len(cfg.AnthropicMessagesModels) {
+			return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS: every paid Anthropic model requires limits")
+		}
+		for _, model := range cfg.AnthropicMessagesModels {
+			if _, ok := cfg.AnthropicMessagesModelLimits[model]; !ok {
+				return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS: every paid Anthropic model requires limits")
 			}
 		}
 	}
