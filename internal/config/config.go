@@ -19,8 +19,8 @@ const (
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
 type LookupEnv func(string) (string, bool)
 
-// Config contains process-level settings. It intentionally contains no
-// provider credentials; credential configuration belongs to a later plan.
+// Config contains non-provider process settings. Provider credentials remain
+// in their opaque registry and are never exposed through this structure.
 type Config struct {
 	HTTPAddr        string
 	LogLevel        slog.Level

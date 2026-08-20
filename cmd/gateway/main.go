@@ -12,6 +12,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/observability"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 )
 
 func main() {
@@ -22,6 +23,11 @@ func run(stdout, stderr io.Writer) int {
 	cfg, err := config.Load(os.LookupEnv)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "configuration error: %v\n", err)
+		return 1
+	}
+	providerCredentialRegistry, err := providercredentials.Load(os.LookupEnv)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "provider credential configuration error: %v\n", err)
 		return 1
 	}
 
@@ -39,7 +45,10 @@ func run(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if err := app.Run(ctx, cfg, logger, pool.Ping); err != nil {
+	if err := app.Run(ctx, cfg, logger, app.Dependencies{
+		Ready:               pool.Ping,
+		ProviderCredentials: providerCredentialRegistry,
+	}); err != nil {
 		logger.Error("gateway stopped with error", "error", err.Error())
 		return 1
 	}

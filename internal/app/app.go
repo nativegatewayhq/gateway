@@ -11,7 +11,13 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/httpserver"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 )
+
+type Dependencies struct {
+	Ready               httpserver.ReadyFunc
+	ProviderCredentials *providercredentials.Registry
+}
 
 // Error reports a lifecycle failure category without exposing listener or
 // configuration values. The wrapped cause remains available to internal
@@ -30,14 +36,17 @@ func runtimeError(kind string, err error) error {
 }
 
 // Run starts the HTTP server and blocks until it fails or ctx is canceled.
-func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, ready httpserver.ReadyFunc) error {
+func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, dependencies Dependencies) error {
+	if dependencies.ProviderCredentials == nil {
+		return runtimeError("provider credential registry unavailable", nil)
+	}
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		return runtimeError("listen failed", err)
 	}
 
 	server := &http.Server{
-		Handler:           httpserver.NewHandler(logger, ready),
+		Handler:           httpserver.NewHandler(logger, dependencies.Ready),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
