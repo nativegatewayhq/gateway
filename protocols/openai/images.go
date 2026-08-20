@@ -163,6 +163,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		}
 		return
 	}
+	if !handler.authorizeModel(tracked, request, principal, "openai", string(imageoperation.Generate), model) {
+		return
+	}
 	route := candidates[0]
 	logModel = model
 	if handler.billing != nil {
@@ -425,6 +428,15 @@ func writeRateLimitHeaders(writer http.ResponseWriter, decision ratelimit.Decisi
 	writer.Header().Set("X-RateLimit-Limit", strconv.FormatInt(decision.Limit, 10))
 	writer.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(decision.Remaining, 10))
 	writer.Header().Set("X-RateLimit-Reset", strconv.FormatInt(decision.ResetAt.Unix(), 10))
+}
+
+func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, protocol, operation, model string) bool {
+	if principal.AuthorizeModel(protocol, operation, model) {
+		return true
+	}
+	handler.logger.Info("API key model authorization denied", "request_id", requestid.FromContext(request.Context()), "api_key_id", principal.APIKeyID, "project_id", principal.ProjectID, "protocol", protocol, "operation", operation, "model", model, "category", "denied")
+	writeError(writer, http.StatusForbidden, "permission_error", "model_not_allowed", "API key is not permitted to use this model")
+	return false
 }
 
 func (handler *Handler) complete(ctx context.Context, chargeID string, success bool, snapshot billing.ResponseSnapshot) (billing.Charge, error) {

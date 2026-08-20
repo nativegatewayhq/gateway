@@ -137,6 +137,18 @@ func TestGenerateContentMapsRateLimitBeforeBodyAndProvider(t *testing.T) {
 	}
 }
 
+func TestGenerateContentEnforcesModelPermissionBeforeBodyAndProvider(t *testing.T) {
+	principal := apikey.Principal{APIKeyID: "key_denied", ProjectID: "project_denied", ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "image.generate", Model: "gemini-image"}}}
+	executor := &stubExecutor{}
+	handler := NewHandler(testLogger(io.Discard), &stubAuthenticator{principal: principal}, executor, 1024)
+	request := geminiRequest(geminiPanicReader{})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 403 || !strings.Contains(response.Body.String(), "PERMISSION_DENIED") || executor.calls != 0 {
+		t.Fatalf("response=%d %s calls=%d", response.Code, response.Body.String(), executor.calls)
+	}
+}
+
 func TestGoogleNativeErrorPassThrough(t *testing.T) {
 	t.Parallel()
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusInternalServerError} {

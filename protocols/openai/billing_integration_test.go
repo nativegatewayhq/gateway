@@ -111,6 +111,22 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	if successReplay.Code != 200 || successReplay.Body.String() != success.Body.String() || successReplay.Header().Get("Idempotency-Replayed") != "true" || calls != 1 {
 		t.Fatalf("success replay=%d %s headers=%v calls=%d", successReplay.Code, successReplay.Body.String(), successReplay.Header(), calls)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE service_api_keys SET model_access_mode='allowlist' WHERE id=$1`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO service_api_key_model_permissions(api_key_id,protocol,operation,model) VALUES($1,'openai','image.edit','gpt-image-1')`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	deniedReplay := billableProtocolRequest(handler, raw, "billable-success-denied", `{"model":"gpt-image-1","n":2}`)
+	if deniedReplay.Code != 403 || deniedReplay.Header().Get("Idempotency-Replayed") != "" || calls != 1 {
+		t.Fatalf("denied replay=%d headers=%v calls=%d", deniedReplay.Code, deniedReplay.Header(), calls)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM service_api_key_model_permissions WHERE api_key_id=$1`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE service_api_keys SET model_access_mode='all' WHERE id=$1`, record.ID); err != nil {
+		t.Fatal(err)
+	}
 	failure := billableProtocolRequest(handler, raw, "billable-failure", `{"model":"gpt-image-1","fail":true}`)
 	failureReplay := billableProtocolRequest(handler, raw, "billable-failure-retry", `{"model":"gpt-image-1","fail":true}`)
 	if failure.Code != 429 || failure.Body.String() != `{"error":{"message":"native limit"}}` || failureReplay.Body.String() != failure.Body.String() || failureReplay.Header().Get("Idempotency-Replayed") != "true" || calls != 2 {

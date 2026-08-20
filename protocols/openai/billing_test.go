@@ -36,6 +36,7 @@ type billingFake struct {
 	replayCharge  chargebilling.Charge
 	replayFound   bool
 	replayErr     error
+	replayCalls   int
 }
 
 func (fake *billingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
@@ -49,6 +50,7 @@ func (fake *billingFake) Begin(_ context.Context, request chargebilling.BeginReq
 	return charge, fake.beginErr
 }
 func (fake *billingFake) Replay(context.Context, chargebilling.BeginRequest) (chargebilling.Charge, bool, error) {
+	fake.replayCalls++
 	return fake.replayCharge, fake.replayFound, fake.replayErr
 }
 func (fake *billingFake) Quote(_ context.Context, request chargebilling.BeginRequest) (pricing.Estimate, error) {
@@ -225,6 +227,19 @@ func TestBillableImagesRateLimitHasNoBillingOrProviderEffect(t *testing.T) {
 	response := requestImages(handler, http.MethodPost, `{"model":"gpt-image-1"}`, "Authorization", "Bearer service-secret")
 	if response.Code != 429 || providerCalls != 0 || len(fake.events) != 0 || len(fake.beginChannels) != 0 {
 		t.Fatalf("response=%d providers=%d events=%v begin=%v", response.Code, providerCalls, fake.events, fake.beginChannels)
+	}
+}
+
+func TestBillableImagesPermissionDenialHasNoBillingReplayOrProviderEffect(t *testing.T) {
+	fake := &billingFake{}
+	providerCalls := 0
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "image.edit", Model: "gpt-image-1"}}}
+	handler := NewBillableImagesHandler(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+	}, 1024, fake)
+	response := requestImages(handler, http.MethodPost, `{"model":"gpt-image-1"}`, "Authorization", "Bearer service-secret")
+	if response.Code != 403 || providerCalls != 0 || fake.replayCalls != 0 || len(fake.events) != 0 || len(fake.beginChannels) != 0 {
+		t.Fatalf("response=%d providers=%d replay=%d events=%v begin=%v", response.Code, providerCalls, fake.replayCalls, fake.events, fake.beginChannels)
 	}
 }
 

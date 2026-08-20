@@ -128,6 +128,22 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if !authenticated {
 		return
 	}
+	var candidates []imageoperation.RoutingDecision
+	if handler.billing != nil {
+		if handler.models == nil {
+			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
+			return
+		}
+		var routeErr error
+		candidates, routeErr = handler.models.Candidates("gemini", model, imageoperation.Generate, imageoperation.JSON)
+		if routeErr != nil {
+			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
+			return
+		}
+	}
+	if !handler.authorizeModel(tracked, request, principal, model) {
+		return
+	}
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || !strings.EqualFold(mediaType, "application/json") {
 		writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "content type must be application/json")
@@ -151,15 +167,6 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	if handler.billing != nil {
-		if handler.models == nil {
-			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
-			return
-		}
-		candidates, routeErr := handler.models.Candidates("gemini", model, imageoperation.Generate, imageoperation.JSON)
-		if routeErr != nil {
-			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
-			return
-		}
 		selector, selectorErr := imageoperation.ParseGeminiJSONPricingSelector(model, body)
 		if selectorErr != nil {
 			writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "request contains unsupported billing options")
@@ -294,6 +301,15 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"category", "response_copy_failed",
 		)
 	}
+}
+
+func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, model string) bool {
+	if principal.AuthorizeModel("gemini", string(imageoperation.Generate), model) {
+		return true
+	}
+	handler.logger.Info("API key model authorization denied", "request_id", requestid.FromContext(request.Context()), "api_key_id", principal.APIKeyID, "project_id", principal.ProjectID, "protocol", "gemini", "operation", string(imageoperation.Generate), "model", model, "category", "denied")
+	writeError(writer, http.StatusForbidden, "PERMISSION_DENIED", "API key is not permitted to use this model")
+	return false
 }
 
 func geminiProviderConfigured(availability ProviderAvailability, provider providercredentials.ProviderID) bool {

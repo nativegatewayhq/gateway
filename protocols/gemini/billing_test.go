@@ -29,6 +29,7 @@ type geminiBillingFake struct {
 	events        []string
 	quoteErrors   map[string]error
 	beginChannels []string
+	replayCalls   int
 }
 
 func (fake *geminiBillingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
@@ -39,6 +40,7 @@ func (fake *geminiBillingFake) Begin(_ context.Context, request chargebilling.Be
 }
 
 func (fake *geminiBillingFake) Replay(context.Context, chargebilling.BeginRequest) (chargebilling.Charge, bool, error) {
+	fake.replayCalls++
 	return chargebilling.Charge{}, false, nil
 }
 
@@ -136,6 +138,18 @@ func TestBillableGeminiReplaysWithoutProvider(t *testing.T) {
 	billableGeminiHandler(fake, executor).ServeHTTP(response, request)
 	if response.Code != 202 || response.Body.String() != `{"stored":true}` || response.Header().Get("Idempotency-Replayed") != "true" || executor.calls != 0 {
 		t.Fatalf("response=%d %s headers=%v calls=%d", response.Code, response.Body.String(), response.Header(), executor.calls)
+	}
+}
+
+func TestBillableGeminiPermissionDenialPrecedesReplayAndProvider(t *testing.T) {
+	fake := &geminiBillingFake{beginCharge: chargebilling.Charge{ID: "charge_test"}}
+	executor := &stubExecutor{}
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "image.generate", Model: "gemini-image"}}}
+	handler := NewBillableHandler(slog.Default(), &stubAuthenticator{principal: principal}, imageoperation.DefaultRegistry(), executor, 4096, fake)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, geminiRequest(geminiPanicReader{}))
+	if response.Code != 403 || fake.replayCalls != 0 || len(fake.events) != 0 || executor.calls != 0 {
+		t.Fatalf("response=%d replay=%d events=%v calls=%d", response.Code, fake.replayCalls, fake.events, executor.calls)
 	}
 }
 

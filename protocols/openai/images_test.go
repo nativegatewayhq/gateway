@@ -28,6 +28,12 @@ func (function authFunc) Authenticate(ctx context.Context, key string) (apikey.P
 
 type executorFunc func(context.Context, openaiimages.Request) (*http.Response, error)
 
+type rateLimiterFunc func(context.Context, string, ratelimit.Policy) (ratelimit.Decision, error)
+
+func (function rateLimiterFunc) Allow(ctx context.Context, key string, policy ratelimit.Policy) (ratelimit.Decision, error) {
+	return function(ctx, key, policy)
+}
+
 type panicReader struct{}
 
 func (panicReader) Read([]byte) (int, error) { panic("body read before rate limit response") }
@@ -182,6 +188,56 @@ func TestImagesHandlerReturnsAllowedRateLimitHeaders(t *testing.T) {
 	response := requestImages(handler, http.MethodPost, `{"model":"gpt-image-1"}`, "Authorization", "Bearer service-secret")
 	if response.Code != 200 || response.Header().Get("X-RateLimit-Limit") != "60" || response.Header().Get("X-RateLimit-Remaining") != "4" {
 		t.Fatalf("response=%d headers=%v", response.Code, response.Header())
+	}
+}
+
+func TestImagesHandlerEnforcesLogicalModelPermissionAfterRateLimit(t *testing.T) {
+	rateCalls, providerCalls := 0, 0
+	principal := apikey.Principal{APIKeyID: "key_policy", ProjectID: "project_policy", RateLimit: apikey.RateLimitPolicy{RequestsPerMinute: 60, Burst: 2}, ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "image.generate", Model: "grok-imagine-image-quality"}}}
+	guard, err := ratelimit.NewGuardedAuthenticator(authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), rateLimiterFunc(func(context.Context, string, ratelimit.Policy) (ratelimit.Decision, error) {
+		rateCalls++
+		return ratelimit.Decision{Allowed: true, Limit: 60, Remaining: 1, ResetAt: time.Unix(2_000_000_000, 0)}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewImagesHandler(slog.Default(), guard, testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+		providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			providerCalls++
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}),
+	}, 1024)
+	response := requestImages(handler, http.MethodPost, `{"model":"gpt-image-1"}`, "Authorization", "Bearer service-secret")
+	if response.Code != 403 || !strings.Contains(response.Body.String(), "model_not_allowed") || rateCalls != 1 || providerCalls != 0 {
+		t.Fatalf("response=%d %s rate=%d provider=%d", response.Code, response.Body.String(), rateCalls, providerCalls)
+	}
+	unknown := requestImages(handler, http.MethodPost, `{"model":"missing-model"}`, "Authorization", "Bearer service-secret")
+	if unknown.Code != 404 || rateCalls != 2 {
+		t.Fatalf("unknown=%d %s rate=%d", unknown.Code, unknown.Body.String(), rateCalls)
+	}
+	allowed := requestImages(handler, http.MethodPost, `{"model":"grok-imagine-image-quality"}`, "Authorization", "Bearer service-secret")
+	if allowed.Code != 200 || rateCalls != 3 || providerCalls != 1 {
+		t.Fatalf("allowed=%d rate=%d provider=%d", allowed.Code, rateCalls, providerCalls)
+	}
+}
+
+func TestModelAuthorizationLogUsesLogicalIdentityWithoutProviderModelOrBody(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-denied", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Fixed, FixedCandidateID: "candidate", Candidates: []imageoperation.ChannelCandidate{{ID: "candidate", Provider: providercredentials.OpenAI, ProviderModel: "provider-secret-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := apikey.Principal{APIKeyID: "key_safe", ProjectID: "project_safe", ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "image.generate", Model: "another-model"}}}
+	var logs bytes.Buffer
+	handler := NewImagesHandler(slog.New(slog.NewJSONHandler(&logs, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), registry, nil, 1024)
+	response := requestImages(handler, http.MethodPost, `{"model":"logical-denied","prompt":"body-secret"}`, "Authorization", "Bearer service-secret")
+	if response.Code != 403 || !strings.Contains(logs.String(), "logical-denied") {
+		t.Fatalf("response=%d logs=%s", response.Code, logs.String())
+	}
+	for _, secret := range []string{"provider-secret-model", "body-secret", "service-secret"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("log leaked %q: %s", secret, logs.String())
+		}
 	}
 }
 

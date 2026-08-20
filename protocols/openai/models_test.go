@@ -72,6 +72,19 @@ func TestModelsHandlerListsLogicalModelOnceForMultipleCandidates(t *testing.T) {
 	}
 }
 
+func TestModelsHandlerIntersectsDispatchAvailabilityWithKeyPermissions(t *testing.T) {
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "image.edit", Model: "grok-imagine-image-quality"}}}
+	handler := NewModelsHandler(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), testRegistry(t), availability{providercredentials.OpenAI, providercredentials.XAI})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "grok-imagine-image-quality" {
+		t.Fatalf("response=%d list=%+v", response.Code, list)
+	}
+}
+
 func TestModelsHandlerRequiresAuthenticationAndGET(t *testing.T) {
 	t.Parallel()
 	authCalls := 0
