@@ -112,7 +112,7 @@ client = genai.Client(
 )
 
 response = client.models.generate_content(
-    model="gemini-image-model",
+    model="gemini-image",
     contents="Draw a cat astronaut",
     config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
 )
@@ -120,7 +120,9 @@ response = client.models.generate_content(
 
 The Gateway authenticates the service key, removes it from the outbound request, and applies only `GATEWAY_GOOGLE_API_KEY` to the fixed Google origin. Google success and error JSON bodies are passed through without schema conversion. Redirects and automatic retries are disabled.
 
-Streaming, model listing, file upload, billing, managed image storage, and cross-provider conversion are not included in this phase. Official Python and JavaScript SDK version compatibility will be maintained in the separate conformance repository.
+In `GATEWAY_BILLING_MODE=required`, only models registered with the Gemini `image.generate` capability are accepted on this route. The built-in `gemini-image` route uses the Google channel. `generationConfig.imageConfig.aspectRatio` and `imageSize` select the exact price; omitted values use `default` and the initial quantity is one. Unregistered text models fail closed instead of passing through without charge. Billing-disabled self-hosted deployments retain raw Gemini pass-through behavior.
+
+Streaming, model listing, file upload, managed image storage, and cross-provider conversion are not included in this phase. Official Python and JavaScript SDK version compatibility will be maintained in the separate conformance repository.
 
 ## OpenAI Images native API
 
@@ -208,9 +210,9 @@ Provider channels can publish append-only, time-versioned image prices through t
 
 There is no public price-management endpoint, and clients cannot supply trusted prices or historical evaluation times. A managed Cloud service must authenticate and audit price publications through the internal domain rather than modifying pricing tables directly.
 
-When `GATEWAY_BILLING_MODE=required`, OpenAI/xAI image generation and editing resolve the exact active price, reserve project-owned organization credits, and call the Provider only after the reservation commits. Provider 2xx responses are returned only after Capture; native non-2xx responses and executor failures release the reservation first. An uncertain settlement fails closed with `billing_reconciliation_required`. Managed Cloud deployments must use `required`; the default `disabled` mode exists for self-hosted BYOK compatibility.
+When `GATEWAY_BILLING_MODE=required`, OpenAI/xAI generation and editing plus registered Gemini image generation resolve the exact active price, reserve project-owned organization credits, and call the Provider only after the reservation commits. Provider 2xx responses are returned only after Capture; native non-2xx responses and errors known to occur before an upstream call release the reservation first. An uncertain settlement fails closed with the protocol-native unavailable response. Managed Cloud deployments must use `required`; the default `disabled` mode exists for self-hosted BYOK compatibility.
 
-Billable image requests may include a visible-ASCII `Idempotency-Key` of up to 200 bytes. Repeating the same exact request under the same organization returns the stored native response with `Idempotency-Replayed: true` without calling the Provider or changing the Wallet. Reusing a key with different wire bytes returns `idempotency_conflict`. Response snapshots retain only `Content-Type` and `Retry-After`; credentials, cookies, prompts, and request bodies are not stored.
+Billable image requests may include a visible-ASCII `Idempotency-Key` of up to 200 bytes. Repeating the same exact request under the same organization returns the stored native response with `Idempotency-Replayed: true` without calling the Provider or changing the Wallet. Reusing a key with different wire bytes returns a protocol-native conflict. Response snapshots retain only `Content-Type`, `Retry-After`, and the safe Google request ID where present; credentials, cookies, prompts, and request bodies are not stored.
 
 In billing-required mode, response loss and settlement uncertainty create durable reconciliation tasks. Known Provider success is captured and known failure is released by a leased PostgreSQL worker. Timeout, connection loss, and panic remain reserved because the Provider outcome is unknown; after bounded retries they move to `MANUAL_REVIEW` and are never automatically refunded. Operators can inspect the backlog without changing readiness:
 

@@ -32,6 +32,7 @@ type Capability struct {
 	MediaType MediaType
 }
 type ModelRoute struct {
+	Protocol     string
 	Model        string
 	Provider     providercredentials.ProviderID
 	ChannelID    string
@@ -44,10 +45,11 @@ type Registry struct{ routes map[string]ModelRoute }
 func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 	registry := &Registry{routes: make(map[string]ModelRoute, len(routes))}
 	for _, route := range routes {
-		if !validModelID(route.Model) || !validChannelID(route.ChannelID) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || (route.Provider != providercredentials.OpenAI && route.Provider != providercredentials.XAI) {
+		if !validRouteProtocol(route.Protocol, route.Provider) || !validModelID(route.Model) || !validChannelID(route.ChannelID) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 {
 			return nil, ErrInvalidModel
 		}
-		if _, exists := registry.routes[route.Model]; exists {
+		key := route.Protocol + "\x00" + route.Model
+		if _, exists := registry.routes[key]; exists {
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateModel, route.Model)
 		}
 		seen := make(map[Capability]struct{}, len(route.Capabilities))
@@ -61,15 +63,16 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 			seen[capability] = struct{}{}
 		}
 		route.Capabilities = append([]Capability(nil), route.Capabilities...)
-		registry.routes[route.Model] = route
+		registry.routes[key] = route
 	}
 	return registry, nil
 }
 
 func DefaultRegistry() *Registry {
 	registry, err := NewRegistry(
-		ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []Capability{{Generate, JSON}, {Edit, Multipart}}},
-		ModelRoute{Model: "grok-imagine-image-quality", Provider: providercredentials.XAI, ChannelID: "channel_00000000000000000000000000000002", Owner: "xai", Capabilities: []Capability{{Generate, JSON}, {Edit, JSON}}},
+		ModelRoute{Protocol: "openai", Model: "gpt-image-1", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []Capability{{Generate, JSON}, {Edit, Multipart}}},
+		ModelRoute{Protocol: "openai", Model: "grok-imagine-image-quality", Provider: providercredentials.XAI, ChannelID: "channel_00000000000000000000000000000002", Owner: "xai", Capabilities: []Capability{{Generate, JSON}, {Edit, JSON}}},
+		ModelRoute{Protocol: "gemini", Model: "gemini-image", Provider: providercredentials.Google, ChannelID: "channel_00000000000000000000000000000003", Owner: "google", Capabilities: []Capability{{Generate, JSON}}},
 	)
 	if err != nil {
 		panic("invalid built-in image model registry")
@@ -78,10 +81,14 @@ func DefaultRegistry() *Registry {
 }
 
 func (registry *Registry) Resolve(model string, operation Operation, mediaType MediaType) (ModelRoute, error) {
+	return registry.ResolveProtocol("openai", model, operation, mediaType)
+}
+
+func (registry *Registry) ResolveProtocol(protocol, model string, operation Operation, mediaType MediaType) (ModelRoute, error) {
 	if registry == nil {
 		return ModelRoute{}, ErrModelNotFound
 	}
-	route, exists := registry.routes[model]
+	route, exists := registry.routes[protocol+"\x00"+model]
 	if !exists {
 		return ModelRoute{}, ErrModelNotFound
 	}
@@ -95,16 +102,27 @@ func (registry *Registry) Resolve(model string, operation Operation, mediaType M
 }
 
 func (registry *Registry) List() []ModelRoute {
+	return registry.ListProtocol("openai")
+}
+
+func (registry *Registry) ListProtocol(protocol string) []ModelRoute {
 	models := []ModelRoute{}
 	if registry == nil {
 		return models
 	}
 	for _, route := range registry.routes {
+		if route.Protocol != protocol {
+			continue
+		}
 		route.Capabilities = append([]Capability(nil), route.Capabilities...)
 		models = append(models, route)
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Model < models[j].Model })
 	return models
+}
+
+func validRouteProtocol(protocol string, provider providercredentials.ProviderID) bool {
+	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google)
 }
 
 func validCapability(capability Capability) bool {

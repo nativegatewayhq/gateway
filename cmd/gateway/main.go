@@ -57,7 +57,6 @@ func run(stdout, stderr io.Writer) int {
 	}
 	apiKeyAuthenticator := apikey.NewService(apikey.NewPostgresStore(pool))
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
-	geminiHandler := gemini.NewHandler(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes)
 	imageModels := imageoperation.DefaultRegistry()
 	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
@@ -89,12 +88,15 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	var geminiHandler *gemini.Handler
 	var openAIImagesHandler *openaiProtocol.Handler
 	var openAIImageEditsHandler *openaiProtocol.EditHandler
 	if chargeBilling == nil {
+		geminiHandler = gemini.NewHandler(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes)
 		openAIImagesHandler = openaiProtocol.NewImagesHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes)
 		openAIImageEditsHandler = openaiProtocol.NewEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
 	} else {
+		geminiHandler = gemini.NewBillableHandler(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling)
 		openAIImagesHandler = openaiProtocol.NewBillableImagesHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling)
 		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling)
 	}

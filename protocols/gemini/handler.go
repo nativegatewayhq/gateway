@@ -15,8 +15,13 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/idempotency"
+	"github.com/nativegatewayhq/gateway/internal/ledger"
+	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/google"
 )
 
@@ -30,24 +35,47 @@ type Executor interface {
 	GenerateContent(context.Context, google.GenerateContentRequest) (*http.Response, error)
 }
 
+type ModelRegistry interface {
+	ResolveProtocol(string, string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.ModelRoute, error)
+}
+
+type Billing interface {
+	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
+	Complete(context.Context, string, bool, billing.ResponseSnapshot) (billing.Charge, error)
+	MarkReconciling(context.Context, string, billing.Observation) error
+	MaximumResponseBytes() int64
+}
+
 type Handler struct {
 	logger        *slog.Logger
 	authenticator Authenticator
 	executor      Executor
 	maxBodyBytes  int64
+	models        ModelRegistry
+	billing       Billing
 }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, executor Executor, maxBodyBytes int64) *Handler {
 	return &Handler{logger: logger, authenticator: authenticator, executor: executor, maxBodyBytes: maxBodyBytes}
 }
 
+func NewBillableHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
+	handler := NewHandler(logger, authenticator, executor, maxBodyBytes)
+	handler.models = models
+	handler.billing = chargeBilling
+	return handler
+}
+
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	tracked := &statusWriter{ResponseWriter: writer}
 	started := time.Now()
 	model, _ := modelFromRequest(request)
+	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
-			if !tracked.wroteHeader {
+			if charge != nil {
+				handler.reconciliationError(tracked, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: billing.ProviderPanic})
+			} else if !tracked.wroteHeader {
 				writeError(tracked, http.StatusInternalServerError, "INTERNAL", "internal server error")
 			}
 			handler.logger.Error("gemini request panic recovered", "request_id", requestid.FromContext(request.Context()))
@@ -74,7 +102,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	model = parsedModel
-	if !handler.authenticate(tracked, request) {
+	principal, authenticated := handler.authenticate(tracked, request)
+	if !authenticated {
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -99,6 +128,49 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "could not read request body")
 		return
 	}
+	if handler.billing != nil {
+		if handler.models == nil {
+			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
+			return
+		}
+		route, routeErr := handler.models.ResolveProtocol("gemini", model, imageoperation.Generate, imageoperation.JSON)
+		if routeErr != nil || route.Provider != providercredentials.Google {
+			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
+			return
+		}
+		selector, selectorErr := imageoperation.ParseGeminiJSONPricingSelector(model, body)
+		if selectorErr != nil {
+			writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "request contains unsupported billing options")
+			return
+		}
+		idempotencyKey, keyErr := idempotency.Extract(request.Header)
+		if keyErr != nil {
+			writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "idempotency key is invalid")
+			return
+		}
+		var fingerprint [32]byte
+		if idempotencyKey != "" {
+			query := request.URL.Query()
+			query.Del("key")
+			wireIdentity := request.Method + " " + request.URL.EscapedPath() + "?" + query.Encode() + " " + request.Header.Get("Content-Type")
+			fingerprint = idempotency.Fingerprint("gemini", string(imageoperation.Generate), model, route.ChannelID, wireIdentity, body)
+		}
+		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{
+			RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID,
+			Protocol: "gemini", Operation: string(imageoperation.Generate), Model: model, ChannelID: route.ChannelID,
+			Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality,
+			IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint,
+		})
+		if billingErr != nil {
+			handler.writeBillingError(tracked, billingErr)
+			return
+		}
+		charge = &startedCharge
+		if charge.Replay {
+			handler.writeSnapshot(tracked, charge.Response, true)
+			return
+		}
+	}
 
 	response, err := handler.executor.GenerateContent(request.Context(), google.GenerateContentRequest{
 		Model:       model,
@@ -110,10 +182,43 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		Body:        bytes.NewReader(body),
 	})
 	if err != nil {
+		if charge != nil {
+			snapshot := handler.executorErrorSnapshot(err)
+			if errors.Is(err, providercredentials.ErrCredentialUnavailable) {
+				completed, completeErr := handler.complete(request.Context(), charge.ID, false, snapshot)
+				if completeErr == nil {
+					handler.writeSnapshot(tracked, completed.Response, false)
+					return
+				}
+				handler.reconciliationError(tracked, request.Context(), charge.ID, geminiKnownObservation(false, billing.SettlementFailed, snapshot))
+				return
+			}
+			reason := billing.ExecutorConnection
+			if errors.Is(err, google.ErrTimeout) {
+				reason = billing.ExecutorTimeout
+			}
+			handler.reconciliationError(tracked, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: reason})
+			return
+		}
 		handler.writeExecutorError(tracked, err)
 		return
 	}
 	defer response.Body.Close()
+	if charge != nil {
+		responseBody, readErr := readBounded(response.Body, handler.billing.MaximumResponseBytes())
+		if readErr != nil {
+			handler.reconciliationError(tracked, request.Context(), charge.ID, geminiKnownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.ResponseUnavailable, handler.responseUnavailableSnapshot()))
+			return
+		}
+		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeGeminiResponseHeaders(response.Header), Body: responseBody}
+		completed, completeErr := handler.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, snapshot)
+		if completeErr != nil {
+			handler.reconciliationError(tracked, request.Context(), charge.ID, geminiKnownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.SettlementFailed, snapshot))
+			return
+		}
+		handler.writeSnapshot(tracked, completed.Response, false)
+		return
+	}
 	copyResponseHeaders(tracked.Header(), response.Header)
 	tracked.WriteHeader(response.StatusCode)
 	if _, err := io.Copy(tracked, response.Body); err != nil {
@@ -125,29 +230,114 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
-func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) bool {
+func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {
 	if handler.authenticator == nil {
 		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "authentication service unavailable")
-		return false
+		return apikey.Principal{}, false
 	}
 	raw, err := apikey.Extract(request)
 	if err != nil {
 		if errors.Is(err, apikey.ErrAmbiguous) {
 			writeError(writer, http.StatusBadRequest, "INVALID_ARGUMENT", "multiple credential locations are not allowed")
-			return false
+			return apikey.Principal{}, false
 		}
 		writeError(writer, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
-		return false
+		return apikey.Principal{}, false
 	}
-	if _, err := handler.authenticator.Authenticate(request.Context(), raw); err != nil {
+	principal, err := handler.authenticator.Authenticate(request.Context(), raw)
+	if err != nil {
 		if errors.Is(err, apikey.ErrUnavailable) {
 			writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "authentication service unavailable")
-			return false
+			return apikey.Principal{}, false
 		}
 		writeError(writer, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
-		return false
+		return apikey.Principal{}, false
 	}
-	return true
+	return principal, true
+}
+
+func (handler *Handler) complete(ctx context.Context, chargeID string, success bool, snapshot billing.ResponseSnapshot) (billing.Charge, error) {
+	settlementContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return handler.billing.Complete(settlementContext, chargeID, success, snapshot)
+}
+
+func (handler *Handler) reconciliationError(writer http.ResponseWriter, ctx context.Context, chargeID string, observation billing.Observation) {
+	markContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = handler.billing.MarkReconciling(markContext, chargeID, observation)
+	writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "billing settlement is pending")
+}
+
+func geminiKnownObservation(success bool, reason billing.Reason, snapshot billing.ResponseSnapshot) billing.Observation {
+	outcome := billing.KnownFailure
+	if success {
+		outcome = billing.KnownSuccess
+	}
+	return billing.Observation{Outcome: outcome, Reason: reason, Snapshot: snapshot}
+}
+
+func (handler *Handler) responseUnavailableSnapshot() billing.ResponseSnapshot {
+	body, _ := json.Marshal(errorEnvelope{Error: errorBody{Code: http.StatusBadGateway, Message: "provider response unavailable", Status: "UNAVAILABLE"}})
+	return billing.ResponseSnapshot{Status: http.StatusBadGateway, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
+}
+
+func (handler *Handler) executorErrorSnapshot(err error) billing.ResponseSnapshot {
+	status, code, message := http.StatusInternalServerError, "INTERNAL", "internal server error"
+	switch {
+	case errors.Is(err, providercredentials.ErrCredentialUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable"
+	case errors.Is(err, google.ErrTimeout):
+		status, code, message = http.StatusGatewayTimeout, "DEADLINE_EXCEEDED", "provider request timed out"
+	case errors.Is(err, google.ErrCanceled):
+		status, code, message = 499, "CANCELLED", "request canceled"
+	case errors.Is(err, google.ErrUpstream):
+		status, code, message = http.StatusBadGateway, "UNAVAILABLE", "provider unavailable"
+	}
+	body, _ := json.Marshal(errorEnvelope{Error: errorBody{Code: status, Message: message, Status: code}})
+	return billing.ResponseSnapshot{Status: status, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
+}
+
+func (handler *Handler) writeBillingError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ledger.ErrInsufficientFunds):
+		writeError(writer, http.StatusPaymentRequired, "RESOURCE_EXHAUSTED", "insufficient credits")
+	case errors.Is(err, billing.ErrRequestConflict):
+		writeError(writer, http.StatusConflict, "ALREADY_EXISTS", "idempotency key conflicts with another request")
+	case errors.Is(err, billing.ErrRequestPending):
+		writeError(writer, http.StatusConflict, "ABORTED", "idempotent request is still in progress")
+	case errors.Is(err, billing.ErrAlreadySettled):
+		writeError(writer, http.StatusConflict, "ALREADY_EXISTS", "request identifier is already settled")
+	case errors.Is(err, billing.ErrInvalidRequest):
+		writeError(writer, http.StatusBadRequest, "INVALID_ARGUMENT", "request cannot be billed")
+	case errors.Is(err, pricing.ErrPriceUnavailable), errors.Is(err, pricing.ErrMarginViolation), errors.Is(err, ledger.ErrTenantUnavailable):
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
+	default:
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
+	}
+}
+
+func (handler *Handler) writeSnapshot(writer http.ResponseWriter, snapshot billing.ResponseSnapshot, replay bool) {
+	for key, values := range snapshot.Headers {
+		for _, value := range values {
+			writer.Header().Add(key, value)
+		}
+	}
+	if replay {
+		writer.Header().Set("Idempotency-Replayed", "true")
+	}
+	writer.WriteHeader(snapshot.Status)
+	_, _ = writer.Write(snapshot.Body)
+}
+
+func safeGeminiResponseHeaders(source http.Header) map[string][]string {
+	result := map[string][]string{}
+	for _, key := range []string{"Content-Type", "Retry-After", "X-Goog-Request-Id"} {
+		if values := source.Values(key); len(values) > 0 {
+			result[key] = append([]string(nil), values...)
+		}
+	}
+	return result
 }
 
 func (handler *Handler) writeExecutorError(writer http.ResponseWriter, err error) {

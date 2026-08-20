@@ -425,7 +425,8 @@ func sameRequest(charge Charge, request BeginRequest) bool {
 func validBeginRequest(request BeginRequest) bool {
 	hasFingerprint := request.RequestFingerprint != ([32]byte{})
 	validIdempotency := (request.IdempotencyKey == "" && !hasFingerprint) || (idempotency.Valid(request.IdempotencyKey) && hasFingerprint)
-	return validIdempotency && validPrefixed(request.OrganizationID, "org_", 200) && validPrefixed(request.ProjectID, "project_", 200) && validText(request.RequestID, 128) && request.Protocol == "openai" && (request.Operation == "image.generate" || request.Operation == "image.edit") && validText(request.Model, 200) && validID(request.ChannelID, "channel_") && request.Quantity >= 1 && request.Quantity <= 10 && validText(request.Size, 80) && validText(request.Quality, 80)
+	validProtocolOperation := (request.Protocol == "openai" && (request.Operation == "image.generate" || request.Operation == "image.edit")) || (request.Protocol == "gemini" && request.Operation == "image.generate")
+	return validIdempotency && validPrefixed(request.OrganizationID, "org_", 200) && validPrefixed(request.ProjectID, "project_", 200) && validText(request.RequestID, 128) && validProtocolOperation && validText(request.Model, 200) && validID(request.ChannelID, "channel_") && request.Quantity >= 1 && request.Quantity <= 10 && validText(request.Size, 80) && validText(request.Quality, 80)
 }
 
 func (service *Service) prepareSnapshot(snapshot ResponseSnapshot) (ResponseSnapshot, []byte, [32]byte, error) {
@@ -463,6 +464,8 @@ func httpCanonicalHeader(value string) string {
 		return "Content-Type"
 	case "retry-after":
 		return "Retry-After"
+	case "x-goog-request-id":
+		return "X-Goog-Request-Id"
 	default:
 		return ""
 	}

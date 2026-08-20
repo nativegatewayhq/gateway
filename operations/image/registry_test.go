@@ -31,9 +31,18 @@ func TestRegistryResolvesCapabilitiesAndListsStably(t *testing.T) {
 	if _, err := registry.Resolve("missing", Generate, JSON); !errors.Is(err, ErrModelNotFound) {
 		t.Fatalf("missing = %v", err)
 	}
+	if _, err := registry.Resolve("gemini-image", Generate, JSON); !errors.Is(err, ErrModelNotFound) {
+		t.Fatalf("cross-protocol model leaked into OpenAI: %v", err)
+	}
 	models := registry.List()
 	if len(models) != 2 || models[0].Model != "gpt-image-1" || models[1].Model != "grok-imagine-image-quality" {
 		t.Fatalf("list = %+v", models)
+	}
+	if route, err := registry.ResolveProtocol("gemini", "gemini-image", Generate, JSON); err != nil || route.Provider != providercredentials.Google {
+		t.Fatalf("gemini route=%+v error=%v", route, err)
+	}
+	if geminiModels := registry.ListProtocol("gemini"); len(geminiModels) != 1 || geminiModels[0].Model != "gemini-image" {
+		t.Fatalf("gemini list=%+v", geminiModels)
 	}
 	models[0].Capabilities[0].Operation = "mutated"
 	if route, _ := registry.Resolve("gpt-image-1", Generate, JSON); route.Capabilities[0].Operation != Generate {
@@ -43,16 +52,17 @@ func TestRegistryResolvesCapabilitiesAndListsStably(t *testing.T) {
 
 func TestRegistryRejectsInvalidManifest(t *testing.T) {
 	t.Parallel()
-	valid := ModelRoute{Model: "model", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []Capability{{Generate, JSON}}}
+	valid := ModelRoute{Protocol: "openai", Model: "model", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []Capability{{Generate, JSON}}}
 	if _, err := NewRegistry(valid, valid); !errors.Is(err, ErrDuplicateModel) {
 		t.Fatalf("duplicate = %v", err)
 	}
 	for _, invalid := range []ModelRoute{
-		{Model: "", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []Capability{{Generate, JSON}}},
-		{Model: "model", Provider: providercredentials.Google, Owner: "google", Capabilities: []Capability{{Generate, JSON}}},
-		{Model: "model", Provider: providercredentials.OpenAI, Owner: "", Capabilities: []Capability{{Generate, JSON}}},
-		{Model: "model", Provider: providercredentials.OpenAI, Owner: "openai"},
-		{Model: "model", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []Capability{{Generate, Multipart}}},
+		{Protocol: "openai", Model: "", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []Capability{{Generate, JSON}}},
+		{Protocol: "gemini", Model: "model", Provider: providercredentials.Google, ChannelID: "bad", Owner: "google", Capabilities: []Capability{{Generate, JSON}}},
+		{Protocol: "openai", Model: "model", Provider: providercredentials.OpenAI, Owner: "", Capabilities: []Capability{{Generate, JSON}}},
+		{Protocol: "openai", Model: "model", Provider: providercredentials.OpenAI, Owner: "openai"},
+		{Protocol: "openai", Model: "model", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []Capability{{Generate, Multipart}}},
+		{Protocol: "gemini", Model: "model", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []Capability{{Generate, JSON}}},
 	} {
 		if _, err := NewRegistry(invalid); !errors.Is(err, ErrInvalidModel) {
 			t.Fatalf("invalid accepted: %+v, %v", invalid, err)
