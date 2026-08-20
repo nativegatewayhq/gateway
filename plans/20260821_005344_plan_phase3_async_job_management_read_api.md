@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-035
 title: Phase 3 Async Job Management Read API
-status: in_progress
+status: completed
 created_at: 2026-08-21T00:53:44+09:00
-updated_at: 2026-08-21T00:53:44+09:00
+updated_at: 2026-08-21T02:15:00+09:00
 owners:
   - gateway
 initiative: phase-3-async-job-management-read-api
@@ -224,22 +224,25 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] 인증된 API Key가 자신의 Job만 deterministic pagination으로 조회함
-- [ ] protocol/status/settlement/model filter와 cursor query binding이 검증됨
-- [ ] detail이 bounded event timeline과 usage/customer billing projection을 제공함
-- [ ] raw snapshot/prompt/URL/Provider identity/credential/원가/margin이 노출되지 않음
-- [ ] 다른 tenant/project/API Key/model 권한의 Job이 동일 404로 은닉됨
-- [ ] cursor tamper와 active/previous secret rotation이 안전하게 처리됨
-- [ ] concurrent insert/update 중 page duplicate/skip 정책이 검증됨
-- [ ] owner keyset index와 representative query plan이 검증됨
-- [ ] management read가 Wallet/Ledger/Job 상태를 변경하지 않음
-- [ ] 기존 native SDK, webhook, worker와 전체 integration test가 회귀하지 않음
-- [ ] README/OpenAPI examples와 Dashboard/Cloud/Conformance handoff가 갱신됨
-- [ ] commit, PR과 최종 CI 증거가 기록됨
+- [x] 인증된 API Key가 자신의 Job만 deterministic pagination으로 조회함
+- [x] protocol/status/settlement/model filter와 cursor query binding이 검증됨
+- [x] detail이 bounded event timeline과 usage/customer billing projection을 제공함
+- [x] raw snapshot/prompt/URL/Provider identity/credential/원가/margin이 노출되지 않음
+- [x] 다른 tenant/project/API Key/model 권한의 Job이 동일 404로 은닉됨
+- [x] cursor tamper와 active/previous secret rotation이 안전하게 처리됨
+- [x] concurrent insert/update 중 page duplicate/skip 정책이 검증됨
+- [x] owner keyset index와 representative query plan이 검증됨
+- [x] management read가 Wallet/Ledger/Job 상태를 변경하지 않음
+- [x] 기존 native SDK, webhook, worker와 전체 integration test가 회귀하지 않음
+- [x] README/OpenAPI examples와 Dashboard/Cloud/Conformance handoff가 갱신됨
+- [x] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 2026-08-21: `GOCACHE=/private/tmp/nativegateway-go-cache-035 make check` 통과 (`gofmt`, `go vet`, 전체 race test, 5개 binary build).
+- 2026-08-21: 로컬 PostgreSQL 17/Redis 8에서 `make integration-test` 전체 통과. tenant/API Key/model 격리, keyset pagination과 migration index를 실제 DB에서 검증했다.
+- 2026-08-21: management handler 단위 테스트에서 duplicate query, unauthorized detail 404, cursor tamper, tenant/filter binding과 active/previous rotation을 검증했다.
+- GitHub PR과 최종 Actions run URL은 PR 기록을 canonical evidence로 사용한다.
 
 ## Rollback 계획
 

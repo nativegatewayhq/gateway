@@ -237,6 +237,10 @@ func requestMetadata(request *http.Request) (string, string, string) {
 		return "openai", "image.edit", "/v1/images/edits"
 	case path == "/v1/models":
 		return "openai", "models.list", "/v1/models"
+	case path == "/gateway/v1/jobs":
+		return "gateway", "jobs.list", "/gateway/v1/jobs"
+	case strings.HasPrefix(path, "/gateway/v1/jobs/"):
+		return "gateway", "jobs.get", "/gateway/v1/jobs/{id}"
 	case path == "/v1/predictions":
 		return "replicate", "image.generate", "/v1/predictions"
 	case strings.HasPrefix(path, "/v1/predictions/"):
@@ -278,7 +282,7 @@ func boundedProtocol(value string) string {
 	return allowed(value, "openai", "gemini", "replicate", "fal", "gateway")
 }
 func boundedOperation(value string) string {
-	return allowed(value, "image.generate", "image.edit", "models.list", "health.live", "health.ready", "unknown")
+	return allowed(value, "image.generate", "image.edit", "models.list", "jobs.list", "jobs.get", "health.live", "health.ready", "unknown")
 }
 func boundedProvider(value string) string {
 	return allowed(value, "openai", "xai", "google", "replicate", "fal")
@@ -310,5 +314,5 @@ func boundedRejection(value string) string {
 }
 func boundedSource(value string) string { return allowed(value, "url", "base64", "inline") }
 func boundedRoute(value string) string {
-	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/models", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
+	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/models", "/gateway/v1/jobs", "/gateway/v1/jobs/{id}", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
 }

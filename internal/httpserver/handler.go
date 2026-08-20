@@ -25,6 +25,7 @@ type Routes struct {
 	ReplicateWebhook http.Handler
 	Fal              http.Handler
 	FalWebhook       http.Handler
+	Management       http.Handler
 }
 
 // NewHandler builds the Gateway-owned and accepted provider-native routes.
@@ -61,6 +62,10 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	}
 	if len(routeSets) > 0 && routeSets[0].FalWebhook != nil {
 		mux.Handle("/internal/webhooks/fal/", routeSets[0].FalWebhook)
+	}
+	if len(routeSets) > 0 && routeSets[0].Management != nil {
+		mux.Handle("/gateway/v1/jobs", routeSets[0].Management)
+		mux.Handle("/gateway/v1/jobs/", routeSets[0].Management)
 	}
 	mux.HandleFunc("GET /health/live", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})

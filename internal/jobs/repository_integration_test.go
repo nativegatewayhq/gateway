@@ -450,3 +450,47 @@ func settlementFor(leases []SettlementLease, id string) (SettlementLease, bool) 
 	}
 	return SettlementLease{}, false
 }
+
+func TestManagementReadIsKeyScopedAndKeysetPaginated(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	ctx := context.Background()
+	first, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.RequestID += "-second"
+	request.IdempotencyKey += "-second"
+	request.Fingerprint = sha256.Sum256([]byte("second"))
+	second, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, more, err := repository.ListManagement(ctx, ManagementListRequest{Owner: owner, AllowAllModels: true, Limit: 1})
+	if err != nil || len(items) != 1 || !more {
+		t.Fatalf("items=%+v more=%v err=%v", items, more, err)
+	}
+	next, more, err := repository.ListManagement(ctx, ManagementListRequest{Owner: owner, AllowAllModels: true, Limit: 1, BeforeCreatedAt: items[0].CreatedAt, BeforeID: items[0].ID})
+	if err != nil || len(next) != 1 || more || next[0].ID == items[0].ID {
+		t.Fatalf("next=%+v more=%v err=%v", next, more, err)
+	}
+	seen := map[string]bool{items[0].ID: true, next[0].ID: true}
+	if !seen[first.ID] || !seen[second.ID] {
+		t.Fatalf("missing jobs: %#v", seen)
+	}
+	other := owner
+	other.APIKeyID = "key_other"
+	hidden, _, err := repository.ListManagement(ctx, ManagementListRequest{Owner: other, AllowAllModels: true, Limit: 10})
+	if err != nil || len(hidden) != 0 {
+		t.Fatalf("cross-key jobs=%+v err=%v", hidden, err)
+	}
+	if _, err := repository.GetManagement(ctx, other, first.ID, func(string, string, string) bool { return true }); !errors.Is(err, joboperation.ErrNotFound) {
+		t.Fatalf("cross-key detail=%v", err)
+	}
+	if _, err := repository.GetManagement(ctx, owner, first.ID, func(string, string, string) bool { return false }); !errors.Is(err, joboperation.ErrNotFound) {
+		t.Fatalf("unauthorized model detail=%v", err)
+	}
+	var indexes int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname IN ('async_jobs_management_owner_idx','async_jobs_management_state_idx')`).Scan(&indexes); err != nil || indexes != 2 {
+		t.Fatalf("indexes=%d err=%v", indexes, err)
+	}
+}

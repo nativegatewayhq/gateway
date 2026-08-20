@@ -31,6 +31,7 @@ import (
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
+	managementProtocol "github.com/nativegatewayhq/gateway/protocols/management"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
 	replicateProtocol "github.com/nativegatewayhq/gateway/protocols/replicate"
 	falProvider "github.com/nativegatewayhq/gateway/providers/fal"
@@ -225,6 +226,7 @@ func run(stdout, stderr io.Writer) int {
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
 	var falWebhookHandler http.Handler
+	var managementHandler http.Handler
 	var asyncWorker *jobs.Worker
 	asyncProviders := map[string]jobs.Provider{}
 	var replicateAdapter *replicateProvider.Client
@@ -267,6 +269,13 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		jobService.SetTelemetry(telemetryRuntime.Recorder)
+		if cfg.JobManagementMode == config.JobManagementRequired {
+			managementHandler, serviceErr = managementProtocol.NewHandler(apiKeyAuthenticator, jobRepository, cfg.JobManagementCursorSecrets)
+			if serviceErr != nil {
+				logger.Error("gateway Job management initialization failed")
+				return 1
+			}
+		}
 		workerConfig := jobs.WorkerConfig{Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval, BaseBackoff: cfg.ReconcileBackoff, MaximumBackoff: cfg.ReconcileMaxBackoff, BatchSize: cfg.ReconcileBatchSize, MaximumAttempts: cfg.ReconcileMaxAttempts}
 		asyncWorker, serviceErr = jobs.NewWorker(jobRepository, asyncProviders, billingService, workerConfig, "gateway-job-worker")
 		if serviceErr != nil {
@@ -356,6 +365,7 @@ func run(stdout, stderr io.Writer) int {
 		ReplicateWebhook:    replicateWebhookHandler,
 		Fal:                 falHandler,
 		FalWebhook:          falWebhookHandler,
+		Management:          managementHandler,
 		ClientIPResolver:    clientIPResolver,
 		Telemetry:           telemetryRuntime.Recorder,
 		TracePropagator:     telemetryRuntime.Propagator,
