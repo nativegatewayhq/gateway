@@ -176,5 +176,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260821-034` | completed | [Phase 3 Async Usage and Partial-output Settlement](./20260821_001646_plan_phase3_async_usage_partial_settlement.md) | `phase-3-async-usage-partial-settlement` |
 | `gateway-20260821-035` | completed | [Phase 3 Async Job Management Read API](./20260821_005344_plan_phase3_async_job_management_read_api.md) | `phase-3-async-job-management-read-api` |
 | `gateway-20260821-036` | completed | [Phase 4 OpenAI Chat Completions Non-streaming Foundation](./20260821_011141_plan_phase4_openai_chat_completions_foundation.md) | `phase-4-openai-chat-completions-foundation` |
+| `gateway-20260821-037` | accepted | [Phase 4 OpenAI Chat Token Usage Billing and Settlement](./20260821_013812_plan_phase4_openai_chat_token_settlement.md) | `phase-4-openai-chat-token-settlement` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
