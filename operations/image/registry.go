@@ -34,6 +34,7 @@ type Capability struct {
 type ModelRoute struct {
 	Model        string
 	Provider     providercredentials.ProviderID
+	ChannelID    string
 	Owner        string
 	Created      int64
 	Capabilities []Capability
@@ -43,7 +44,7 @@ type Registry struct{ routes map[string]ModelRoute }
 func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 	registry := &Registry{routes: make(map[string]ModelRoute, len(routes))}
 	for _, route := range routes {
-		if !validModelID(route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || (route.Provider != providercredentials.OpenAI && route.Provider != providercredentials.XAI) {
+		if !validModelID(route.Model) || !validChannelID(route.ChannelID) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || (route.Provider != providercredentials.OpenAI && route.Provider != providercredentials.XAI) {
 			return nil, ErrInvalidModel
 		}
 		if _, exists := registry.routes[route.Model]; exists {
@@ -67,8 +68,8 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 
 func DefaultRegistry() *Registry {
 	registry, err := NewRegistry(
-		ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []Capability{{Generate, JSON}, {Edit, Multipart}}},
-		ModelRoute{Model: "grok-imagine-image-quality", Provider: providercredentials.XAI, Owner: "xai", Capabilities: []Capability{{Generate, JSON}, {Edit, JSON}}},
+		ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []Capability{{Generate, JSON}, {Edit, Multipart}}},
+		ModelRoute{Model: "grok-imagine-image-quality", Provider: providercredentials.XAI, ChannelID: "channel_00000000000000000000000000000002", Owner: "xai", Capabilities: []Capability{{Generate, JSON}, {Edit, JSON}}},
 	)
 	if err != nil {
 		panic("invalid built-in image model registry")
@@ -118,6 +119,18 @@ func validModelID(model string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+func validChannelID(channelID string) bool {
+	if len(channelID) != len("channel_")+32 || !strings.HasPrefix(channelID, "channel_") {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(channelID, "channel_") {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
 	}
 	return true
 }

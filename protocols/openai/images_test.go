@@ -33,8 +33,8 @@ func (function executorFunc) Generate(ctx context.Context, request openaiimages.
 func testRegistry(t *testing.T) *imageoperation.Registry {
 	t.Helper()
 	registry, err := imageoperation.NewRegistry(
-		imageoperation.ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.Multipart}}},
-		imageoperation.ModelRoute{Model: "grok-imagine-image-quality", Provider: providercredentials.XAI, Owner: "xai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.JSON}}},
+		imageoperation.ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.Multipart}}},
+		imageoperation.ModelRoute{Model: "grok-imagine-image-quality", Provider: providercredentials.XAI, ChannelID: "channel_00000000000000000000000000000002", Owner: "xai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.JSON}}},
 	)
 	if err != nil {
 		t.Fatal(err)

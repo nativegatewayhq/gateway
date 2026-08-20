@@ -10,9 +10,12 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/app"
+	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/database"
+	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/observability"
+	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
@@ -57,15 +60,33 @@ func run(stdout, stderr io.Writer) int {
 	imageModels := imageoperation.DefaultRegistry()
 	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
-	openAIImagesHandler := openaiProtocol.NewImagesHandler(logger, apiKeyAuthenticator, imageModels, map[providercredentials.ProviderID]openaiProtocol.Executor{
-		providercredentials.OpenAI: openAIExecutor,
-		providercredentials.XAI:    xAIExecutor,
-	}, cfg.ImagesBodyBytes)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
 		providercredentials.XAI:    xAIExecutor,
 	}
-	openAIImageEditsHandler := openaiProtocol.NewEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
+	var chargeBilling openaiProtocol.Billing
+	if cfg.BillingMode == config.BillingRequired {
+		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
+		if pricingErr != nil {
+			logger.Error("gateway pricing initialization failed")
+			return 1
+		}
+		billingService, billingErr := chargebilling.NewService(pool, priceEstimator, ledger.NewService(pool))
+		if billingErr != nil {
+			logger.Error("gateway billing initialization failed")
+			return 1
+		}
+		chargeBilling = billingService
+	}
+	var openAIImagesHandler *openaiProtocol.Handler
+	var openAIImageEditsHandler *openaiProtocol.EditHandler
+	if chargeBilling == nil {
+		openAIImagesHandler = openaiProtocol.NewImagesHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes)
+		openAIImageEditsHandler = openaiProtocol.NewEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
+	} else {
+		openAIImagesHandler = openaiProtocol.NewBillableImagesHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling)
+		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling)
+	}
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 
 	if err := app.Run(ctx, cfg, logger, app.Dependencies{

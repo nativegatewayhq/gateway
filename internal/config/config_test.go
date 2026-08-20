@@ -40,6 +40,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ImageEditsBodyBytes != 64*1024*1024 || cfg.ImageEditSpoolLimit != 8 {
 		t.Errorf("Image edits config = %d, %d", cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
 	}
+	if cfg.BillingMode != BillingDisabled || cfg.MinimumMarginBPS != 0 {
+		t.Errorf("Billing config = %q, %d", cfg.BillingMode, cfg.MinimumMarginBPS)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -56,6 +59,8 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES": "524288",
 		"GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES":   "33554432",
 		"GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS":     "4",
+		"GATEWAY_BILLING_MODE":                         "required",
+		"GATEWAY_MINIMUM_MARGIN_BPS":                   "1250",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -81,6 +86,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ImageEditsBodyBytes != 33554432 || cfg.ImageEditSpoolLimit != 4 {
 		t.Errorf("Image edits config = %d, %d", cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
+	}
+	if cfg.BillingMode != BillingRequired || cfg.MinimumMarginBPS != 1250 {
+		t.Errorf("Billing config = %q, %d", cfg.BillingMode, cfg.MinimumMarginBPS)
 	}
 }
 
@@ -111,6 +119,9 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "excessive edit body limit", key: "GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES", value: "268435457", marker: ""},
 		{name: "invalid spool limit", key: "GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS", value: "secret-limit", marker: "secret-limit"},
 		{name: "excessive spool limit", key: "GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS", value: "129", marker: ""},
+		{name: "invalid billing mode", key: "GATEWAY_BILLING_MODE", value: "secret-mode", marker: "secret-mode"},
+		{name: "invalid margin", key: "GATEWAY_MINIMUM_MARGIN_BPS", value: "secret-margin", marker: "secret-margin"},
+		{name: "excessive margin", key: "GATEWAY_MINIMUM_MARGIN_BPS", value: "10001", marker: ""},
 	}
 
 	for _, tt := range tests {

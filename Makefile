@@ -16,7 +16,7 @@ test:
 
 integration-test:
 	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi
-	TEST_DATABASE_URL="$$TEST_DATABASE_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./internal/ledger ./internal/pricing ./protocols/gemini ./protocols/openai ./providers/google ./providers/openai ./providers/xai ./cmd/gateway-key ./cmd/gateway
+	TEST_DATABASE_URL="$$TEST_DATABASE_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./internal/billing ./internal/ledger ./internal/pricing ./protocols/gemini ./protocols/openai ./providers/google ./providers/openai ./providers/xai ./cmd/gateway-key ./cmd/gateway
 
 vet:
 	go vet ./...
