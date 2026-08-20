@@ -27,6 +27,7 @@ type ResponsesRequest struct {
 }
 type ResponsesExecutor struct {
 	origin            *url.URL
+	provider          providercredentials.ProviderID
 	client            *http.Client
 	credentials       *providercredentials.Registry
 	timeout           time.Duration
@@ -34,26 +35,46 @@ type ResponsesExecutor struct {
 }
 
 func NewResponses(credentials *providercredentials.Registry, timeout time.Duration, streamIdle ...time.Duration) *ResponsesExecutor {
+	return NewResponsesForProvider(providercredentials.OpenAI, credentials, timeout, streamIdle...)
+}
+func NewResponsesForProvider(provider providercredentials.ProviderID, credentials *providercredentials.Registry, timeout time.Duration, streamIdle ...time.Duration) *ResponsesExecutor {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, ForceAttemptHTTP2: true, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: timeout, ExpectContinueTimeout: time.Second}
-	executor := NewResponsesWithClient(credentials, timeout, &http.Client{Transport: transport})
+	executor := NewResponsesWithClientForProvider(provider, credentials, timeout, &http.Client{Transport: transport})
 	if len(streamIdle) > 0 {
 		executor.streamIdleTimeout = streamIdle[0]
 	}
 	return executor
 }
 func NewResponsesWithClient(credentials *providercredentials.Registry, timeout time.Duration, client *http.Client) *ResponsesExecutor {
-	origin, _ := url.Parse("https://api.openai.com")
+	return NewResponsesWithClientForProvider(providercredentials.OpenAI, credentials, timeout, client)
+}
+func NewResponsesWithClientForProvider(provider providercredentials.ProviderID, credentials *providercredentials.Registry, timeout time.Duration, client *http.Client) *ResponsesExecutor {
+	originText := "https://api.openai.com"
+	if provider == providercredentials.XAI {
+		originText = "https://api.x.ai"
+	} else if provider != providercredentials.OpenAI {
+		panic("invalid OpenAI-protocol Responses provider")
+	}
+	origin, err := url.Parse(originText)
+	if err != nil || origin.Scheme != "https" || origin.Host == "" {
+		panic("invalid trusted OpenAI Responses origin")
+	}
+	if client == nil {
+		client = &http.Client{Transport: http.DefaultTransport}
+	}
 	copy := *client
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &ResponsesExecutor{origin: origin, client: &copy, credentials: credentials, timeout: timeout, streamIdleTimeout: 30 * time.Second}
+	return &ResponsesExecutor{origin: origin, provider: provider, client: &copy, credentials: credentials, timeout: timeout, streamIdleTimeout: 30 * time.Second}
 }
 func (e *ResponsesExecutor) Create(ctx context.Context, input ResponsesRequest) (*http.Response, error) {
-	if e == nil || e.timeout <= 0 {
+	if e == nil || e.origin == nil || e.timeout <= 0 {
 		return nil, ErrResponsesUpstream
 	}
 	target := *e.origin
 	target.Path = "/v1/responses"
+	target.RawPath = ""
 	target.RawQuery = ""
+	target.Fragment = ""
 	requestCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, target.String(), input.Body)
 	if err != nil {
@@ -68,7 +89,7 @@ func (e *ResponsesExecutor) Create(ctx context.Context, input ResponsesRequest) 
 	if input.UserAgent != "" {
 		request.Header.Set("User-Agent", input.UserAgent)
 	}
-	request, err = providercredentials.PrepareOutboundChannel(request, input.ChannelID, providercredentials.OpenAI, e.credentials)
+	request, err = providercredentials.PrepareOutboundChannel(request, input.ChannelID, e.provider, e.credentials)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -78,10 +99,10 @@ func (e *ResponsesExecutor) Create(ctx context.Context, input ResponsesRequest) 
 	if err != nil {
 		cause := requestCtx.Err()
 		cancel()
-		if errors.Is(cause, context.DeadlineExceeded) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(cause, context.DeadlineExceeded) {
 			return nil, ErrResponsesTimeout
 		}
-		if errors.Is(cause, context.Canceled) {
+		if errors.Is(err, context.Canceled) || errors.Is(cause, context.Canceled) {
 			return nil, ErrResponsesCanceled
 		}
 		return nil, ErrResponsesUpstream

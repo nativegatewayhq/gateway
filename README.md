@@ -64,6 +64,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES` | `8388608` | Maximum Chat request and response body; maximum 32 MiB |
 | `GATEWAY_OPENAI_RESPONSES_MODELS` | unset | Comma-separated exact OpenAI Responses model IDs |
 | `GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS` | unset | Required in billing mode: comma-separated `model:maximum_input_tokens:maximum_output_tokens` entries |
+| `GATEWAY_OPENAI_RESPONSES_ROUTES_JSON` | unset | Static logical Responses route array; replaces the two legacy Responses model settings and supports native OpenAI/xAI fixed, priority, weighted, and lowest-cost candidates |
 | `GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT` | `2m` | Responses request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT` | `30s` | Maximum idle interval between upstream Responses streaming reads; maximum `10m` |
 | `GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES` | `8388608` | Maximum Responses request and response body; maximum 32 MiB |
@@ -274,6 +275,12 @@ for event in stream:
 ```
 
 BYOK mode preserves native pass-through behavior. In billing-required mode, every enabled model needs a `GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS` entry and every request must provide a positive `max_output_tokens` no greater than its model limit. Publish an operation-isolated immutable price with `gateway-chat-price -operation responses.create`; input, cached input, and output rates use `USD_TICKS` per million tokens.
+
+For native-compatible multi-provider routing, set `GATEWAY_OPENAI_RESPONSES_ROUTES_JSON` instead of the two legacy model variables. Each candidate declares its OpenAI or xAI Provider model, channel, policy metadata, and exact `streaming`, `function_tools`, `web_search`, `x_search`, `code_interpreter`, `image_generation`, `json_mode`, and `stored_response` capabilities. Only the top-level model string is rewritten; typed items, tool data, future JSON fields, Provider JSON, and SSE bytes remain native.
+
+Capability, credential, health, exact-price, margin, and spend-cap rejection may move to another candidate only before dispatch. A Provider HTTP response, timeout, reset, malformed response, incomplete stream, or client disconnect never triggers a second Provider call. Managed charges record immutable candidate, Provider model, policy, rank, and price-evaluation time using `openai-responses-route-v1`; idempotency replay uses the original logical request fingerprint and route-independent lookup.
+
+`previous_response_id` and `background=true` are rejected until durable Provider response ownership and background Job reconciliation are implemented. Unknown tool types also fail closed instead of being sent to a guessed Provider.
 
 ### Anthropic Messages foundation
 

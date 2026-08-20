@@ -216,6 +216,27 @@ func run(stdout, stderr io.Writer) int {
 		responsesLimits[model] = responsesoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
 	}
 	responsesModels, err := responsesoperation.NewRegistryWithLimits(cfg.OpenAIResponsesModels, responsesLimits)
+	if len(cfg.OpenAIResponsesRoutes) > 0 {
+		routes := make([]responsesoperation.Route, 0, len(cfg.OpenAIResponsesRoutes))
+		for _, configured := range cfg.OpenAIResponsesRoutes {
+			candidates := make([]responsesoperation.Candidate, 0, len(configured.Candidates))
+			for _, candidate := range configured.Candidates {
+				provider, providerErr := providercredentials.ParseProviderID(candidate.Provider)
+				if providerErr != nil {
+					err = providerErr
+					break
+				}
+				candidates = append(candidates, responsesoperation.Candidate{ID: candidate.ID, Provider: provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Priority: candidate.Priority, Weight: candidate.Weight, Enabled: candidate.Enabled, Capabilities: responsesoperation.Capabilities{Streaming: candidate.Streaming, FunctionTools: candidate.FunctionTools, WebSearch: candidate.WebSearch, XSearch: candidate.XSearch, CodeInterpreter: candidate.CodeInterpreter, ImageGeneration: candidate.ImageGeneration, JSONMode: candidate.JSONMode, StoredResponse: candidate.StoredResponse}})
+			}
+			if err != nil {
+				break
+			}
+			routes = append(routes, responsesoperation.Route{Model: configured.Model, Owner: configured.Owner, Policy: responsesoperation.Policy(configured.Policy), FixedCandidateID: configured.FixedCandidateID, MaximumInputTokens: configured.MaximumInputTokens, MaximumOutputTokens: configured.MaximumOutputTokens, Candidates: candidates})
+		}
+		if err == nil {
+			responsesModels, err = responsesoperation.NewRouteRegistry(routes)
+		}
+	}
 	if err != nil {
 		logger.Error("gateway Responses model registry initialization failed")
 		return 1
@@ -305,11 +326,15 @@ func run(stdout, stderr io.Writer) int {
 		openAIChatHandler = chatHandler
 	}
 	if len(cfg.OpenAIResponsesModels) > 0 {
+		responsesExecutors := map[providercredentials.ProviderID]openaiProtocol.ResponsesExecutor{
+			providercredentials.OpenAI: openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout, cfg.ResponsesStreamIdleTimeout),
+			providercredentials.XAI:    xai.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout, cfg.ResponsesStreamIdleTimeout),
+		}
 		var responsesHandler *openaiProtocol.ResponsesHandler
 		if responsesChargeBilling == nil {
-			responsesHandler = openaiProtocol.NewResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout, cfg.ResponsesStreamIdleTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes)
+			responsesHandler = openaiProtocol.NewRoutedResponsesHandler(logger, apiKeyAuthenticator, responsesModels, responsesExecutors, providerCredentialRegistry, healthGate, cfg.ResponsesBodyBytes)
 		} else {
-			responsesHandler = openaiProtocol.NewBillableResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout, cfg.ResponsesStreamIdleTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes, responsesChargeBilling)
+			responsesHandler = openaiProtocol.NewBillableRoutedResponsesHandler(logger, apiKeyAuthenticator, responsesModels, responsesExecutors, providerCredentialRegistry, healthGate, cfg.ResponsesBodyBytes, responsesChargeBilling)
 		}
 		responsesHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIResponsesHandler = responsesHandler

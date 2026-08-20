@@ -148,6 +148,37 @@ assert r.output_text == "gateway ok"`
 	}
 }
 
+func TestOfficialOpenAIResponsesSDKsUseLogicalModelThroughXAI(t *testing.T) {
+	registry, err := responsesoperation.NewRouteRegistry([]responsesoperation.Route{{Model: "logical-responses", Owner: "gateway", Policy: responsesoperation.Priority, Candidates: []responsesoperation.Candidate{{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok-provider", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Capabilities: responsesoperation.Capabilities{FunctionTools: true}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewRoutedResponsesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, map[providercredentials.ProviderID]ResponsesExecutor{providercredentials.XAI: responsesExecutorFunc(func(_ context.Context, request openaiProvider.ResponsesRequest) (*http.Response, error) {
+		body, _ := io.ReadAll(request.Body)
+		if !strings.Contains(string(body), `"model":"grok-provider"`) || !strings.Contains(string(body), `"type":"function"`) {
+			t.Fatalf("routed Responses SDK request=%s", body)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"resp_route","object":"response","created_at":1,"status":"completed","model":"grok-provider","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"routed responses ok","annotations":[]}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))}, nil
+	})}, channelAvailability{"channel_00000000000000000000000000000002": true}, providerhealth.NoopGate{}, 8192)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+r=c.responses.create(model="logical-responses",input="hello",tools=[{"type":"function","name":"lookup","description":"lookup","parameters":{"type":"object","properties":{}}}])
+assert r.output_text == "routed responses ok"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python routed Responses SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});c.responses.create({model:"logical-responses",input:"hello",tools:[{type:"function",name:"lookup",description:"lookup",parameters:{type:"object",properties:{}}}]}).then(r=>{if(r.output_text!=="routed responses ok")process.exit(2)}).catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript routed Responses SDK: %v: %s", err, output)
+	}
+}
+
 func TestOfficialOpenAIResponsesStreamingSDKs(t *testing.T) {
 	registry, _ := responsesoperation.NewRegistry([]string{"gpt-4.1"})
 	stream := "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_sdk\",\"object\":\"response\",\"created_at\":1,\"status\":\"in_progress\",\"model\":\"gpt-4.1\",\"output\":[]}}\n\n" +

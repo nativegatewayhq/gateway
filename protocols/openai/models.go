@@ -151,10 +151,23 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 				continue
 			}
 			available := false
-			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
-				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
-			} else {
-				available = configured[model.Provider]
+			candidates := []responsesoperation.Model{model}
+			if routed, ok := handler.responses.(interface {
+				Candidates(string, responsesoperation.Requirements) ([]responsesoperation.Model, error)
+			}); ok {
+				if routedCandidates, err := routed.Candidates(model.ID, responsesoperation.Requirements{}); err == nil {
+					candidates = routedCandidates
+				}
+			}
+			for _, candidate := range candidates {
+				if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
+					available = channelAvailability.ConfiguredChannel(request.Context(), candidate.ChannelID, candidate.Provider)
+				} else {
+					available = configured[candidate.Provider]
+				}
+				if available {
+					break
+				}
 			}
 			if available {
 				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})

@@ -1,9 +1,9 @@
 ---
 id: gateway-20260822-049
 title: Phase 4 OpenAI Responses Protocol-compatible Provider Routing
-status: accepted
+status: in_progress
 created_at: 2026-08-22T07:00:00+09:00
-updated_at: 2026-08-22T07:00:00+09:00
+updated_at: 2026-08-22T09:00:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-provider-routing
