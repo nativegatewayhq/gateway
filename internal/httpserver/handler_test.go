@@ -1,0 +1,144 @@
+package httpserver
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/nativegatewayhq/gateway/internal/observability"
+	"github.com/nativegatewayhq/gateway/internal/requestid"
+)
+
+func TestHealthEndpoints(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"/health/live", "/health/ready"} {
+		t.Run(path, func(t *testing.T) {
+			response := serveRequest(t, NewHandler(discardLogger(), nil), http.MethodGet, path, "")
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", response.Code)
+			}
+			if got := response.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q", got)
+			}
+			if body := response.Body.String(); body != "{\"status\":\"ok\"}\n" {
+				t.Fatalf("body = %q", body)
+			}
+			if !requestid.Valid(response.Header().Get(requestid.HeaderName)) {
+				t.Fatalf("invalid request ID %q", response.Header().Get(requestid.HeaderName))
+			}
+		})
+	}
+}
+
+func TestReadinessFailure(t *testing.T) {
+	t.Parallel()
+
+	handler := NewHandler(discardLogger(), func(context.Context) error { return errors.New("database password=secret") })
+	response := serveRequest(t, handler, http.MethodGet, "/health/ready", "req_ready")
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", response.Code)
+	}
+	if strings.Contains(response.Body.String(), "database") || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("response leaked readiness error: %s", response.Body.String())
+	}
+	assertError(t, response, "not_ready", "req_ready")
+}
+
+func TestNotFoundUsesGatewayError(t *testing.T) {
+	t.Parallel()
+
+	response := serveRequest(t, NewHandler(discardLogger(), nil), http.MethodGet, "/does-not-exist?key=secret", "req_not_found")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.Code)
+	}
+	if strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("response leaked query: %s", response.Body.String())
+	}
+	assertError(t, response, "not_found", "req_not_found")
+}
+
+func TestRecoveryHidesPanicAndRequestSecrets(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	logger := observability.NewLogger(&output, slog.LevelInfo)
+	panicking := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("provider_key=secret-provider-key")
+	})
+	handler := requestid.Middleware(accessLog(logger, recovery(logger, panicking)))
+	response := serveRequest(t, handler, http.MethodGet, "/panic?key=secret-query-key", "req_panic")
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", response.Code)
+	}
+	assertError(t, response, "internal_error", "req_panic")
+	combined := response.Body.String() + output.String()
+	for _, secret := range []string{"secret-provider-key", "secret-query-key", "Authorization", "Cookie"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("panic handling leaked %q: %s", secret, combined)
+		}
+	}
+}
+
+func TestAccessLogContainsRequiredFieldsAndNoSecrets(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	logger := observability.NewLogger(&output, slog.LevelInfo)
+	handler := NewHandler(logger, nil)
+	request := httptest.NewRequest(http.MethodGet, "/health/live?key=secret-query", nil)
+	request.Header.Set(requestid.HeaderName, "req_log")
+	request.Header.Set("Authorization", "Bearer secret-authorization")
+	request.Header.Set("Cookie", "session=secret-cookie")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	logOutput := output.String()
+	for _, field := range []string{"request_id", "req_log", "method", "GET", "route", "GET /health/live", "status", "duration"} {
+		if !strings.Contains(logOutput, field) {
+			t.Errorf("log missing %q: %s", field, logOutput)
+		}
+	}
+	for _, secret := range []string{"secret-query", "secret-authorization", "secret-cookie", "Authorization", "Cookie"} {
+		if strings.Contains(logOutput, secret) {
+			t.Errorf("log leaked %q: %s", secret, logOutput)
+		}
+	}
+}
+
+func serveRequest(t *testing.T, handler http.Handler, method, target, incomingRequestID string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	request := httptest.NewRequest(method, target, nil)
+	if incomingRequestID != "" {
+		request.Header.Set(requestid.HeaderName, incomingRequestID)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func assertError(t *testing.T, response *httptest.ResponseRecorder, wantCode, wantRequestID string) {
+	t.Helper()
+
+	var envelope errorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if envelope.Error.Code != wantCode || envelope.Error.RequestID != wantRequestID {
+		t.Fatalf("error = %+v, want code=%q request_id=%q", envelope.Error, wantCode, wantRequestID)
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+}

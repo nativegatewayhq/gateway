@@ -140,6 +140,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 
 | ID | 상태 | 계획 | Initiative |
 |---|---|---|---|
-| `gateway-20260820-001` | accepted | [Phase 0 Gateway Bootstrap](./20260820_113825_plan_phase0_gateway_bootstrap.md) | `phase-0-native-sdk-validation` |
+| `gateway-20260820-001` | completed | [Phase 0 Gateway Bootstrap](./20260820_113825_plan_phase0_gateway_bootstrap.md) | `phase-0-native-sdk-validation` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
