@@ -55,21 +55,27 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	routingRegistry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
-		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 20},
-		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 10},
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	routingCalls := 0
-	routingHandler := NewBillableImagesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), routingRegistry, map[providercredentials.ProviderID]Executor{providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
-		routingCalls++
-		body, _ := io.ReadAll(request.Body)
-		if string(body) != `{"model":"xai-provider-model"}` {
-			t.Fatalf("routed body=%s", body)
-		}
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"routed":true}`))}, nil
-	})}, 2048, chargeService)
+	routingHandler := NewBillableImagesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), routingRegistry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			t.Fatal("candidate without an exact logical-model price reached provider")
+			return nil, nil
+		}),
+		providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+			routingCalls++
+			body, _ := io.ReadAll(request.Body)
+			if string(body) != `{"model":"xai-provider-model"}` {
+				t.Fatalf("routed body=%s", body)
+			}
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"routed":true}`))}, nil
+		}),
+	}, 2048, chargeService)
 	routedRequest := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"logical-image"}`))
 	routedRequest.Header.Set("Content-Type", "application/json")
 	routedRequest.Header.Set("Authorization", "Bearer "+raw)

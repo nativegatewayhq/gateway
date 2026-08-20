@@ -37,10 +37,17 @@ type Executor interface {
 
 type ModelRegistry interface {
 	ResolveProtocol(string, string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.RoutingDecision, error)
+	Candidates(string, string, imageoperation.Operation, imageoperation.MediaType) ([]imageoperation.RoutingDecision, error)
+}
+
+type ProviderAvailability interface {
+	ConfiguredProviders() []providercredentials.ProviderID
 }
 
 type Billing interface {
 	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
+	Replay(context.Context, billing.BeginRequest) (billing.Charge, bool, error)
+	Quote(context.Context, billing.BeginRequest) (pricing.Estimate, error)
 	Complete(context.Context, string, bool, billing.ResponseSnapshot) (billing.Charge, error)
 	MarkReconciling(context.Context, string, billing.Observation) error
 	MaximumResponseBytes() int64
@@ -53,6 +60,7 @@ type Handler struct {
 	maxBodyBytes  int64
 	models        ModelRegistry
 	billing       Billing
+	availability  ProviderAvailability
 }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, executor Executor, maxBodyBytes int64) *Handler {
@@ -60,9 +68,14 @@ func NewHandler(logger *slog.Logger, authenticator Authenticator, executor Execu
 }
 
 func NewBillableHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
+	return NewBillableHandlerWithAvailability(logger, authenticator, models, executor, maxBodyBytes, chargeBilling, nil)
+}
+
+func NewBillableHandlerWithAvailability(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing, availability ProviderAvailability) *Handler {
 	handler := NewHandler(logger, authenticator, executor, maxBodyBytes)
 	handler.models = models
 	handler.billing = chargeBilling
+	handler.availability = availability
 	return handler
 }
 
@@ -72,6 +85,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	model, _ := modelFromRequest(request)
 	providerModel := model
 	candidateID, channelID, routingPolicy := "", "", ""
+	fallbackDepth := 0
 	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
@@ -90,6 +104,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"candidate_id", candidateID,
 			"channel_id", channelID,
 			"routing_policy", routingPolicy,
+			"fallback_depth", fallbackDepth,
 			"model", safeModelForLog(model),
 			"status", tracked.statusCode(),
 			"duration", time.Since(started),
@@ -138,13 +153,11 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
 			return
 		}
-		route, routeErr := handler.models.ResolveProtocol("gemini", model, imageoperation.Generate, imageoperation.JSON)
-		if routeErr != nil || route.Provider != providercredentials.Google {
+		candidates, routeErr := handler.models.Candidates("gemini", model, imageoperation.Generate, imageoperation.JSON)
+		if routeErr != nil {
 			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
 			return
 		}
-		providerModel = route.ProviderModel
-		candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 		selector, selectorErr := imageoperation.ParseGeminiJSONPricingSelector(model, body)
 		if selectorErr != nil {
 			writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "request contains unsupported billing options")
@@ -156,29 +169,71 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		var fingerprint [32]byte
-		var legacyFingerprint [32]byte
+		legacyFingerprints := make([][32]byte, 0, len(candidates))
 		if idempotencyKey != "" {
 			query := request.URL.Query()
 			query.Del("key")
 			wireIdentity := request.Method + " " + request.URL.EscapedPath() + "?" + query.Encode() + " " + request.Header.Get("Content-Type")
 			fingerprint = idempotency.Fingerprint("gemini", string(imageoperation.Generate), model, "logical-route-v1", wireIdentity, body)
-			legacyFingerprint = idempotency.Fingerprint("gemini", string(imageoperation.Generate), model, route.ChannelID, wireIdentity, body)
+			for _, candidate := range candidates {
+				legacyFingerprints = append(legacyFingerprints, idempotency.Fingerprint("gemini", string(imageoperation.Generate), model, candidate.ChannelID, wireIdentity, body))
+			}
 		}
-		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{
+		base := billing.BeginRequest{
 			RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID,
-			Protocol: "gemini", Operation: string(imageoperation.Generate), Model: model, ChannelID: route.ChannelID,
+			Protocol: "gemini", Operation: string(imageoperation.Generate), Model: model, ChannelID: candidates[0].ChannelID,
 			Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality,
-			IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprint: legacyFingerprint,
-		})
+			IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprints: legacyFingerprints,
+		}
+		replayed, found, billingErr := handler.billing.Replay(request.Context(), base)
 		if billingErr != nil {
 			handler.writeBillingError(tracked, billingErr)
 			return
 		}
-		charge = &startedCharge
-		if charge.Replay {
-			handler.writeSnapshot(tracked, charge.Response, true)
+		if found {
+			handler.writeSnapshot(tracked, replayed.Response, true)
 			return
 		}
+		var route imageoperation.RoutingDecision
+		selected := false
+		for index, candidate := range candidates {
+			if candidate.Provider != providercredentials.Google || handler.executor == nil || !geminiProviderConfigured(handler.availability, candidate.Provider) {
+				handler.logCandidateSkip(request, candidate, "provider_unavailable")
+				continue
+			}
+			attempt := base
+			attempt.ChannelID = candidate.ChannelID
+			if _, quoteErr := handler.billing.Quote(request.Context(), attempt); quoteErr != nil {
+				if errors.Is(quoteErr, pricing.ErrPriceUnavailable) || errors.Is(quoteErr, pricing.ErrMarginViolation) {
+					handler.logCandidateSkip(request, candidate, "price_unavailable")
+					continue
+				}
+				handler.writeBillingError(tracked, quoteErr)
+				return
+			}
+			startedCharge, beginErr := handler.billing.Begin(request.Context(), attempt)
+			if beginErr != nil {
+				if errors.Is(beginErr, pricing.ErrPriceUnavailable) || errors.Is(beginErr, pricing.ErrMarginViolation) {
+					handler.logCandidateSkip(request, candidate, "price_race_unavailable")
+					continue
+				}
+				handler.writeBillingError(tracked, beginErr)
+				return
+			}
+			charge = &startedCharge
+			if charge.Replay {
+				handler.writeSnapshot(tracked, charge.Response, true)
+				return
+			}
+			route, fallbackDepth, selected = candidate, index, true
+			break
+		}
+		if !selected {
+			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+			return
+		}
+		providerModel = route.ProviderModel
+		candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 	}
 
 	response, err := handler.executor.GenerateContent(request.Context(), google.GenerateContentRequest{
@@ -237,6 +292,22 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"category", "response_copy_failed",
 		)
 	}
+}
+
+func geminiProviderConfigured(availability ProviderAvailability, provider providercredentials.ProviderID) bool {
+	if availability == nil {
+		return true
+	}
+	for _, configured := range availability.ConfiguredProviders() {
+		if configured == provider {
+			return true
+		}
+	}
+	return false
+}
+
+func (handler *Handler) logCandidateSkip(request *http.Request, decision imageoperation.RoutingDecision, category string) {
+	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "model", decision.Model, "candidate_id", decision.CandidateID, "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
 }
 
 func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {

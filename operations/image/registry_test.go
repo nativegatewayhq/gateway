@@ -92,6 +92,15 @@ func TestPriorityRoutingIsDeterministicAndFiltersDisabled(t *testing.T) {
 	if err != nil || decision.CandidateID != "candidate_a" || decision.ProviderModel != "provider-a" || decision.Policy != Priority {
 		t.Fatalf("decision=%+v error=%v", decision, err)
 	}
+	candidates, err := registry.Candidates("openai", "logical-image", Generate, JSON)
+	if err != nil || len(candidates) != 3 || candidates[0].CandidateID != "candidate_a" || candidates[1].CandidateID != "candidate_b" || candidates[2].CandidateID != "candidate_z" {
+		t.Fatalf("candidates=%+v error=%v", candidates, err)
+	}
+	candidates[0].CandidateID = "mutated"
+	again, err := registry.Candidates("openai", "logical-image", Generate, JSON)
+	if err != nil || again[0].CandidateID != "candidate_a" {
+		t.Fatalf("registry candidates were mutable: %+v error=%v", again, err)
+	}
 }
 
 func TestFixedRoutingDoesNotSelectAnAlternateCandidate(t *testing.T) {
@@ -104,5 +113,8 @@ func TestFixedRoutingDoesNotSelectAnAlternateCandidate(t *testing.T) {
 	}
 	if _, err := registry.Resolve("fixed-image", Generate, JSON); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("fixed route selected alternate: %v", err)
+	}
+	if _, err := registry.Candidates("openai", "fixed-image", Generate, JSON); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("fixed candidates selected alternate: %v", err)
 	}
 }

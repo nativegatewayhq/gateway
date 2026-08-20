@@ -62,8 +62,15 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 			if len(model.Capabilities) == 0 {
 				continue
 			}
-			decision, err := handler.common.models.Resolve(model.Model, model.Capabilities[0].Operation, model.Capabilities[0].MediaType)
-			if err == nil && configured[decision.Provider] {
+			candidates, err := handler.common.models.Candidates("openai", model.Model, model.Capabilities[0].Operation, model.Capabilities[0].MediaType)
+			available := false
+			for _, candidate := range candidates {
+				if configured[candidate.Provider] {
+					available = true
+					break
+				}
+			}
+			if err == nil && available {
 				data = append(data, modelObject{model.Model, "model", model.Created, model.Owner})
 			}
 		}

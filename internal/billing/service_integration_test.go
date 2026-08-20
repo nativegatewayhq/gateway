@@ -112,6 +112,15 @@ func TestBeginAndCaptureAreAtomicAndIdempotent(t *testing.T) {
 	assertWalletAndCharge(t, pool, 800, 0, 1, "CAPTURED")
 }
 
+func TestQuoteHasNoWalletLedgerOrChargeEffects(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	estimate, err := service.Quote(context.Background(), billableRequest("request-quote"))
+	if err != nil || estimate.ChannelID != openAIChannel || estimate.MaximumSale != 200 {
+		t.Fatalf("estimate=%+v error=%v", estimate, err)
+	}
+	assertWalletAndCharge(t, pool, 1_000, 0, 0, "")
+}
+
 func TestReleaseAndBeginFailuresNeverCharge(t *testing.T) {
 	service, pool := billingFixture(t, 250)
 	ctx := context.Background()

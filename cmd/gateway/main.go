@@ -96,9 +96,9 @@ func run(stdout, stderr io.Writer) int {
 		openAIImagesHandler = openaiProtocol.NewImagesHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes)
 		openAIImageEditsHandler = openaiProtocol.NewEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
 	} else {
-		geminiHandler = gemini.NewBillableHandler(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling)
-		openAIImagesHandler = openaiProtocol.NewBillableImagesHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling)
-		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling)
+		geminiHandler = gemini.NewBillableHandlerWithAvailability(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, providerCredentialRegistry)
+		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailability(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerCredentialRegistry)
+		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailability(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry)
 	}
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 

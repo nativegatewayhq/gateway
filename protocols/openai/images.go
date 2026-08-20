@@ -32,6 +32,7 @@ type Authenticator interface {
 
 type ModelRegistry interface {
 	Resolve(string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.RoutingDecision, error)
+	Candidates(string, string, imageoperation.Operation, imageoperation.MediaType) ([]imageoperation.RoutingDecision, error)
 	List() []imageoperation.ModelRoute
 }
 
@@ -41,6 +42,8 @@ type Executor interface {
 
 type Billing interface {
 	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
+	Replay(context.Context, billing.BeginRequest) (billing.Charge, bool, error)
+	Quote(context.Context, billing.BeginRequest) (pricing.Estimate, error)
 	Complete(context.Context, string, bool, billing.ResponseSnapshot) (billing.Charge, error)
 	MarkReconciling(context.Context, string, billing.Observation) error
 	MaximumResponseBytes() int64
@@ -53,11 +56,17 @@ type Handler struct {
 	executors     map[providercredentials.ProviderID]Executor
 	maxBodyBytes  int64
 	billing       Billing
+	availability  ProviderAvailability
 }
 
 func NewBillableImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
+	return NewBillableImagesHandlerWithAvailability(logger, authenticator, models, executors, maxBodyBytes, chargeBilling, nil)
+}
+
+func NewBillableImagesHandlerWithAvailability(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing, availability ProviderAvailability) *Handler {
 	handler := NewImagesHandler(logger, authenticator, models, executors, maxBodyBytes)
 	handler.billing = chargeBilling
+	handler.availability = availability
 	return handler
 }
 
@@ -76,6 +85,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	logModel := "invalid"
 	provider := providercredentials.ProviderID("")
 	candidateID, channelID, routingPolicy := "", "", ""
+	fallbackDepth := 0
 	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
@@ -94,6 +104,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"candidate_id", candidateID,
 			"channel_id", channelID,
 			"routing_policy", routingPolicy,
+			"fallback_depth", fallbackDepth,
 			"model", logModel,
 			"status", tracked.statusCode(),
 			"duration", time.Since(started),
@@ -141,7 +152,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
-	route, err := handler.models.Resolve(model, imageoperation.Generate, imageoperation.JSON)
+	candidates, err := handler.models.Candidates("openai", model, imageoperation.Generate, imageoperation.JSON)
 	if err != nil {
 		if errors.Is(err, imageoperation.ErrModelNotFound) {
 			writeError(tracked, http.StatusNotFound, "invalid_request_error", "model_not_found", "model not found")
@@ -150,15 +161,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		}
 		return
 	}
-	provider = route.Provider
-	candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
+	route := candidates[0]
 	logModel = model
-	outboundBody, rewriteErr := imageoperation.RewriteJSONModel(body, route.ProviderModel)
-	if rewriteErr != nil {
-		writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_model", "request must contain one model")
-		return
-	}
-	executor := handler.executors[provider]
 	if handler.billing != nil {
 		selector, selectorErr := imageoperation.ParseOpenAIJSONPricingSelector(body)
 		if selectorErr != nil {
@@ -171,22 +175,78 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		var fingerprint [32]byte
-		var legacyFingerprint [32]byte
+		legacyFingerprints := make([][32]byte, 0, len(candidates))
 		if idempotencyKey != "" {
 			fingerprint = idempotency.Fingerprint("openai", string(imageoperation.Generate), selector.Model, "logical-route-v1", mediaType, body)
-			legacyFingerprint = idempotency.Fingerprint("openai", string(imageoperation.Generate), selector.Model, route.ChannelID, mediaType, body)
+			for _, candidate := range candidates {
+				legacyFingerprints = append(legacyFingerprints, idempotency.Fingerprint("openai", string(imageoperation.Generate), selector.Model, candidate.ChannelID, mediaType, body))
+			}
 		}
-		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Generate), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprint: legacyFingerprint})
-		if billingErr != nil {
-			handler.writeBillingError(tracked, billingErr)
+		base := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Generate), Model: selector.Model, ChannelID: candidates[0].ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprints: legacyFingerprints}
+		replayed, found, replayErr := handler.billing.Replay(request.Context(), base)
+		if replayErr != nil {
+			handler.writeBillingError(tracked, replayErr)
 			return
 		}
-		charge = &startedCharge
-		if charge.Replay {
-			handler.writeSnapshot(tracked, charge.Response, true)
+		if found {
+			for index, candidate := range candidates {
+				if candidate.ChannelID == replayed.ChannelID {
+					provider, candidateID, channelID, routingPolicy, fallbackDepth = candidate.Provider, candidate.CandidateID, candidate.ChannelID, string(candidate.Policy), index
+					break
+				}
+			}
+			handler.writeSnapshot(tracked, replayed.Response, true)
+			return
+		}
+		selected := false
+		for index, candidate := range candidates {
+			if handler.executors[candidate.Provider] == nil {
+				handler.logCandidateSkip(request, candidate, "executor_unavailable")
+				continue
+			}
+			if !providerConfigured(handler.availability, candidate.Provider) {
+				handler.logCandidateSkip(request, candidate, "credential_unavailable")
+				continue
+			}
+			attempt := base
+			attempt.ChannelID = candidate.ChannelID
+			if _, quoteErr := handler.billing.Quote(request.Context(), attempt); quoteErr != nil {
+				if errors.Is(quoteErr, pricing.ErrPriceUnavailable) || errors.Is(quoteErr, pricing.ErrMarginViolation) {
+					handler.logCandidateSkip(request, candidate, "price_unavailable")
+					continue
+				}
+				handler.writeBillingError(tracked, quoteErr)
+				return
+			}
+			startedCharge, billingErr := handler.billing.Begin(request.Context(), attempt)
+			if billingErr != nil {
+				if errors.Is(billingErr, pricing.ErrPriceUnavailable) || errors.Is(billingErr, pricing.ErrMarginViolation) {
+					handler.logCandidateSkip(request, candidate, "price_race_unavailable")
+					continue
+				}
+				handler.writeBillingError(tracked, billingErr)
+				return
+			}
+			if startedCharge.Replay {
+				handler.writeSnapshot(tracked, startedCharge.Response, true)
+				return
+			}
+			route, charge, fallbackDepth, selected = candidate, &startedCharge, index, true
+			break
+		}
+		if !selected {
+			writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
 			return
 		}
 	}
+	provider = route.Provider
+	candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
+	outboundBody, rewriteErr := imageoperation.RewriteJSONModel(body, route.ProviderModel)
+	if rewriteErr != nil {
+		writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_model", "request must contain one model")
+		return
+	}
+	executor := handler.executors[provider]
 	if executor == nil {
 		writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
 		return
@@ -244,6 +304,70 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"category", "response_copy_failed",
 		)
 	}
+}
+
+func providerConfigured(availability ProviderAvailability, provider providercredentials.ProviderID) bool {
+	if availability == nil {
+		return true
+	}
+	for _, configured := range availability.ConfiguredProviders() {
+		if configured == provider {
+			return true
+		}
+	}
+	return false
+}
+
+func (handler *Handler) logCandidateSkip(request *http.Request, decision imageoperation.RoutingDecision, category string) {
+	handler.logger.Info("image routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "model", decision.Model, "candidate_id", decision.CandidateID, "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
+}
+
+func (handler *Handler) selectBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+	replayed, found, replayErr := handler.billing.Replay(request.Context(), base)
+	if replayErr != nil {
+		handler.writeBillingError(writer, replayErr)
+		return imageoperation.RoutingDecision{}, nil, 0, false
+	}
+	if found {
+		handler.writeSnapshot(writer, replayed.Response, true)
+		return imageoperation.RoutingDecision{}, nil, 0, false
+	}
+	for index, candidate := range candidates {
+		if handler.executors[candidate.Provider] == nil {
+			handler.logCandidateSkip(request, candidate, "executor_unavailable")
+			continue
+		}
+		if !providerConfigured(handler.availability, candidate.Provider) {
+			handler.logCandidateSkip(request, candidate, "credential_unavailable")
+			continue
+		}
+		attempt := base
+		attempt.ChannelID = candidate.ChannelID
+		if _, quoteErr := handler.billing.Quote(request.Context(), attempt); quoteErr != nil {
+			if errors.Is(quoteErr, pricing.ErrPriceUnavailable) || errors.Is(quoteErr, pricing.ErrMarginViolation) {
+				handler.logCandidateSkip(request, candidate, "price_unavailable")
+				continue
+			}
+			handler.writeBillingError(writer, quoteErr)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		started, beginErr := handler.billing.Begin(request.Context(), attempt)
+		if beginErr != nil {
+			if errors.Is(beginErr, pricing.ErrPriceUnavailable) || errors.Is(beginErr, pricing.ErrMarginViolation) {
+				handler.logCandidateSkip(request, candidate, "price_race_unavailable")
+				continue
+			}
+			handler.writeBillingError(writer, beginErr)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		if started.Replay {
+			handler.writeSnapshot(writer, started.Response, true)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		return candidate, &started, index, true
+	}
+	writeError(writer, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+	return imageoperation.RoutingDecision{}, nil, 0, false
 }
 
 func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {
