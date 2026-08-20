@@ -96,6 +96,12 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_FAL_JWKS_TIMEOUT` | `5s` | Bounded JWKS request timeout; maximum `1m` |
 | `GATEWAY_FAL_JWKS_CACHE_TTL` | `24h` | Maximum successful key cache lifetime; HTTP cache headers may shorten it |
 | `GATEWAY_FAL_JWKS_REFRESH_COOLDOWN` | `1m` | Minimum interval between signature-mismatch refresh attempts |
+| `GATEWAY_RUNWAY_API_KEY` | unset | Optional Runway upstream credential; enables native video task routes when models are configured |
+| `GATEWAY_RUNWAY_MODELS` | unset | Comma-separated exact logical video model IDs |
+| `GATEWAY_RUNWAY_MODEL_CAPABILITIES_JSON` | unset | Optional logical-to-provider model map with exact `text_to_video` and `image_to_video` booleans |
+| `GATEWAY_RUNWAY_REQUEST_TIMEOUT` | `2m` | Runway submit, poll, and cancel timeout; maximum `10m` |
+| `GATEWAY_RUNWAY_MAX_BODY_BYTES` | `8388608` | Maximum native Runway request or response body; maximum 256 MiB |
+| `GATEWAY_RUNWAY_POLL_INTERVAL` | `5s` | Minimum Runway task polling interval; cannot be less than 5 seconds |
 | `GATEWAY_JOB_MANAGEMENT_MODE` | `disabled` | `required` enables tenant-scoped `GET /gateway/v1/jobs` and `GET /gateway/v1/jobs/{job_id}` when an asynchronous provider is enabled |
 | `GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS` | unset | One active, or active and previous, comma-separated base64-encoded 32-byte HMAC secrets for opaque pagination cursors |
 
@@ -330,6 +336,16 @@ Telemetry is disabled by default. Both enabled modes export OTLP HTTP/protobuf t
 The stable instruments are `gateway.http.server.*`, `gateway.authentication.decisions`, `gateway.routing.decisions`, `gateway.provider.*`, `gateway.billing.transitions`, `gateway.storage.operations`, `gateway.reconciliation.tasks`, and `gateway.jobs.transitions`. Their labels use bounded protocol, operation, policy, Provider, stage, status class, rejection, transition, and outcome values. Never add prompts, bodies, headers, query strings, raw URLs or errors, credentials, tenant/API Key/request/charge/object identities, model/channel/candidate IDs, prices, balances, margins, or limits as telemetry attributes. Inbound propagation reads only W3C `traceparent` and `tracestate`; baggage is ignored and inbound trace headers are not forwarded to Providers. Active request logs include trace and span IDs for correlation.
 
 ## Durable asynchronous Job foundation
+
+Runway native video tasks are available in BYOK mode through `POST /v1/text_to_video`, `POST /v1/image_to_video`, `GET /v1/tasks/{id}`, and `DELETE /v1/tasks/{id}`. Official SDKs can use the Gateway as their custom base URL and a service key as the API key; the Gateway requires `X-Runway-Version: 2024-11-06`, keeps the upstream task ID private, and returns a tenant-owned Gateway Job ID. Example configuration:
+
+```sh
+export GATEWAY_RUNWAY_API_KEY='your-runway-provider-key'
+export GATEWAY_RUNWAY_MODELS='gateway-video'
+export GATEWAY_RUNWAY_MODEL_CAPABILITIES_JSON='{"gateway-video":{"provider_model":"gen4_turbo","text_to_video":true,"image_to_video":true}}'
+```
+
+Runway output URLs are returned in provider mode and normally expire after roughly 24–48 hours; callers must download results they need to retain. Managed video storage, upload proxying, and video credit billing are deferred. When billing is required, video submit fails before Job creation or Provider dispatch.
 
 The protocol-neutral Job core persists tenant ownership, immutable routing/charge identity, a separate internal Provider Job identifier, state transitions, append-only events, polling leases, cancellation intent, and terminal result snapshots in PostgreSQL. This release intentionally exposes no new HTTP route; the subsequent Replicate and fal native facades consume this application contract.
 

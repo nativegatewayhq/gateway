@@ -1,0 +1,80 @@
+package runway
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/nativegatewayhq/gateway/internal/jobs"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	joboperation "github.com/nativegatewayhq/gateway/operations/job"
+)
+
+func TestClientUsesFixedWireAndSanitizesTaskIdentity(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer upstream-secret" || r.Header.Get("X-Runway-Version") != APIVersion {
+			t.Fatalf("invalid upstream headers: %#v", r.Header)
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/text_to_video":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"provider-task"}`)
+		case r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"id":"provider-task","status":"SUCCEEDED","output":["https://cdn.example/video.mp4"]}`)
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	registry, err := providercredentials.Load(func(key string) (string, bool) {
+		if key == "GATEWAY_RUNWAY_API_KEY" {
+			return "upstream-secret", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(Config{Endpoint: server.URL, Timeout: time.Second, MaximumBodyBytes: 1 << 20}, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := joboperation.Job{ID: "job_0123456789abcdef0123456789abcdef", ChannelID: "channel_00000000000000000000000000000007"}
+	submitted, err := client.Submit(context.Background(), job, SubmitPayload{Path: "/v1/text_to_video", Body: []byte(`{"model":"gen4_turbo"}`)})
+	if err != nil || submitted.ProviderJobID != "provider-task" {
+		t.Fatalf("submit: %#v %v", submitted, err)
+	}
+	attempt := jobs.ProviderAttempt{JobID: job.ID, ProviderJobID: submitted.ProviderJobID, ChannelID: job.ChannelID}
+	observed, err := client.Poll(context.Background(), attempt)
+	if err != nil || observed.Status != joboperation.Succeeded || strings.Contains(string(observed.Snapshot.Body), "provider-task") || !strings.Contains(string(observed.Snapshot.Body), job.ID) {
+		t.Fatalf("poll: %#v %v", observed, err)
+	}
+	canceled, err := client.Cancel(context.Background(), attempt)
+	if err != nil || canceled.Status != joboperation.Canceled {
+		t.Fatalf("cancel: %#v %v", canceled, err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
+func TestStatusMapping(t *testing.T) {
+	tests := map[string]joboperation.Status{"PENDING": joboperation.Queued, "THROTTLED": joboperation.Queued, "RUNNING": joboperation.Processing, "SUCCEEDED": joboperation.Succeeded, "FAILED": joboperation.Failed, "CANCELED": joboperation.Canceled}
+	for native, want := range tests {
+		got, _, ok := mapStatus(native)
+		if !ok || got != want {
+			t.Fatalf("%s => %s", native, got)
+		}
+	}
+	if _, _, ok := mapStatus("UNKNOWN"); ok {
+		t.Fatal("unknown status accepted")
+	}
+}

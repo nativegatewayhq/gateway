@@ -1,7 +1,7 @@
 ---
 id: gateway-20260822-050
 title: Phase 5 Runway Native Video Generation Foundation
-status: accepted
+status: in_progress
 created_at: 2026-08-22T11:00:00+09:00
 updated_at: 2026-08-22T11:00:00+09:00
 owners:

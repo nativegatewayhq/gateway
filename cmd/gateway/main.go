@@ -37,17 +37,20 @@ import (
 	geminioperation "github.com/nativegatewayhq/gateway/operations/gemini"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
+	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 	anthropicProtocol "github.com/nativegatewayhq/gateway/protocols/anthropic"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	managementProtocol "github.com/nativegatewayhq/gateway/protocols/management"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
 	replicateProtocol "github.com/nativegatewayhq/gateway/protocols/replicate"
+	runwayProtocol "github.com/nativegatewayhq/gateway/protocols/runway"
 	anthropicProvider "github.com/nativegatewayhq/gateway/providers/anthropic"
 	falProvider "github.com/nativegatewayhq/gateway/providers/fal"
 	"github.com/nativegatewayhq/gateway/providers/google"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 	replicateProvider "github.com/nativegatewayhq/gateway/providers/replicate"
+	runwayProvider "github.com/nativegatewayhq/gateway/providers/runway"
 	"github.com/nativegatewayhq/gateway/providers/xai"
 )
 
@@ -169,6 +172,11 @@ func run(stdout, stderr io.Writer) int {
 	imageModels, err := imageoperation.DefaultRegistryWithAsync(cfg.ReplicateModels, cfg.FalModels)
 	if err != nil {
 		logger.Error("gateway model registry initialization failed")
+		return 1
+	}
+	videoModels, err := videooperation.NewRegistryWithCapabilities(cfg.RunwayModels, cfg.RunwayModelCapabilities)
+	if err != nil {
+		logger.Error("gateway video model registry initialization failed")
 		return 1
 	}
 	geminiLimits := make(map[string]geminioperation.Limits, len(cfg.GeminiLLMModelLimits))
@@ -372,16 +380,18 @@ func run(stdout, stderr io.Writer) int {
 	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
-	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithChatAndResponses(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, providerCredentialRegistry)
+	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAll(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, providerCredentialRegistry)
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
 	var falWebhookHandler http.Handler
 	var managementHandler http.Handler
+	var runwayHandler http.Handler
 	var asyncWorker *jobs.Worker
 	asyncProviders := map[string]jobs.Provider{}
 	var replicateAdapter *replicateProvider.Client
 	var falAdapter *falProvider.Client
+	var runwayAdapter *runwayProvider.Client
 	if cfg.ReplicateEnabled {
 		var replicateErr error
 		replicateAdapter, replicateErr = replicateProvider.New(replicateProvider.Config{Endpoint: cfg.ReplicateEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.ReplicateTimeout, MaximumBodyBytes: cfg.ReplicateBodyBytes}, providerCredentialRegistry)
@@ -400,13 +410,26 @@ func run(stdout, stderr io.Writer) int {
 		}
 		asyncProviders["fal"] = falAdapter
 	}
+	if cfg.RunwayEnabled {
+		var runwayErr error
+		runwayAdapter, runwayErr = runwayProvider.New(runwayProvider.Config{Endpoint: "https://api.dev.runwayml.com", Timeout: cfg.RunwayTimeout, MaximumBodyBytes: cfg.RunwayBodyBytes}, providerCredentialRegistry)
+		if runwayErr != nil {
+			logger.Error("gateway Runway provider initialization failed")
+			return 1
+		}
+		asyncProviders["runway"] = runwayAdapter
+	}
 	if len(asyncProviders) > 0 {
 		jobRepository, repositoryErr := jobs.NewRepository(pool, cfg.ReplayBodyBytes)
 		if repositoryErr != nil {
 			logger.Error("gateway Job repository initialization failed")
 			return 1
 		}
-		serviceConfig := jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval}
+		jobPollDelay := cfg.ReconcileInterval
+		if cfg.RunwayEnabled && jobPollDelay < cfg.RunwayPollInterval {
+			jobPollDelay = cfg.RunwayPollInterval
+		}
+		serviceConfig := jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: jobPollDelay}
 		serviceConfig.Webhooks = map[string]jobs.WebhookConfig{}
 		if cfg.ReplicateWebhookMode == config.ReplicateWebhookRequired {
 			serviceConfig.Webhooks["replicate"] = jobs.WebhookConfig{PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.ReplicateWebhookBindingTTL, CallbackSecret: cfg.ReplicateWebhookCallbackSecret}
@@ -427,7 +450,7 @@ func run(stdout, stderr io.Writer) int {
 				return 1
 			}
 		}
-		workerConfig := jobs.WorkerConfig{Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval, BaseBackoff: cfg.ReconcileBackoff, MaximumBackoff: cfg.ReconcileMaxBackoff, BatchSize: cfg.ReconcileBatchSize, MaximumAttempts: cfg.ReconcileMaxAttempts}
+		workerConfig := jobs.WorkerConfig{Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease, PollDelay: jobPollDelay, BaseBackoff: cfg.ReconcileBackoff, MaximumBackoff: cfg.ReconcileMaxBackoff, BatchSize: cfg.ReconcileBatchSize, MaximumAttempts: cfg.ReconcileMaxAttempts}
 		asyncWorker, serviceErr = jobs.NewWorker(jobRepository, asyncProviders, billingService, workerConfig, "gateway-job-worker")
 		if serviceErr != nil {
 			logger.Error("gateway Job worker initialization failed")
@@ -466,6 +489,11 @@ func run(stdout, stderr io.Writer) int {
 				webhook.SetTelemetry(telemetryRuntime.Recorder)
 				falWebhookHandler = webhook
 			}
+		}
+		if cfg.RunwayEnabled {
+			handler := runwayProtocol.NewHandler(logger, apiKeyAuthenticator, videoModels, jobService, cfg.RunwayBodyBytes)
+			handler.SetBillingRequired(cfg.BillingMode == config.BillingRequired)
+			runwayHandler = handler
 		}
 		readinessChecks = append(readinessChecks, jobRepository.Ready)
 	}
@@ -537,6 +565,7 @@ func run(stdout, stderr io.Writer) int {
 		ReplicateWebhook:    replicateWebhookHandler,
 		Fal:                 falHandler,
 		FalWebhook:          falWebhookHandler,
+		Runway:              runwayHandler,
 		Management:          managementHandler,
 		ClientIPResolver:    clientIPResolver,
 		Telemetry:           telemetryRuntime.Recorder,
