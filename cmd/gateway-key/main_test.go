@@ -19,3 +19,13 @@ func TestRunRejectsInvalidRateLimitPolicyBeforeDatabase(t *testing.T) {
 		}
 	}
 }
+
+func TestPermissionFlagRejectsInvalidSyntaxAndPolicyBeforeDatabase(t *testing.T) {
+	for _, arguments := range [][]string{{"-name", "test", "-allow-model", "missing-parts"}, {"-name", "test", "-allow-model", "openai:chat:model"}} {
+		var stdout, stderr bytes.Buffer
+		code := run(arguments, &stdout, &stderr, func(string) string { return "postgres://secret" }, bytes.NewReader(make([]byte, 64)))
+		if code != 2 || stdout.Len() != 0 {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", arguments, code, stdout.String(), stderr.String())
+		}
+	}
+}

@@ -20,7 +20,7 @@ func TestRunStoresOnlyDigestAndPrintsKeyOnce(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	entropy := bytes.NewReader(bytes.Repeat([]byte{3}, 48))
-	code := run([]string{"-name", "cli integration", "-requests-per-minute", "120", "-burst", "10"}, &stdout, &stderr, func(key string) string {
+	code := run([]string{"-name", "cli integration", "-requests-per-minute", "120", "-burst", "10", "-allow-model", "openai:image.generate:gpt-image-1", "-allow-model", "gemini:image.generate:gemini-image"}, &stdout, &stderr, func(key string) string {
 		if key == "GATEWAY_DATABASE_URL" {
 			return url
 		}
@@ -36,6 +36,9 @@ func TestRunStoresOnlyDigestAndPrintsKeyOnce(t *testing.T) {
 	if !strings.Contains(stderr.String(), "120 requests/minute, burst 10") {
 		t.Fatalf("policy summary=%q", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "allowlist (2 permissions)") {
+		t.Fatalf("permission summary=%q", stderr.String())
+	}
 	digest := sha256.Sum256([]byte(raw))
 	ctx := context.Background()
 	pool, err := database.Open(ctx, url)
@@ -50,6 +53,12 @@ func TestRunStoresOnlyDigestAndPrintsKeyOnce(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("stored digest rows=%d", count)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM service_api_key_model_permissions p JOIN service_api_keys k ON k.id=p.api_key_id WHERE k.key_digest=$1`, digest[:]).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("permission rows=%d", count)
 	}
 	var leaked bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM service_api_keys WHERE id LIKE '%' || $1 || '%' OR name LIKE '%' || $1 || '%' OR key_prefix LIKE '%' || $1 || '%')`, raw).Scan(&leaked); err != nil {

@@ -47,7 +47,8 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 		writeError(tracked, 405, "invalid_request_error", "method_not_allowed", "method not allowed")
 		return
 	}
-	if _, authenticated := handler.common.authenticate(tracked, request); !authenticated {
+	principal, authenticated := handler.common.authenticate(tracked, request)
+	if !authenticated {
 		return
 	}
 	configured := map[providercredentials.ProviderID]bool{}
@@ -59,18 +60,26 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 	data := []modelObject{}
 	if handler.common.models != nil {
 		for _, model := range handler.common.models.List() {
-			if len(model.Capabilities) == 0 {
-				continue
-			}
-			candidates, err := handler.common.models.Candidates("openai", model.Model, model.Capabilities[0].Operation, model.Capabilities[0].MediaType)
 			available := false
-			for _, candidate := range candidates {
-				if configured[candidate.Provider] {
-					available = true
+			for _, capability := range model.Capabilities {
+				if !principal.AuthorizeModel("openai", string(capability.Operation), model.Model) {
+					continue
+				}
+				candidates, err := handler.common.models.Candidates("openai", model.Model, capability.Operation, capability.MediaType)
+				if err != nil {
+					continue
+				}
+				for _, candidate := range candidates {
+					if configured[candidate.Provider] {
+						available = true
+						break
+					}
+				}
+				if available {
 					break
 				}
 			}
-			if err == nil && available {
+			if available {
 				data = append(data, modelObject{model.Model, "model", model.Created, model.Owner})
 			}
 		}

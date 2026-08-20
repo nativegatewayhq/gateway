@@ -86,7 +86,9 @@ go run ./cmd/gateway-key \
   -name development \
   -project-id project_legacy \
   -requests-per-minute 60 \
-  -burst 10
+  -burst 10 \
+  -allow-model openai:image.generate:gpt-image-1 \
+  -allow-model gemini:image.generate:gemini-image
 ```
 
 Both policy values must be omitted for an unlimited Key or supplied together with `1 <= burst <= requests-per-minute <= 1000000`. Enable distributed enforcement with:
@@ -97,6 +99,8 @@ export GATEWAY_REDIS_URL='redis://127.0.0.1:56379/0'
 ```
 
 The token bucket is keyed only by the non-secret API Key ID and is shared across Gateway instances. Authentication failures do not consume a token. Authenticated generation, edit, Gemini, model-list and idempotent replay requests each consume one token before body parsing, price lookup, Wallet reservation or Provider dispatch. Rejected requests return native `429` errors plus `Retry-After` and `X-RateLimit-*` headers and never trigger routing fallback. Redis timeout or failure in required mode returns native `503`; `/health/live` stays live while `/health/ready` reports unavailable.
+
+`--allow-model` is optional and repeatable. Omitting it preserves backward-compatible access to all registered models; production Keys should use an explicit least-privilege allowlist. Supplying it changes the Key to an exact logical allowlist using `protocol:operation:model`; supported image operations are `openai:image.generate`, `openai:image.edit`, and `gemini:image.generate`. Wildcards and Provider-native model names are not expanded. A denied request consumes its rate-limit token but returns native `403` before routing, idempotency replay, pricing, Wallet reservation or Provider dispatch. `/v1/models` returns only the intersection of the Key permissions, model capabilities and configured Provider credentials. Removing a permission also prevents that Key from replaying a previously stored response for the removed model.
 
 ## Provider credentials
 

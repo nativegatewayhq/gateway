@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
@@ -16,6 +17,18 @@ import (
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, os.Getenv, rand.Reader)) }
+
+type permissionFlags []apikey.ModelPermission
+
+func (values *permissionFlags) String() string { return fmt.Sprintf("%d permissions", len(*values)) }
+func (values *permissionFlags) Set(value string) error {
+	parts := strings.SplitN(value, ":", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("allow-model must be protocol:operation:model")
+	}
+	*values = append(*values, apikey.ModelPermission{Protocol: parts[0], Operation: parts[1], Model: parts[2]})
+	return nil
+}
 
 func run(arguments []string, stdout, stderr io.Writer, getenv func(string) string, entropy io.Reader) int {
 	flags := flag.NewFlagSet("gateway-key", flag.ContinueOnError)
@@ -25,6 +38,8 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 	projectID := flags.String("project-id", "project_legacy", "owning active project ID")
 	rpm := flags.Int64("requests-per-minute", 0, "optional per-key requests per minute")
 	burst := flags.Int64("burst", 0, "optional token bucket burst")
+	var permissions permissionFlags
+	flags.Var(&permissions, "allow-model", "repeatable protocol:operation:logical-model permission")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -42,7 +57,7 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 		}
 		expiresAt = &parsed
 	}
-	record, raw, err := apikey.GenerateForProjectWithPolicy(entropy, *name, *projectID, expiresAt, apikey.RateLimitPolicy{RequestsPerMinute: *rpm, Burst: *burst})
+	record, raw, err := apikey.GenerateForProjectWithPolicies(entropy, *name, *projectID, expiresAt, apikey.RateLimitPolicy{RequestsPerMinute: *rpm, Burst: *burst}, permissions)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
@@ -67,6 +82,11 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 		_, _ = fmt.Fprintf(stderr, "rate limit: %d requests/minute, burst %d\n", record.RateLimit.RequestsPerMinute, record.RateLimit.Burst)
 	} else {
 		_, _ = fmt.Fprintln(stderr, "rate limit: unlimited")
+	}
+	if record.ModelAccessMode == apikey.ModelAccessAllowlist {
+		_, _ = fmt.Fprintf(stderr, "model access: allowlist (%d permissions)\n", len(record.ModelPermissions))
+	} else {
+		_, _ = fmt.Fprintln(stderr, "model access: all")
 	}
 	_, _ = fmt.Fprintln(stdout, raw)
 	return 0

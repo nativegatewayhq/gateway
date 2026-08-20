@@ -98,6 +98,9 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 			}
 			return
 		}
+		if !handler.common.authorizeModel(tracked, request, principal, "openai", string(imageoperation.Edit), model) {
+			return
+		}
 		route := candidates[0]
 		var charge *billing.Charge
 		if handler.common.billing != nil {
@@ -176,6 +179,9 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		if err != nil {
 			handler.writeRouteError(tracked, err)
 		}
+		return
+	}
+	if !handler.common.authorizeModel(tracked, request, principal, "openai", string(imageoperation.Edit), model) {
 		return
 	}
 	route := candidates[0]

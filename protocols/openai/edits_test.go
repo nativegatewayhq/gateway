@@ -57,6 +57,43 @@ func TestEditHandlerRateLimitStopsBeforeMultipartSpool(t *testing.T) {
 	}
 }
 
+func TestEditHandlerEnforcesJSONAndMultipartModelPermissions(t *testing.T) {
+	principal := apikey.Principal{APIKeyID: "key_denied", ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1"}}}
+	auth := authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil })
+	for _, test := range []struct {
+		name, contentType string
+		body              []byte
+	}{
+		{"json", "application/json", []byte(`{"model":"grok-imagine-image-quality","image":"https://example.invalid/image.png"}`)},
+		func() struct {
+			name, contentType string
+			body              []byte
+		} {
+			body, contentType := multipartEdit(t, "gpt-image-1")
+			return struct {
+				name, contentType string
+				body              []byte
+			}{"multipart", contentType, body}
+		}(),
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			providerCalls := 0
+			handler := NewEditHandler(slog.Default(), auth, testRegistry(t), map[providercredentials.ProviderID]Executor{
+				providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+				providercredentials.XAI:    executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+			}, 1024*1024, 1)
+			request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer service-secret")
+			request.Header.Set("Content-Type", test.contentType)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != 403 || providerCalls != 0 {
+				t.Fatalf("response=%d %s calls=%d", response.Code, response.Body.String(), providerCalls)
+			}
+		})
+	}
+}
+
 func TestEditHandlerPreservesOpenAIMultipartAndCleansSpool(t *testing.T) {
 	body, contentType := multipartEdit(t, "gpt-image-1")
 	tempDir := t.TempDir()

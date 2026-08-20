@@ -59,6 +59,44 @@ func TestGenerateForProjectWithRateLimitPolicy(t *testing.T) {
 	}
 }
 
+func TestModelPermissionsCanonicalizationAndAuthorization(t *testing.T) {
+	permissions, err := CanonicalModelPermissions([]ModelPermission{
+		{Protocol: "openai", Operation: "image.edit", Model: "gpt-image-1"},
+		{Protocol: " gemini ", Operation: " image.generate ", Model: " gemini-image "},
+		{Protocol: "openai", Operation: "image.edit", Model: "gpt-image-1"},
+	})
+	if err != nil || len(permissions) != 2 || permissions[0].Protocol != "gemini" || permissions[1].Operation != "image.edit" {
+		t.Fatalf("permissions=%+v error=%v", permissions, err)
+	}
+	principal := Principal{ModelAccessMode: ModelAccessAllowlist, ModelPermissions: permissions}
+	if !principal.AuthorizeModel("gemini", "image.generate", "gemini-image") || !principal.AuthorizeModel("openai", "image.edit", "gpt-image-1") {
+		t.Fatal("expected exact permissions denied")
+	}
+	for _, request := range []ModelPermission{{"openai", "image.generate", "gpt-image-1"}, {"openai", "image.edit", "gpt-image-*"}, {"gemini", "image.generate", "Gemini-image"}} {
+		if principal.AuthorizeModel(request.Protocol, request.Operation, request.Model) {
+			t.Fatalf("unexpected permission=%+v", request)
+		}
+	}
+	if !(Principal{}).AuthorizeModel("openai", "image.generate", "any") || !(Principal{ModelAccessMode: ModelAccessAll}).AuthorizeModel("gemini", "image.generate", "any") {
+		t.Fatal("default all denied")
+	}
+	if (Principal{ModelAccessMode: ModelAccessAllowlist}).AuthorizeModel("openai", "image.generate", "any") {
+		t.Fatal("empty allowlist allowed")
+	}
+}
+
+func TestModelPermissionsRejectInvalidAndExcessiveValues(t *testing.T) {
+	for _, permission := range []ModelPermission{{"anthropic", "image.generate", "model"}, {"openai", "chat", "model"}, {"gemini", "image.edit", "model"}, {"openai", "image.generate", ""}, {"openai", "image.generate", strings.Repeat("m", 201)}} {
+		if _, err := CanonicalModelPermissions([]ModelPermission{permission}); !errors.Is(err, ErrPolicyInvalid) {
+			t.Fatalf("permission=%+v error=%v", permission, err)
+		}
+	}
+	excessive := make([]ModelPermission, maxModelPermissions+1)
+	if _, err := CanonicalModelPermissions(excessive); !errors.Is(err, ErrPolicyInvalid) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestGenerateRejectsInvalidNameAndEntropyFailure(t *testing.T) {
 	if _, _, err := Generate(bytes.NewReader(nil), "", nil); err == nil {
 		t.Fatal("empty name accepted")
