@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-001
 title: Phase 0 Gateway Bootstrap
-status: in_progress
+status: completed
 created_at: 2026-08-20T11:38:25+09:00
-updated_at: 2026-08-20T12:24:33+09:00
+updated_at: 2026-08-20T12:35:44+09:00
 owners:
   - gateway
 initiative: phase-0-native-sdk-validation
@@ -220,25 +220,39 @@ go build ./cmd/gateway
 
 ## 완료 조건
 
-- [ ] `gateway`가 독립 Go module로 초기화됨
-- [ ] 단일 명령으로 Gateway를 로컬 실행할 수 있음
-- [ ] liveness와 readiness endpoint가 명세대로 응답함
-- [ ] 설정 오류가 서버 시작 전에 검출됨
-- [ ] 각 요청에 request ID가 부여됨
-- [ ] 구조화 로그에 인증 헤더와 query API Key가 포함되지 않음
-- [ ] SIGINT와 SIGTERM에서 graceful shutdown이 동작함
-- [ ] formatter, vet, unit test, build가 모두 통과함
-- [ ] README에 실행 및 검증 방법이 기록됨
-- [ ] CI에서 동일 검증을 자동 실행함
+- [x] `gateway`가 독립 Go module로 초기화됨
+- [x] 단일 명령으로 Gateway를 로컬 실행할 수 있음
+- [x] liveness와 readiness endpoint가 명세대로 응답함
+- [x] 설정 오류가 서버 시작 전에 검출됨
+- [x] 각 요청에 request ID가 부여됨
+- [x] 구조화 로그에 인증 헤더와 query API Key가 포함되지 않음
+- [x] SIGINT와 SIGTERM에서 graceful shutdown이 동작함
+- [x] formatter, vet, unit test, build가 모두 통과함
+- [x] README에 실행 및 검증 방법이 기록됨
+- [x] CI에서 동일 검증을 자동 실행함
 
 ## 검증 증거
 
-아직 구현 전이다. 완료 시 다음 정보를 기록한다.
-
-- 구현 commit 또는 pull request
-- CI 실행 링크 또는 로컬 검증 결과
-- health endpoint smoke test 결과
-- graceful shutdown 검증 결과
+- 구현 commit: `a34379c` (`feat: bootstrap gateway HTTP server`)
+- Draft PR: `https://github.com/nativegatewayhq/gateway/pull/1`
+- CI:
+  - `check`: `https://github.com/nativegatewayhq/gateway/actions/runs/32328732488/job/96305119724`
+  - `validate`: `https://github.com/nativegatewayhq/gateway/actions/runs/32328732484/job/96305119830`
+- 로컬 검증:
+  - `make fmt-check`: 통과
+  - `go vet ./...`: 통과
+  - `go test -race ./...`: 모든 package 통과
+  - `go build ./cmd/gateway`: 통과
+  - `go test -cover ./...`: config 90.3%, httpserver 93.0%, observability 100.0%, requestid 95.0%
+- Process 검증:
+  - 실제 binary 시작 후 `/health/ready` polling 성공
+  - `SIGTERM` 이후 정상 종료
+  - 이미 사용 중인 port에서 즉시 안전한 오류로 종료
+- 수동 smoke 검증:
+  - `/health/live`와 `/health/ready`가 각각 HTTP 200 및 `{"status":"ok"}` 반환
+  - caller request ID가 `X-Request-Id` 응답 헤더로 반환
+  - query의 `key=smoke-secret`이 access log에 포함되지 않음
+  - `SIGINT` 이후 `gateway shutting down`, `gateway stopped` 로그 확인
 
 ## 후속 작업
 
