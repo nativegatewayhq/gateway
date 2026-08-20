@@ -27,6 +27,7 @@ type Recorder struct {
 	storage          metric.Int64Counter
 	reconciliation   metric.Int64Counter
 	authentication   metric.Int64Counter
+	jobs             metric.Int64Counter
 }
 
 func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Recorder, error) {
@@ -74,7 +75,11 @@ func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Re
 	if err != nil {
 		return nil, err
 	}
-	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation, authentication: authentication}, nil
+	jobs, err := meter.Int64Counter("gateway.jobs.transitions", metric.WithUnit("{transition}"))
+	if err != nil {
+		return nil, err
+	}
+	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation, authentication: authentication, jobs: jobs}, nil
 }
 
 type HTTPRecord struct {
@@ -90,6 +95,7 @@ type ProviderRecord struct {
 
 type RouteRecord struct{ Protocol, Operation, Policy, Outcome, Rejection string }
 type AuthenticationRecord struct{ Protocol, Stage, Outcome string }
+type JobRecord struct{ Protocol, Stage, Status, Outcome string }
 type BillingRecord struct{ Protocol, Operation, Transition, Outcome string }
 type StorageRecord struct{ Protocol, Stage, Source, Outcome string }
 type ReconciliationRecord struct {
@@ -134,6 +140,9 @@ func (recorder *Recorder) Route(ctx context.Context, record RouteRecord) {
 }
 func (recorder *Recorder) Authentication(ctx context.Context, record AuthenticationRecord) {
 	recorder.authentication.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.auth.stage", boundedAuthStage(record.Stage)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
+}
+func (recorder *Recorder) Job(ctx context.Context, record JobRecord) {
+	recorder.jobs.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.job.stage", boundedJobStage(record.Stage)), attribute.String("gateway.job.status", boundedJobStatus(record.Status)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
 }
 func (recorder *Recorder) Billing(ctx context.Context, record BillingRecord) {
 	recorder.billing.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.operation", boundedOperation(record.Operation)), attribute.String("gateway.billing.transition", boundedTransition(record.Transition)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
@@ -238,7 +247,9 @@ func allowed(value string, values ...string) string {
 	}
 	return "unknown"
 }
-func boundedProtocol(value string) string { return allowed(value, "openai", "gemini", "gateway") }
+func boundedProtocol(value string) string {
+	return allowed(value, "openai", "gemini", "replicate", "fal", "gateway")
+}
 func boundedOperation(value string) string {
 	return allowed(value, "image.generate", "image.edit", "models.list", "health.live", "health.ready", "unknown")
 }
@@ -255,6 +266,12 @@ func boundedTransition(value string) string {
 func boundedStage(value string) string { return allowed(value, "fetch", "upload", "transform") }
 func boundedAuthStage(value string) string {
 	return allowed(value, "authenticate", "network", "rate_limit", "model_authorization")
+}
+func boundedJobStage(value string) string {
+	return allowed(value, "submit", "poll", "cancel", "settlement", "recovery")
+}
+func boundedJobStatus(value string) string {
+	return allowed(value, "PENDING", "QUEUED", "PROCESSING", "SUCCEEDED", "FAILED", "CANCELED", "RECONCILING")
 }
 func boundedRejection(value string) string {
 	return allowed(value, "none", "circuit_open", "circuit_unavailable", "price_unavailable", "price_race_unavailable", "margin", "spend_cap_exhausted", "credential_unavailable", "provider_unavailable", "executor_unavailable")
