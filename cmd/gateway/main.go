@@ -34,6 +34,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
+	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	managementProtocol "github.com/nativegatewayhq/gateway/protocols/management"
@@ -176,7 +177,13 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway chat model registry initialization failed")
 		return 1
 	}
+	responsesModels, err := responsesoperation.NewRegistry(cfg.OpenAIResponsesModels)
+	if err != nil {
+		logger.Error("gateway Responses model registry initialization failed")
+		return 1
+	}
 	var openAIChatHandler http.Handler
+	var openAIResponsesHandler http.Handler
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
@@ -241,6 +248,11 @@ func run(stdout, stderr io.Writer) int {
 		chatHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIChatHandler = chatHandler
 	}
+	if len(cfg.OpenAIResponsesModels) > 0 {
+		responsesHandler := openaiProtocol.NewResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes)
+		responsesHandler.SetTelemetry(telemetryRuntime.Recorder)
+		openAIResponsesHandler = responsesHandler
+	}
 	var geminiHandler *gemini.Handler
 	var openAIImagesHandler *openaiProtocol.Handler
 	var openAIImageEditsHandler *openaiProtocol.EditHandler
@@ -264,7 +276,7 @@ func run(stdout, stderr io.Writer) int {
 	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
-	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithChat(logger, apiKeyAuthenticator, imageModels, chatModels, providerCredentialRegistry)
+	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithChatAndResponses(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, providerCredentialRegistry)
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
@@ -423,6 +435,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
 		OpenAIChat:          openAIChatHandler,
+		OpenAIResponses:     openAIResponsesHandler,
 		Replicate:           replicateHandler,
 		ReplicateWebhook:    replicateWebhookHandler,
 		Fal:                 falHandler,

@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-039
 title: Phase 4 OpenAI Responses Native Non-streaming Foundation
-status: proposed
+status: accepted
 created_at: 2026-08-21T06:40:00+09:00
-updated_at: 2026-08-21T06:40:00+09:00
+updated_at: 2026-08-21T07:15:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-foundation
@@ -167,20 +167,25 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponses
 
 ## 완료 조건
 
-- [ ] 공식 OpenAI Python/JavaScript SDK가 Key와 Base URL만 변경해 `/v1/responses`를 호출함
-- [ ] request와 success/error response가 native bytes로 보존됨
-- [ ] typed input/output, tool과 reasoning future fields가 손실되지 않음
-- [ ] auth/network/rate/model/config failure가 Provider 호출 전에 종료됨
-- [ ] trusted origin과 Provider credential 격리가 유지되고 redirect/retry가 없음
-- [ ] billing-required mode에서 미정산 Responses dispatch가 불가능함
-- [ ] `/v1/models`가 Responses capability를 deterministic하게 노출함
-- [ ] prompt, tool content, credential, response ID와 raw error가 로그·telemetry에 없음
-- [ ] 전체 unit/race/integration/공식 SDK 회귀가 통과함
-- [ ] README와 Conformance/Cloud handoff가 갱신됨
+- [x] 공식 OpenAI Python/JavaScript SDK가 Key와 Base URL만 변경해 `/v1/responses`를 호출함
+- [x] request와 success/error response가 native bytes로 보존됨
+- [x] typed input/output, tool과 reasoning future fields가 손실되지 않음
+- [x] auth/network/rate/model/config failure가 Provider 호출 전에 종료됨
+- [x] trusted origin과 Provider credential 격리가 유지되고 redirect/retry가 없음
+- [x] billing-required mode에서 미정산 Responses dispatch가 불가능함
+- [x] `/v1/models`가 Responses capability를 deterministic하게 노출함
+- [x] prompt, tool content, credential, response ID와 raw error가 로그·telemetry에 없음
+- [x] 전체 unit/race/integration/공식 SDK 회귀가 통과함
+- [x] README와 Conformance/Cloud handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `make check`
+- `TEST_DATABASE_URL=... TEST_REDIS_URL=... make integration-test`
+- `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponsesSDKs`
+- fresh PostgreSQL schema에서 migration 000001~000033 반복 적용
+- raw tool/future field request와 typed output response byte-preservation tests
+- billing-required configuration fail-closed 및 trusted Provider origin tests
 
 ## Rollback 계획
 

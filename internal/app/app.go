@@ -25,6 +25,7 @@ type Dependencies struct {
 	OpenAIImageEdits    http.Handler
 	OpenAIModels        http.Handler
 	OpenAIChat          http.Handler
+	OpenAIResponses     http.Handler
 	Replicate           http.Handler
 	ReplicateWebhook    http.Handler
 	Fal                 http.Handler
@@ -77,7 +78,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, dependenci
 	}
 
 	server := &http.Server{
-		Handler:           httpserver.NewHandlerWithTelemetry(logger, dependencies.Ready, dependencies.ClientIPResolver, dependencies.Telemetry, dependencies.TracePropagator, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels, OpenAIChat: dependencies.OpenAIChat, Replicate: dependencies.Replicate, ReplicateWebhook: dependencies.ReplicateWebhook, Fal: dependencies.Fal, FalWebhook: dependencies.FalWebhook, Management: dependencies.Management}),
+		Handler:           httpserver.NewHandlerWithTelemetry(logger, dependencies.Ready, dependencies.ClientIPResolver, dependencies.Telemetry, dependencies.TracePropagator, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels, OpenAIChat: dependencies.OpenAIChat, OpenAIResponses: dependencies.OpenAIResponses, Replicate: dependencies.Replicate, ReplicateWebhook: dependencies.ReplicateWebhook, Fal: dependencies.Fal, FalWebhook: dependencies.FalWebhook, Management: dependencies.Management}),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
