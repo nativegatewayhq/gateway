@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-005
 title: Phase 0 OpenAI Images Native Pass-through
-status: in_progress
+status: completed
 created_at: 2026-08-20T13:53:52+09:00
-updated_at: 2026-08-20T13:59:07+09:00
+updated_at: 2026-08-20T14:08:30+09:00
 owners:
   - gateway
 initiative: phase-0-openai-images-sdk-e2e
@@ -319,24 +319,42 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] `POST /v1/images/generations`가 service Key로 보호됨
-- [ ] OpenAI SDK 요청이 등록 model에 따라 OpenAI 또는 xAI로 전달됨
-- [ ] Provider 선택이 명시적이고 모호하거나 미등록인 model은 호출 전에 거부됨
-- [ ] OpenAI/xAI credential이 선택된 fixed origin에만 전달됨
-- [ ] redirect가 차단되고 retry·fallback이 수행되지 않음
-- [ ] 요청 body와 Provider success/error 응답이 native 의미를 보존함
-- [ ] URL, Base64 image와 Provider 확장 필드가 손실되지 않음
-- [ ] body limit, timeout, cancellation과 연결 실패가 안전하게 처리됨
-- [ ] service Key, Provider credential, prompt와 image가 로그 및 오류에 없음
-- [ ] 기존 health, API Key와 Gemini 기능이 회귀 없이 동작함
-- [ ] 단위·통합·race 테스트 및 CI가 통과함
-- [ ] README에 SDK Base URL 예제와 정확한 지원 model 범위가 기록됨
-- [ ] Conformance 저장소에 필요한 공개 계약이 기록됨
-- [ ] commit, pull request와 CI 증거가 이 계획에 기록됨
+- [x] `POST /v1/images/generations`가 service Key로 보호됨
+- [x] OpenAI SDK 요청이 등록 model에 따라 OpenAI 또는 xAI로 전달됨
+- [x] Provider 선택이 명시적이고 모호하거나 미등록인 model은 호출 전에 거부됨
+- [x] OpenAI/xAI credential이 선택된 fixed origin에만 전달됨
+- [x] redirect가 차단되고 retry·fallback이 수행되지 않음
+- [x] 요청 body와 Provider success/error 응답이 native 의미를 보존함
+- [x] URL, Base64 image와 Provider 확장 필드가 손실되지 않음
+- [x] body limit, timeout, cancellation과 연결 실패가 안전하게 처리됨
+- [x] service Key, Provider credential, prompt와 image가 로그 및 오류에 없음
+- [x] 기존 health, API Key와 Gemini 기능이 회귀 없이 동작함
+- [x] 단위·통합·race 테스트 및 CI가 통과함
+- [x] README에 SDK Base URL 예제와 정확한 지원 model 범위가 기록됨
+- [x] Conformance 저장소에 필요한 공개 계약이 기록됨
+- [x] commit, pull request와 CI 증거가 이 계획에 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 로컬 검증:
+  - `make check`: formatter, vet, 전체 race test와 두 binary build 통과
+  - `make integration-test`: PostgreSQL service Key → OpenAI Images handler → fixed OpenAI origin → mock transport → native image response 경로 통과
+  - `git diff --check`: 통과
+  - `go test -cover ./operations/image ./protocols/openai ./providers/openaiimages`: registry 85.0%, protocol 80.6%, transport 80.4%
+- 프로토콜 및 장애 검증:
+  - 네 가지 service credential 위치, JSON media type, fixed/chunked body limit와 model 중복·누락·미등록 검증
+  - OpenAI/xAI exact model routing과 선택되지 않은 executor 미호출
+  - URL, `b64_json`, revised prompt, usage 및 xAI 비용 확장 필드의 native 전달
+  - Provider native 오류, timeout, caller cancellation, connection error, redirect 차단과 단일 시도 검증
+- 보안 검증:
+  - OpenAI `https://api.openai.com`, xAI `https://api.x.ai` origin 고정
+  - service credential 제거와 선택된 Provider Bearer credential만 적용
+  - service Key, Provider credential, prompt와 image data가 로그 및 Gateway 오류에 없음
+- 구현 commit: [`0c29ea5`](https://github.com/nativegatewayhq/gateway/commit/0c29ea5)
+- pull request: [#5](https://github.com/nativegatewayhq/gateway/pull/5)
+- CI:
+  - [`check`](https://github.com/nativegatewayhq/gateway/actions/runs/32334378056/job/96320934120): 통과
+  - [`validate`](https://github.com/nativegatewayhq/gateway/actions/runs/32334378054/job/96320934302): 통과
 
 ## Rollback 계획
 
