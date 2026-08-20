@@ -17,6 +17,7 @@ type Routes struct {
 	Gemini           http.Handler
 	OpenAIImages     http.Handler
 	OpenAIImageEdits http.Handler
+	OpenAIModels     http.Handler
 }
 
 // NewHandler builds the Gateway-owned and accepted provider-native routes.
@@ -30,6 +31,9 @@ func NewHandler(logger *slog.Logger, ready ReadyFunc, routeSets ...Routes) http.
 	}
 	if len(routeSets) > 0 && routeSets[0].OpenAIImageEdits != nil {
 		mux.Handle("/v1/images/edits", routeSets[0].OpenAIImageEdits)
+	}
+	if len(routeSets) > 0 && routeSets[0].OpenAIModels != nil {
+		mux.Handle("/v1/models", routeSets[0].OpenAIModels)
 	}
 	mux.HandleFunc("GET /health/live", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})

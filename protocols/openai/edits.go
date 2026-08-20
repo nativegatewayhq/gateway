@@ -14,6 +14,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
 
@@ -66,7 +67,7 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 			return
 		}
 		model, modelErr := extractModel(body)
-		if modelErr != nil || !handler.routeModel(tracked, model, providercredentials.XAI, &provider, &logModel) {
+		if modelErr != nil || !handler.routeModel(tracked, model, imageoperation.JSON, &provider, &logModel) {
 			if modelErr != nil {
 				writeError(tracked, 400, "invalid_request_error", "invalid_model", "request must contain one model")
 			}
@@ -105,7 +106,7 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		return
 	}
 	model, err := multipartModel(file, boundary)
-	if err != nil || !handler.routeModel(tracked, model, providercredentials.OpenAI, &provider, &logModel) {
+	if err != nil || !handler.routeModel(tracked, model, imageoperation.Multipart, &provider, &logModel) {
 		if err != nil {
 			writeError(tracked, 400, "invalid_request_error", "invalid_model", "request must contain one model")
 		}
@@ -118,17 +119,17 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	handler.execute(tracked, request, provider, request.Header.Get("Content-Type"), written, file)
 }
 
-func (handler *EditHandler) routeModel(writer http.ResponseWriter, model string, required providercredentials.ProviderID, provider *providercredentials.ProviderID, logModel *string) bool {
-	found, err := handler.common.models.ProviderForImageModel(model)
+func (handler *EditHandler) routeModel(writer http.ResponseWriter, model string, media imageoperation.MediaType, provider *providercredentials.ProviderID, logModel *string) bool {
+	route, err := handler.common.models.Resolve(model, imageoperation.Edit, media)
 	if err != nil {
-		writeError(writer, 404, "invalid_request_error", "model_not_found", "model not found")
+		if errors.Is(err, imageoperation.ErrModelNotFound) {
+			writeError(writer, 404, "invalid_request_error", "model_not_found", "model not found")
+		} else {
+			writeError(writer, 400, "invalid_request_error", "unsupported_media_type_for_model", "content type is not supported for model")
+		}
 		return false
 	}
-	if found != required {
-		writeError(writer, 400, "invalid_request_error", "unsupported_media_type_for_model", "content type is not supported for model")
-		return false
-	}
-	*provider, *logModel = found, model
+	*provider, *logModel = route.Provider, model
 	return true
 }
 

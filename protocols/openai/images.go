@@ -16,6 +16,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
 
@@ -26,7 +27,8 @@ type Authenticator interface {
 }
 
 type ModelRegistry interface {
-	ProviderForImageModel(string) (providercredentials.ProviderID, error)
+	Resolve(string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.ModelRoute, error)
+	List() []imageoperation.ModelRoute
 }
 
 type Executor interface {
@@ -113,11 +115,16 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
-	provider, err = handler.models.ProviderForImageModel(model)
+	route, err := handler.models.Resolve(model, imageoperation.Generate, imageoperation.JSON)
 	if err != nil {
-		writeError(tracked, http.StatusNotFound, "invalid_request_error", "model_not_found", "model not found")
+		if errors.Is(err, imageoperation.ErrModelNotFound) {
+			writeError(tracked, http.StatusNotFound, "invalid_request_error", "model_not_found", "model not found")
+		} else {
+			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "unsupported_capability", "model does not support operation")
+		}
 		return
 	}
+	provider = route.Provider
 	logModel = model
 	executor := handler.executors[provider]
 	if executor == nil {
