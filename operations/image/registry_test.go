@@ -88,7 +88,7 @@ func TestConfiguredReplicateModelsShareBuiltInChannel(t *testing.T) {
 	}
 	for _, model := range models {
 		route, err := registry.ResolveProtocol("replicate", model.Model, Generate, JSON)
-		if err != nil || route.Provider != providercredentials.Replicate {
+		if err != nil || route.Provider != providercredentials.Replicate || route.Usage.MaximumQuantity != 10 || route.Usage.ResultExtractor != "replicate-output-v1" {
 			t.Fatalf("route=%+v err=%v", route, err)
 		}
 	}

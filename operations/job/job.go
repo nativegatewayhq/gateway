@@ -31,6 +31,8 @@ var (
 	idPattern       = regexp.MustCompile(`^job_[a-f0-9]{32}$`)
 )
 
+const MaximumObservedUsage = int64(128)
+
 type Owner struct {
 	OrganizationID string
 	ProjectID      string
@@ -44,6 +46,13 @@ type Snapshot struct {
 	SHA256  [32]byte
 }
 
+// Usage is bounded, content-free billing evidence. Estimate usage is stored on
+// Job creation; verified actual usage is supplied only by a Provider adapter.
+type Usage struct {
+	Dimension, Unit, Provenance, ExtractorVersion, ResultExtractorVersion string
+	Quantity                                                              int64
+}
+
 type Job struct {
 	ID, RequestID, Protocol, Operation, Model string
 	Owner                                     Owner
@@ -52,6 +61,9 @@ type Job struct {
 	Fingerprint                               [32]byte
 	Status                                    Status
 	SettlementState                           string
+	EstimatedUsage                            *Usage
+	ActualUsage                               *Usage
+	UsageReconciliationReason                 string
 	Version                                   int64
 	Snapshot                                  Snapshot
 	FailureCategory                           string
@@ -64,6 +76,7 @@ type Observation struct {
 	Snapshot        Snapshot
 	FailureCategory string
 	ProviderJobID   string
+	Usage           *Usage
 }
 
 type PublicResult struct {
@@ -139,12 +152,27 @@ func ValidateObservation(current Status, observation Observation, maximumBodyByt
 	if len(observation.ProviderJobID) > 500 || strings.ContainsAny(observation.ProviderJobID, "\r\n") {
 		return ErrInvalid
 	}
+	if observation.Usage != nil && !ValidActualUsage(*observation.Usage) {
+		return ErrInvalid
+	}
 	return nil
+}
+
+func ValidEstimatedUsage(value Usage) bool {
+	return value.Dimension == "output" && value.Unit == "image" && value.Quantity > 0 && value.Quantity <= 10 && validUsageText(value.ExtractorVersion, 80) && validUsageText(value.ResultExtractorVersion, 80) && value.Provenance == "request"
+}
+
+func ValidActualUsage(value Usage) bool {
+	return value.Dimension == "output" && value.Unit == "image" && value.Quantity >= 0 && value.Quantity <= MaximumObservedUsage && validUsageText(value.ExtractorVersion, 80) && (value.Provenance == "poll" || value.Provenance == "webhook" || value.Provenance == "submit" || value.Provenance == "cancel")
+}
+
+func validUsageText(value string, maximum int) bool {
+	return value != "" && len(value) <= maximum && value == strings.TrimSpace(value) && !strings.ContainsAny(value, "\r\n")
 }
 
 func ValidFailureCategory(value string) bool {
 	switch value {
-	case "rejected", "invalid_request", "rate_limited", "unavailable", "timeout", "connection", "canceled", "invalid_response", "missing_provider_job_id", "provider_error", "provider_unavailable", "cancel_unknown", "settlement_failed", "manual_review":
+	case "rejected", "invalid_request", "rate_limited", "unavailable", "timeout", "connection", "canceled", "invalid_response", "missing_provider_job_id", "provider_error", "provider_unavailable", "cancel_unknown", "settlement_failed", "manual_review", "usage_unknown", "usage_exceeds_estimate", "partial_terminal_conflict", "usage_identity_mismatch":
 		return true
 	}
 	return false

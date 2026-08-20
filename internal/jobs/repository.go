@@ -33,6 +33,7 @@ type CreateRequest struct {
 	Provider, ChannelID, ChargeID         string
 	IdempotencyKey                        string
 	Fingerprint                           [32]byte
+	EstimatedUsage                        *joboperation.Usage
 }
 
 type ProviderAttempt struct {
@@ -60,6 +61,8 @@ type SettlementLease struct {
 	Owner, Token string
 	Until        time.Time
 	Attempt      int
+	ActualUsage  *joboperation.Usage
+	UsageReason  string
 }
 
 type Repository struct {
@@ -140,8 +143,12 @@ func (repository *Repository) Create(ctx context.Context, request CreateRequest)
 	if request.ChargeID != "" {
 		charge = request.ChargeID
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO async_jobs(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'PENDING')`, id, request.RequestID, request.Owner.OrganizationID, request.Owner.ProjectID, request.Owner.APIKeyID, request.Protocol, request.Operation, request.Model, request.Provider, request.ChannelID, charge, key, fingerprint)
+	var usageDimension, usageUnit, estimatedQuantity, extractorVersion, resultExtractorVersion any
+	if request.EstimatedUsage != nil {
+		usageDimension, usageUnit, estimatedQuantity, extractorVersion, resultExtractorVersion = request.EstimatedUsage.Dimension, request.EstimatedUsage.Unit, request.EstimatedUsage.Quantity, request.EstimatedUsage.ExtractorVersion, request.EstimatedUsage.ResultExtractorVersion
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO async_jobs(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status,usage_dimension,usage_unit,estimated_quantity,usage_extractor_version,usage_result_extractor_version)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'PENDING',$14,$15,$16,$17,$18)`, id, request.RequestID, request.Owner.OrganizationID, request.Owner.ProjectID, request.Owner.APIKeyID, request.Protocol, request.Operation, request.Model, request.Provider, request.ChannelID, charge, key, fingerprint, usageDimension, usageUnit, estimatedQuantity, extractorVersion, resultExtractorVersion)
 	if err != nil {
 		return joboperation.Job{}, false, err
 	}
@@ -153,7 +160,7 @@ func (repository *Repository) Create(ctx context.Context, request CreateRequest)
 		return joboperation.Job{}, false, err
 	}
 	created := repository.now().UTC()
-	return joboperation.Job{ID: id, RequestID: request.RequestID, Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, Owner: request.Owner, Provider: request.Provider, ChannelID: request.ChannelID, ChargeID: request.ChargeID, IdempotencyKey: request.IdempotencyKey, Fingerprint: request.Fingerprint, Status: joboperation.Pending, SettlementState: "NONE", Version: 1, CreatedAt: created, UpdatedAt: created}, false, nil
+	return joboperation.Job{ID: id, RequestID: request.RequestID, Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, Owner: request.Owner, Provider: request.Provider, ChannelID: request.ChannelID, ChargeID: request.ChargeID, IdempotencyKey: request.IdempotencyKey, Fingerprint: request.Fingerprint, Status: joboperation.Pending, SettlementState: "NONE", EstimatedUsage: cloneUsage(request.EstimatedUsage), Version: 1, CreatedAt: created, UpdatedAt: created}, false, nil
 }
 
 func (repository *Repository) Get(ctx context.Context, owner joboperation.Owner, id string) (joboperation.Job, error) {
@@ -323,8 +330,13 @@ func (repository *Repository) ApplyObservation(ctx context.Context, lease Lease,
 	if !found {
 		return joboperation.Job{}, joboperation.ErrNotFound
 	}
+	if current.Status.Terminal() && current.EstimatedUsage != nil && current.ActualUsage == nil {
+		if err := hydrateActualUsage(ctx, tx, &current); err != nil {
+			return joboperation.Job{}, err
+		}
+	}
 	if current.Status.Terminal() {
-		if joboperation.SameTerminal(current, observation) {
+		if joboperation.SameTerminal(current, observation) && sameActualUsage(current, observation) {
 			return current, tx.Commit(ctx)
 		}
 		return joboperation.Job{}, joboperation.ErrConflict
@@ -415,6 +427,11 @@ func (repository *Repository) ApplyWebhook(ctx context.Context, request WebhookO
 	if !found || current.Provider != request.Provider || current.ChannelID != channelID {
 		return joboperation.Job{}, false, fmt.Errorf("%w: job binding", ErrWebhookRejected)
 	}
+	if current.Status.Terminal() && current.EstimatedUsage != nil && current.ActualUsage == nil {
+		if err := hydrateActualUsage(ctx, tx, &current); err != nil {
+			return joboperation.Job{}, false, err
+		}
+	}
 	var attempt ProviderAttempt
 	var storedProviderJobID *string
 	err = tx.QueryRow(ctx, `SELECT job_id,attempt_no,provider,channel_id,provider_job_id,state FROM async_job_provider_attempts WHERE job_id=$1 AND attempt_no=1 FOR UPDATE`, request.JobID).Scan(&attempt.JobID, &attempt.AttemptNo, &attempt.Provider, &attempt.ChannelID, &storedProviderJobID, &attempt.State)
@@ -435,7 +452,7 @@ func (repository *Repository) ApplyWebhook(ctx context.Context, request WebhookO
 	var deliveredJobID, deliveredStatus string
 	err = tx.QueryRow(ctx, `SELECT job_id,terminal_status FROM async_job_webhook_deliveries WHERE provider=$1 AND delivery_id=$2`, request.Provider, request.DeliveryID).Scan(&deliveredJobID, &deliveredStatus)
 	if err == nil {
-		if deliveredJobID != request.JobID || deliveredStatus != string(request.Observation.Status) {
+		if deliveredJobID != request.JobID || deliveredStatus != string(request.Observation.Status) || !joboperation.SameTerminal(current, request.Observation) || !sameActualUsage(current, request.Observation) {
 			return joboperation.Job{}, false, fmt.Errorf("%w: delivery collision", ErrWebhookRejected)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -448,7 +465,7 @@ func (repository *Repository) ApplyWebhook(ctx context.Context, request WebhookO
 	}
 
 	if current.Status.Terminal() {
-		if !joboperation.SameTerminal(current, request.Observation) {
+		if !joboperation.SameTerminal(current, request.Observation) || !sameActualUsage(current, request.Observation) {
 			return joboperation.Job{}, false, joboperation.ErrConflict
 		}
 	} else {
@@ -724,24 +741,32 @@ func validOwner(owner joboperation.Owner) bool {
 	return owner.OrganizationID != "" && owner.ProjectID != "" && owner.APIKeyID != "" && len(owner.OrganizationID) <= 128 && len(owner.ProjectID) <= 128 && len(owner.APIKeyID) <= 200
 }
 func validCreate(request CreateRequest) bool {
-	return validOwner(request.Owner) && request.RequestID != "" && len(request.RequestID) <= 128 && request.Protocol != "" && request.Protocol == strings.ToLower(request.Protocol) && len(request.Protocol) <= 40 && request.Operation != "" && request.Operation == strings.ToLower(request.Operation) && len(request.Operation) <= 80 && strings.TrimSpace(request.Model) == request.Model && request.Model != "" && len(request.Model) <= 200 && request.Provider != "" && request.Provider == strings.ToLower(request.Provider) && len(request.Provider) <= 40 && request.ChannelID != "" && len(request.IdempotencyKey) <= 256 && (request.IdempotencyKey == "" || request.Fingerprint != ([32]byte{}))
+	return validOwner(request.Owner) && request.RequestID != "" && len(request.RequestID) <= 128 && request.Protocol != "" && request.Protocol == strings.ToLower(request.Protocol) && len(request.Protocol) <= 40 && request.Operation != "" && request.Operation == strings.ToLower(request.Operation) && len(request.Operation) <= 80 && strings.TrimSpace(request.Model) == request.Model && request.Model != "" && len(request.Model) <= 200 && request.Provider != "" && request.Provider == strings.ToLower(request.Provider) && len(request.Provider) <= 40 && request.ChannelID != "" && len(request.IdempotencyKey) <= 256 && (request.IdempotencyKey == "" || request.Fingerprint != ([32]byte{})) && (request.EstimatedUsage == nil || joboperation.ValidEstimatedUsage(*request.EstimatedUsage))
 }
 func validCategory(value string) bool {
 	return joboperation.ValidFailureCategory(value)
 }
 
 func sameCreate(existing joboperation.Job, request CreateRequest) bool {
-	return existing.Owner == request.Owner && existing.Protocol == request.Protocol && existing.Operation == request.Operation && existing.Model == request.Model && existing.Provider == request.Provider && existing.ChannelID == request.ChannelID && existing.ChargeID == request.ChargeID && existing.IdempotencyKey == request.IdempotencyKey && (request.IdempotencyKey == "" || existing.Fingerprint == request.Fingerprint)
+	return existing.Owner == request.Owner && existing.Protocol == request.Protocol && existing.Operation == request.Operation && existing.Model == request.Model && existing.Provider == request.Provider && existing.ChannelID == request.ChannelID && existing.ChargeID == request.ChargeID && existing.IdempotencyKey == request.IdempotencyKey && sameUsage(existing.EstimatedUsage, request.EstimatedUsage) && (request.IdempotencyKey == "" || existing.Fingerprint == request.Fingerprint)
 }
 
-const jobSelect = `SELECT id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status,settlement_state,version,failure_category,response_status,response_headers,response_body,response_body_sha256,created_at,updated_at,completed_at FROM async_jobs`
+const jobSelect = `SELECT id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status,settlement_state,version,failure_category,response_status,response_headers,response_body,response_body_sha256,created_at,updated_at,completed_at,usage_dimension,usage_unit,estimated_quantity,usage_extractor_version,usage_result_extractor_version,
+    (SELECT dimension FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
+    (SELECT unit FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
+    (SELECT quantity FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
+    (SELECT provenance FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
+    (SELECT extractor_version FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
+    (SELECT reconciliation_reason FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id)
+    FROM async_jobs`
 
 func scanJob(row pgx.Row) (joboperation.Job, bool, error) {
 	var item joboperation.Job
-	var charge, key, category *string
+	var charge, key, category, estimateDimension, estimateUnit, estimateExtractor, estimateResultExtractor, actualDimension, actualUnit, actualProvenance, actualExtractor, usageReason *string
+	var estimatedQuantity, actualQuantity *int64
 	var fingerprint, headers, body, digest []byte
 	var status *int
-	err := row.Scan(&item.ID, &item.RequestID, &item.Owner.OrganizationID, &item.Owner.ProjectID, &item.Owner.APIKeyID, &item.Protocol, &item.Operation, &item.Model, &item.Provider, &item.ChannelID, &charge, &key, &fingerprint, &item.Status, &item.SettlementState, &item.Version, &category, &status, &headers, &body, &digest, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt)
+	err := row.Scan(&item.ID, &item.RequestID, &item.Owner.OrganizationID, &item.Owner.ProjectID, &item.Owner.APIKeyID, &item.Protocol, &item.Operation, &item.Model, &item.Provider, &item.ChannelID, &charge, &key, &fingerprint, &item.Status, &item.SettlementState, &item.Version, &category, &status, &headers, &body, &digest, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt, &estimateDimension, &estimateUnit, &estimatedQuantity, &estimateExtractor, &estimateResultExtractor, &actualDimension, &actualUnit, &actualQuantity, &actualProvenance, &actualExtractor, &usageReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, false, nil
 	}
@@ -756,6 +781,15 @@ func scanJob(row pgx.Row) (joboperation.Job, bool, error) {
 	}
 	if category != nil {
 		item.FailureCategory = *category
+	}
+	if estimatedQuantity != nil {
+		item.EstimatedUsage = &joboperation.Usage{Dimension: *estimateDimension, Unit: *estimateUnit, Quantity: *estimatedQuantity, Provenance: "request", ExtractorVersion: *estimateExtractor, ResultExtractorVersion: *estimateResultExtractor}
+	}
+	if actualQuantity != nil {
+		item.ActualUsage = &joboperation.Usage{Dimension: *actualDimension, Unit: *actualUnit, Quantity: *actualQuantity, Provenance: *actualProvenance, ExtractorVersion: *actualExtractor}
+	}
+	if usageReason != nil {
+		item.UsageReconciliationReason = *usageReason
 	}
 	copy(item.Fingerprint[:], fingerprint)
 	if status != nil {
@@ -820,7 +854,11 @@ func updateJobStatus(ctx context.Context, tx pgx.Tx, current joboperation.Job, s
 	if !joboperation.CanTransition(current.Status, status) {
 		return joboperation.ErrInvalidState
 	}
+	if observation.Usage != nil && observation.Usage.Provenance != source {
+		return joboperation.ErrInvalid
+	}
 	var responseStatus, headers, body, digest, completed, category, settlement any
+	var observationDigest [32]byte
 	if observation.Snapshot.Status != 0 {
 		canonical := observation.Snapshot
 		if err := joboperation.ValidateSnapshot(canonical, 256*1024*1024); err != nil {
@@ -832,6 +870,7 @@ func updateJobStatus(ctx context.Context, tx pgx.Tx, current joboperation.Job, s
 			return joboperation.ErrInvalid
 		}
 		responseStatus, headers, body, digest = canonical.Status, string(encoded), canonical.Body, canonical.SHA256[:]
+		observationDigest = canonical.SHA256
 	}
 	if observation.FailureCategory != "" {
 		category = observation.FailureCategory
@@ -839,6 +878,21 @@ func updateJobStatus(ctx context.Context, tx pgx.Tx, current joboperation.Job, s
 	if status.Terminal() {
 		completed = time.Now().UTC()
 		settlement = "PENDING"
+		if current.EstimatedUsage != nil {
+			reason := usageReason(current, observation)
+			if reason != "" {
+				settlement = "MANUAL_REVIEW"
+			}
+			if observation.Usage != nil {
+				if observationDigest == ([32]byte{}) {
+					observationDigest = sha256.Sum256(nil)
+				}
+				_, err := tx.Exec(ctx, `INSERT INTO async_job_usage_evidence(job_id,charge_id,provider,source,dimension,unit,quantity,provenance,extractor_version,observation_sha256,reconciliation_reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, current.ID, nullable(current.ChargeID), current.Provider, source, observation.Usage.Dimension, observation.Usage.Unit, observation.Usage.Quantity, observation.Usage.Provenance, observation.Usage.ExtractorVersion, observationDigest[:], nullable(reason))
+				if err != nil {
+					return err
+				}
+			}
+		}
 	} else {
 		settlement = "NONE"
 	}
@@ -851,6 +905,70 @@ func updateJobStatus(ctx context.Context, tx pgx.Tx, current joboperation.Job, s
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO async_job_events(job_id,version,event_type,from_status,to_status,source,category) VALUES($1,$2,$3,$4,$5,$6,$7)`, current.ID, current.Version+1, event, current.Status, status, source, category)
 	return err
+}
+
+func usageReason(current joboperation.Job, observation joboperation.Observation) string {
+	if current.EstimatedUsage == nil || !observation.Status.Terminal() {
+		return ""
+	}
+	if observation.Status == joboperation.Succeeded {
+		if observation.Usage == nil || observation.Usage.Quantity == 0 {
+			return "usage_unknown"
+		}
+		if observation.Usage.Dimension != current.EstimatedUsage.Dimension || observation.Usage.Unit != current.EstimatedUsage.Unit {
+			return "usage_identity_mismatch"
+		}
+		if observation.Usage.ExtractorVersion != current.EstimatedUsage.ResultExtractorVersion {
+			return "usage_identity_mismatch"
+		}
+		if observation.Usage.Quantity > current.EstimatedUsage.Quantity {
+			return "usage_exceeds_estimate"
+		}
+		return ""
+	}
+	if observation.Usage != nil && observation.Usage.Quantity > 0 {
+		return "partial_terminal_conflict"
+	}
+	return ""
+}
+
+func cloneUsage(value *joboperation.Usage) *joboperation.Usage {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func sameUsage(left, right *joboperation.Usage) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
+}
+
+func sameActualUsage(current joboperation.Job, observation joboperation.Observation) bool {
+	if current.EstimatedUsage == nil {
+		return true
+	}
+	if current.ActualUsage == nil || observation.Usage == nil {
+		return current.ActualUsage == nil && observation.Usage == nil
+	}
+	return current.ActualUsage.Dimension == observation.Usage.Dimension && current.ActualUsage.Unit == observation.Usage.Unit && current.ActualUsage.Quantity == observation.Usage.Quantity && current.ActualUsage.ExtractorVersion == observation.Usage.ExtractorVersion
+}
+
+func hydrateActualUsage(ctx context.Context, tx pgx.Tx, current *joboperation.Job) error {
+	var usage joboperation.Usage
+	var reason *string
+	err := tx.QueryRow(ctx, `SELECT dimension,unit,quantity,provenance,extractor_version,reconciliation_reason FROM async_job_usage_evidence WHERE job_id=$1`, current.ID).Scan(&usage.Dimension, &usage.Unit, &usage.Quantity, &usage.Provenance, &usage.ExtractorVersion, &reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current.ActualUsage = &usage
+	if reason != nil {
+		current.UsageReconciliationReason = *reason
+	}
+	return nil
 }
 func nullable(value string) any {
 	if value == "" {

@@ -42,6 +42,10 @@ type Capability struct {
 	Operation Operation
 	MediaType MediaType
 }
+type UsageCapability struct {
+	Dimension, Unit, RequestExtractor, ResultExtractor string
+	DefaultQuantity, MaximumQuantity                   int64
+}
 type ChannelCandidate struct {
 	ID            string
 	Provider      providercredentials.ProviderID
@@ -60,6 +64,7 @@ type ModelRoute struct {
 	Policy           Policy
 	FixedCandidateID string
 	Candidates       []ChannelCandidate
+	Usage            UsageCapability
 }
 type RoutingDecision struct {
 	Protocol      string
@@ -71,6 +76,7 @@ type RoutingDecision struct {
 	Policy        Policy
 	Priority      int
 	Weight        uint32
+	Usage         UsageCapability
 }
 type Registry struct{ routes map[string]ModelRoute }
 
@@ -78,7 +84,7 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 	registry := &Registry{routes: make(map[string]ModelRoute, len(routes))}
 	candidateIDs := map[string]struct{}{}
 	for _, route := range routes {
-		if !validProtocol(route.Protocol) || !validProtocolModelID(route.Protocol, route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || len(route.Candidates) > MaxRouteCandidates || (route.Policy != Fixed && route.Policy != Priority && route.Policy != LowestCost && route.Policy != Weighted) {
+		if !validProtocol(route.Protocol) || !validProtocolModelID(route.Protocol, route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || len(route.Candidates) > MaxRouteCandidates || (route.Policy != Fixed && route.Policy != Priority && route.Policy != LowestCost && route.Policy != Weighted) || !validUsageCapability(route.Usage) {
 			return nil, ErrInvalidModel
 		}
 		key := route.Protocol + "\x00" + route.Model
@@ -148,13 +154,13 @@ func DefaultRegistryWithAsync(replicateModels, falModels []string) (*Registry, e
 		if before, _, ok := strings.Cut(model, "/"); ok && before != "" {
 			owner = before
 		}
-		routes = append(routes, ModelRoute{Protocol: "replicate", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Replicate, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000004", Enabled: true}}})
+		routes = append(routes, ModelRoute{Protocol: "replicate", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Replicate, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000004", Enabled: true}}, Usage: UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 10, RequestExtractor: "replicate-input-num_outputs-v1", ResultExtractor: "replicate-output-v1"}})
 	}
 	for _, model := range falModels {
 		digest := sha256.Sum256([]byte(model))
 		candidateID := "candidate_fal_" + hex.EncodeToString(digest[:8])
 		owner, _, _ := strings.Cut(model, "/")
-		routes = append(routes, ModelRoute{Protocol: "fal", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Fal, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000005", Enabled: true}}})
+		routes = append(routes, ModelRoute{Protocol: "fal", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Fal, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000005", Enabled: true}}, Usage: UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 10, RequestExtractor: "fal-input-num_images-v1", ResultExtractor: "fal-output-v1"}})
 	}
 	return NewRegistry(routes...)
 }
@@ -213,7 +219,7 @@ func (registry *Registry) Candidates(protocol, model string, operation Operation
 		if !candidate.Enabled || (route.Policy == Fixed && candidate.ID != route.FixedCandidateID) {
 			continue
 		}
-		decisions = append(decisions, RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy, Priority: candidate.Priority, Weight: candidate.Weight})
+		decisions = append(decisions, RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy, Priority: candidate.Priority, Weight: candidate.Weight, Usage: route.Usage})
 	}
 	if len(decisions) == 0 {
 		return nil, ErrUnsupported
@@ -265,6 +271,12 @@ func validCandidateID(value string) bool {
 
 func validCapability(capability Capability) bool {
 	return (capability.Operation == Generate && capability.MediaType == JSON) || (capability.Operation == Edit && (capability.MediaType == JSON || capability.MediaType == Multipart))
+}
+func validUsageCapability(value UsageCapability) bool {
+	if value == (UsageCapability{}) {
+		return true
+	}
+	return value.Dimension == "output" && value.Unit == "image" && value.DefaultQuantity >= 1 && value.DefaultQuantity <= value.MaximumQuantity && value.MaximumQuantity <= 10 && len(value.RequestExtractor) >= 1 && len(value.RequestExtractor) <= 80 && len(value.ResultExtractor) >= 1 && len(value.ResultExtractor) <= 80
 }
 func validModelID(model string) bool {
 	if model == "" || len(model) > 200 {

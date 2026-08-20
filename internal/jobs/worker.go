@@ -14,6 +14,10 @@ type Settler interface {
 	Complete(context.Context, string, bool, billing.ResponseSnapshot) (billing.Charge, error)
 }
 
+type UsageSettler interface {
+	CompleteWithQuantity(context.Context, string, int64, billing.ResponseSnapshot) (billing.Charge, error)
+}
+
 type WorkerConfig struct {
 	Interval, Lease, PollDelay, BaseBackoff, MaximumBackoff time.Duration
 	BatchSize, MaximumAttempts                              int
@@ -100,9 +104,11 @@ func (worker *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 			}
 			next = at.Add(worker.config.PollDelay)
 		}
-		if _, err := worker.repository.ApplyObservation(ctx, lease, observation, "poll", next); err != nil {
+		observed, err := worker.repository.ApplyObservation(ctx, lease, observation, "poll", next)
+		if err != nil {
 			return result, err
 		}
+		worker.recordUsage(ctx, observed)
 		result.Observed++
 		worker.record(ctx, "poll", observation.Status, "success")
 	}
@@ -134,6 +140,19 @@ func (worker *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	return result, nil
 }
 
+func (worker *Worker) recordUsage(ctx context.Context, value joboperation.Job) {
+	if worker.telemetry == nil || value.ActualUsage == nil {
+		return
+	}
+	outcome, reason := "success", value.UsageReconciliationReason
+	if reason == "" {
+		reason = "none"
+	} else {
+		outcome = "manual"
+	}
+	worker.telemetry.JobUsage(ctx, telemetry.JobUsageRecord{Protocol: value.Protocol, Kind: "actual", Quantity: value.ActualUsage.Quantity, Outcome: outcome, Reason: reason})
+}
+
 func (worker *Worker) record(ctx context.Context, stage string, status joboperation.Status, outcome string) {
 	if worker.telemetry != nil {
 		worker.telemetry.Job(ctx, telemetry.JobRecord{Protocol: "gateway", Stage: stage, Status: string(status), Outcome: outcome})
@@ -156,6 +175,17 @@ func (worker *Worker) settle(ctx context.Context, lease SettlementLease) error {
 	snapshot := billing.ResponseSnapshot{Status: lease.Job.Snapshot.Status, Headers: lease.Job.Snapshot.Headers, Body: lease.Job.Snapshot.Body}
 	if lease.Job.Status == joboperation.Canceled {
 		snapshot = billing.ResponseSnapshot{Status: 204, Headers: map[string][]string{}, Body: []byte{}}
+	}
+	if lease.Job.Status == joboperation.Succeeded && lease.Job.EstimatedUsage != nil {
+		if lease.Job.ActualUsage == nil || lease.Job.UsageReconciliationReason != "" || lease.Job.ActualUsage.Quantity <= 0 || lease.Job.ActualUsage.Quantity > lease.Job.EstimatedUsage.Quantity {
+			return errors.New("job usage unavailable")
+		}
+		settler, ok := worker.settler.(UsageSettler)
+		if !ok {
+			return errors.New("usage-aware settlement unavailable")
+		}
+		_, err := settler.CompleteWithQuantity(ctx, lease.Job.ChargeID, lease.Job.ActualUsage.Quantity, snapshot)
+		return err
 	}
 	_, err := worker.settler.Complete(ctx, lease.Job.ChargeID, lease.Job.Status == joboperation.Succeeded, snapshot)
 	return err

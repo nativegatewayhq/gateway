@@ -90,6 +90,9 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 	if err != nil {
 		return joboperation.Job{}, err
 	}
+	if !replay && created.EstimatedUsage != nil && service.telemetry != nil {
+		service.telemetry.JobUsage(ctx, telemetry.JobUsageRecord{Protocol: created.Protocol, Kind: "estimated", Quantity: created.EstimatedUsage.Quantity, Outcome: "neutral", Reason: "none"})
+	}
 	if replay && created.Status != joboperation.Pending {
 		return created, nil
 	}
@@ -168,7 +171,24 @@ func (service *Service) ApplyWebhook(ctx context.Context, request WebhookObserva
 		return joboperation.Job{}, false, ErrWebhookRejected
 	}
 	request.CallbackSecret = webhook.CallbackSecret
-	return service.repository.ApplyWebhook(ctx, request)
+	result, replay, err := service.repository.ApplyWebhook(ctx, request)
+	if err == nil && !replay {
+		service.recordUsage(ctx, result)
+	}
+	return result, replay, err
+}
+
+func (service *Service) recordUsage(ctx context.Context, value joboperation.Job) {
+	if service.telemetry == nil || value.ActualUsage == nil {
+		return
+	}
+	outcome, reason := "success", value.UsageReconciliationReason
+	if reason == "" {
+		reason = "none"
+	} else {
+		outcome = "manual"
+	}
+	service.telemetry.JobUsage(ctx, telemetry.JobUsageRecord{Protocol: value.Protocol, Kind: "actual", Quantity: value.ActualUsage.Quantity, Outcome: outcome, Reason: reason})
 }
 
 func predispatchFailure(_ string) *ProviderError {

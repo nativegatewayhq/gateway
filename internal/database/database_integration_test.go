@@ -85,7 +85,7 @@ func TestMigrateIsRepeatable(t *testing.T) {
 	}
 	var exists bool
 	if err := pool.QueryRow(ctx, `SELECT NOT EXISTS (
-		SELECT required.name FROM (VALUES ('users'),('organizations'),('organization_memberships'),('projects'),('service_api_keys'),('service_api_key_model_permissions'),('organization_wallets'),('wallet_reservations'),('wallet_operations'),('ledger_entries'),('provider_channels'),('provider_prices'),('price_publications'),('image_request_charges'),('image_charge_reconciliations'),('image_assets'),('async_jobs'),('async_job_provider_attempts'),('async_job_events'),('async_job_webhook_bindings'),('async_job_webhook_deliveries')) required(name)
+		SELECT required.name FROM (VALUES ('users'),('organizations'),('organization_memberships'),('projects'),('service_api_keys'),('service_api_key_model_permissions'),('organization_wallets'),('wallet_reservations'),('wallet_operations'),('ledger_entries'),('provider_channels'),('provider_prices'),('price_publications'),('image_request_charges'),('image_charge_reconciliations'),('image_assets'),('async_jobs'),('async_job_provider_attempts'),('async_job_events'),('async_job_webhook_bindings'),('async_job_webhook_deliveries'),('async_job_usage_evidence')) required(name)
 		WHERE NOT EXISTS (SELECT 1 FROM information_schema.tables t WHERE t.table_schema='public' AND t.table_name=required.name)
 	)`).Scan(&exists); err != nil {
 		t.Fatal(err)

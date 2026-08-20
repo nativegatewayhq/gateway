@@ -117,11 +117,13 @@ func (client *Client) Submit(ctx context.Context, value joboperation.Job, payloa
 		known := response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != 408 && response.StatusCode != 409 && response.StatusCode != 429
 		return jobs.SubmitResult{}, &jobs.ProviderError{Category: statusCategory(response.StatusCode), Known: known, Observation: failureSnapshot(response.StatusCode, body)}
 	}
-	providerID, observation, sanitized, err := client.observation(value.ID, response.StatusCode, response.Header, body)
+	providerID, observation, sanitized, err := client.observation(value.ID, response.StatusCode, response.Header, body, "submit")
 	if err != nil {
 		return jobs.SubmitResult{}, &jobs.ProviderError{Category: "invalid_response"}
 	}
-	observation.Snapshot = sanitized
+	if observation.Status != joboperation.Canceled {
+		observation.Snapshot = sanitized
+	}
 	return jobs.SubmitResult{ProviderJobID: providerID, Observation: observation, PollAfter: time.Second}, nil
 }
 
@@ -140,11 +142,13 @@ func (client *Client) Poll(ctx context.Context, attempt jobs.ProviderAttempt) (j
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return joboperation.Observation{}, &jobs.ProviderError{Category: statusCategory(response.StatusCode)}
 	}
-	_, observation, snapshot, err := client.observation(attempt.JobID, response.StatusCode, response.Header, body)
+	_, observation, snapshot, err := client.observation(attempt.JobID, response.StatusCode, response.Header, body, "poll")
 	if err != nil {
 		return joboperation.Observation{}, &jobs.ProviderError{Category: "invalid_response"}
 	}
-	observation.Snapshot = snapshot
+	if observation.Status != joboperation.Canceled {
+		observation.Snapshot = snapshot
+	}
 	return observation, nil
 }
 
@@ -163,11 +167,13 @@ func (client *Client) Cancel(ctx context.Context, attempt jobs.ProviderAttempt) 
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return joboperation.Observation{}, &jobs.ProviderError{Category: statusCategory(response.StatusCode)}
 	}
-	_, observation, snapshot, err := client.observation(attempt.JobID, response.StatusCode, response.Header, body)
+	_, observation, snapshot, err := client.observation(attempt.JobID, response.StatusCode, response.Header, body, "cancel")
 	if err != nil {
 		return joboperation.Observation{}, &jobs.ProviderError{Category: "invalid_response"}
 	}
-	observation.Snapshot = snapshot
+	if observation.Status != joboperation.Canceled {
+		observation.Snapshot = snapshot
+	}
 	return observation, nil
 }
 
@@ -204,7 +210,7 @@ func (client *Client) do(request *http.Request) (*http.Response, []byte, error) 
 	return response, body, nil
 }
 
-func (client *Client) observation(jobID string, statusCode int, headers http.Header, body []byte) (string, joboperation.Observation, joboperation.Snapshot, error) {
+func (client *Client) observation(jobID string, statusCode int, headers http.Header, body []byte, source string) (string, joboperation.Observation, joboperation.Snapshot, error) {
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(body, &envelope) != nil {
 		return "", joboperation.Observation{}, joboperation.Snapshot{}, errors.New("invalid Replicate response")
@@ -225,19 +231,61 @@ func (client *Client) observation(jobID string, statusCode int, headers http.Hea
 		return "", joboperation.Observation{}, joboperation.Snapshot{}, err
 	}
 	snapshot := joboperation.Snapshot{Status: statusCode, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: sanitized, SHA256: sha256.Sum256(sanitized)}
-	return providerID, joboperation.Observation{Status: mapped, FailureCategory: category}, snapshot, nil
+	observation := joboperation.Observation{Status: mapped, FailureCategory: category}
+	if mapped.Terminal() {
+		observation.Usage = replicateOutputUsage(envelope["output"], source)
+	}
+	return providerID, observation, snapshot, nil
 }
 
 // WebhookObservation validates and sanitizes a native Replicate Prediction
 // delivered by webhook. Only terminal completed-event payloads are accepted.
 func (client *Client) WebhookObservation(jobID string, body []byte) (string, joboperation.Observation, error) {
-	providerID, observation, snapshot, err := client.observation(jobID, http.StatusOK, http.Header{"Content-Type": {"application/json"}}, body)
+	providerID, observation, snapshot, err := client.observation(jobID, http.StatusOK, http.Header{"Content-Type": {"application/json"}}, body, "webhook")
 	if err != nil || !observation.Status.Terminal() {
 		return "", joboperation.Observation{}, errors.New("invalid Replicate webhook observation")
 	}
-	observation.Snapshot = snapshot
+	if observation.Status != joboperation.Canceled {
+		observation.Snapshot = snapshot
+	}
 	observation.ProviderJobID = providerID
 	return providerID, observation, nil
+}
+
+func replicateOutputUsage(raw json.RawMessage, source string) *joboperation.Usage {
+	quantity := int64(0)
+	if len(raw) > 0 && string(raw) != "null" {
+		var values []json.RawMessage
+		if json.Unmarshal(raw, &values) == nil {
+			for _, value := range values {
+				if usableOutput(value) && quantity < joboperation.MaximumObservedUsage {
+					quantity++
+				}
+			}
+		} else if usableOutput(raw) {
+			quantity = 1
+		}
+	}
+	return &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: quantity, Provenance: source, ExtractorVersion: "replicate-output-v1"}
+}
+
+func usableOutput(raw json.RawMessage) bool {
+	var location string
+	if json.Unmarshal(raw, &location) == nil {
+		return validOutputLocation(location)
+	}
+	var object struct {
+		URL string `json:"url"`
+	}
+	return json.Unmarshal(raw, &object) == nil && validOutputLocation(object.URL)
+}
+
+func validOutputLocation(value string) bool {
+	if value == "" || len(value) > 8192 || strings.ContainsAny(value, "\r\n") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && ((parsed.Scheme == "https" && parsed.Host != "") || (parsed.Scheme == "data" && strings.HasPrefix(value, "data:image/")))
 }
 func mapStatus(value string) (joboperation.Status, string, bool) {
 	switch value {

@@ -25,16 +25,18 @@ func (stub authStub) Authenticate(context.Context, string) (apikey.Principal, er
 type modelsStub struct{}
 
 func (modelsStub) Candidates(_, model string, _ imageoperation.Operation, _ imageoperation.MediaType) ([]imageoperation.RoutingDecision, error) {
-	return []imageoperation.RoutingDecision{{Protocol: "replicate", Model: model, Provider: providercredentials.Replicate, ChannelID: "channel_00000000000000000000000000000004", Policy: imageoperation.Fixed}}, nil
+	return []imageoperation.RoutingDecision{{Protocol: "replicate", Model: model, Provider: providercredentials.Replicate, ChannelID: "channel_00000000000000000000000000000004", Policy: imageoperation.Fixed, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 10, RequestExtractor: "replicate-input-num_outputs-v1", ResultExtractor: "replicate-output-v1"}}}, nil
 }
 
 type jobsStub struct {
 	value            joboperation.Job
 	submits, cancels int
+	request          jobs.CreateRequest
 }
 
 func (stub *jobsStub) Submit(_ context.Context, request jobs.CreateRequest, payload any) (joboperation.Job, error) {
 	stub.submits++
+	stub.request = request
 	stub.value = joboperation.Job{ID: "job_00000000000000000000000000000000", Owner: request.Owner, Model: request.Model, Status: joboperation.Queued, Snapshot: joboperation.Snapshot{Status: 201, Body: []byte(`{"id":"job_00000000000000000000000000000000","status":"starting"}`)}}
 	return stub.value, nil
 }
@@ -58,7 +60,7 @@ func TestCreateGetCancelNativeRoutes(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != 201 || service.submits != 1 {
+	if response.Code != 201 || service.submits != 1 || service.request.EstimatedUsage == nil || service.request.EstimatedUsage.Quantity != 1 {
 		t.Fatalf("create=%d body=%s", response.Code, response.Body.String())
 	}
 	for _, item := range []struct {
@@ -75,6 +77,18 @@ func TestCreateGetCancelNativeRoutes(t *testing.T) {
 	}
 	if service.cancels != 1 {
 		t.Fatalf("cancels=%d", service.cancels)
+	}
+}
+
+func TestCreatePassesMaximumOutputUsageToJob(t *testing.T) {
+	service := &jobsStub{}
+	request := httptest.NewRequest(http.MethodPost, "/v1/predictions", strings.NewReader(`{"version":"owner/model:version","input":{"prompt":"cat","num_outputs":4}}`))
+	request.Header.Set("Authorization", "Bearer service")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	testHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || service.request.EstimatedUsage == nil || service.request.EstimatedUsage.Quantity != 4 {
+		t.Fatalf("status=%d usage=%+v body=%s", response.Code, service.request.EstimatedUsage, response.Body.String())
 	}
 }
 func TestValidationRejectsWebhookAndInvalidWait(t *testing.T) {

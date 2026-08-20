@@ -111,6 +111,34 @@ func TestFalQueueChargeCapturesDurableResult(t *testing.T) {
 	}
 }
 
+func TestCompleteWithQuantityCapturesPartialAmountAndReplaysExactly(t *testing.T) {
+	service, pool := billingFixture(t, 1000)
+	charge, err := service.Begin(context.Background(), BeginRequest{RequestID: "partial-output", OrganizationID: "org_billing", ProjectID: "project_billing", APIKeyID: "key_billing", Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", ChannelID: openAIChannel, Quantity: 3, Size: "default", Quality: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"images":[{},{}]}`)}
+	completed, err := service.CompleteWithQuantity(context.Background(), charge.ID, 2, snapshot)
+	if err != nil || completed.CapturedSale != 200 || completed.ActualCost == nil || *completed.ActualCost != 120 {
+		t.Fatalf("completed=%+v err=%v", completed, err)
+	}
+	replayed, err := service.CompleteWithQuantity(context.Background(), charge.ID, 2, snapshot)
+	if err != nil || replayed.CapturedSale != 200 {
+		t.Fatalf("replay=%+v err=%v", replayed, err)
+	}
+	if _, err := service.CompleteWithQuantity(context.Background(), charge.ID, 1, snapshot); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("conflicting quantity err=%v", err)
+	}
+	var operations int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM wallet_operations WHERE operation_key=$1`, "image-capture:"+charge.ID+":usage:2").Scan(&operations); err != nil || operations != 1 {
+		t.Fatalf("usage operation count=%d err=%v", operations, err)
+	}
+	var available, reserved int64
+	if err := pool.QueryRow(context.Background(), `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_billing'`).Scan(&available, &reserved); err != nil || available != 800 || reserved != 0 {
+		t.Fatalf("wallet=%d/%d err=%v", available, reserved, err)
+	}
+}
+
 func (estimator *sequenceEstimator) EstimateInTx(_ context.Context, _ pgx.Tx, request pricing.Request) (pricing.Estimate, error) {
 	if estimator.next >= len(estimator.estimates) {
 		return pricing.Estimate{}, pricing.ErrPriceUnavailable
