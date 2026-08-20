@@ -416,7 +416,7 @@ func validDimension(protocol, operation, model string) bool {
 	if protocol == "" && operation == "" && model == "" {
 		return true
 	}
-	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit" || operation == "chat.completions")) || ((protocol == "gemini" || protocol == "replicate" || protocol == "fal") && operation == "image.generate")) && validText(model, 200)
+	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit" || operation == "chat.completions" || operation == "responses.create")) || ((protocol == "gemini" || protocol == "replicate" || protocol == "fal") && operation == "image.generate")) && validText(model, 200)
 }
 
 func validChargeID(value string) bool { return validID(value, "charge_") || validID(value, "chc_") }

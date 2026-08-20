@@ -177,7 +177,11 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway chat model registry initialization failed")
 		return 1
 	}
-	responsesModels, err := responsesoperation.NewRegistry(cfg.OpenAIResponsesModels)
+	responsesLimits := make(map[string]responsesoperation.Limits, len(cfg.OpenAIResponsesModelLimits))
+	for model, limit := range cfg.OpenAIResponsesModelLimits {
+		responsesLimits[model] = responsesoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
+	}
+	responsesModels, err := responsesoperation.NewRegistryWithLimits(cfg.OpenAIResponsesModels, responsesLimits)
 	if err != nil {
 		logger.Error("gateway Responses model registry initialization failed")
 		return 1
@@ -193,6 +197,7 @@ func run(stdout, stderr io.Writer) int {
 	var billingService *chargebilling.Service
 	var reconciliationWorker *reconciliation.Worker
 	var chatChargeBilling openaiProtocol.ChatBilling
+	var responsesChargeBilling openaiProtocol.ResponsesBilling
 	var chatReconciliationWorker *chatreconciliation.Worker
 	if cfg.BillingMode == config.BillingRequired {
 		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
@@ -218,6 +223,7 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		chatChargeBilling = chatService
+		responsesChargeBilling = chatService
 		chatReconciliationWorker, chatBillingErr = chatreconciliation.New(pool, chatService, fmt.Sprintf("gateway-%d", os.Getpid()), cfg.ReconcileLease, cfg.ReconcileMaxAttempts)
 		if chatBillingErr != nil {
 			logger.Error("gateway Chat reconciliation initialization failed")
@@ -249,7 +255,12 @@ func run(stdout, stderr io.Writer) int {
 		openAIChatHandler = chatHandler
 	}
 	if len(cfg.OpenAIResponsesModels) > 0 {
-		responsesHandler := openaiProtocol.NewResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes)
+		var responsesHandler *openaiProtocol.ResponsesHandler
+		if responsesChargeBilling == nil {
+			responsesHandler = openaiProtocol.NewResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes)
+		} else {
+			responsesHandler = openaiProtocol.NewBillableResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes, responsesChargeBilling)
+		}
 		responsesHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIResponsesHandler = responsesHandler
 	}

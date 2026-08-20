@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-040
 title: Phase 4 OpenAI Responses Token Usage Billing and Settlement
-status: proposed
+status: accepted
 created_at: 2026-08-21T08:00:00+09:00
-updated_at: 2026-08-21T08:00:00+09:00
+updated_at: 2026-08-21T12:10:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-token-settlement
@@ -166,20 +166,27 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponses
 
 ## 완료 조건
 
-- [ ] Responses 전용 immutable token price와 model limit이 관리됨
-- [ ] Provider dispatch 전에 Wallet/quota/spend cap이 원자적으로 예약됨
-- [ ] valid native usage가 exact integer amount로 Capture되고 차액이 반환됨
-- [ ] non-2xx만 Release되며 timeout/missing usage는 reservation을 유지함
-- [ ] reconciliation이 recoverable settlement를 exactly-once 완료하고 unknown outcome을 manual review로 보냄
-- [ ] idempotency replay가 Provider와 Ledger 중복을 방지함
-- [ ] minimum margin, tenant/model authorization과 Provider availability가 dispatch 전에 적용됨
-- [ ] 내부 과금 identity, prompt/tool/output/credential이 응답·로그·telemetry에 노출되지 않음
-- [ ] 공식 SDK와 전체 unit/race/integration/장애 회귀가 통과함
-- [ ] README와 Dashboard/Cloud/Conformance handoff가 갱신됨
+- [x] Responses 전용 immutable token price와 model limit이 관리됨
+- [x] Provider dispatch 전에 Wallet/quota/spend cap이 원자적으로 예약됨
+- [x] valid native usage가 exact integer amount로 Capture되고 차액이 반환됨
+- [x] non-2xx만 Release되며 timeout/missing usage는 reservation을 유지함
+- [x] reconciliation이 recoverable settlement를 exactly-once 완료하고 unknown outcome을 manual review로 보냄
+- [x] idempotency replay가 Provider와 Ledger 중복을 방지함
+- [x] minimum margin, tenant/model authorization과 Provider availability가 dispatch 전에 적용됨
+- [x] 내부 과금 identity, prompt/tool/output/credential이 응답·로그·telemetry에 노출되지 않음
+- [x] 공식 SDK와 전체 unit/race/integration/장애 회귀가 통과함
+- [x] README와 Dashboard/Cloud/Conformance handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check`
+  - gofmt, vet, 전체 race unit test와 모든 Gateway binary build 통과
+- fresh PostgreSQL `gateway_plan040b`에서 `-p=1 -tags=integration`
+  - migration repeatability, operation별 token price, Wallet/Ledger, quota, spend cap, Responses settlement/reconciliation과 OpenAI protocol 통과
+- `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponsesSDKs -count=1`
+  - OpenAI Python 및 JavaScript Responses SDK 통과
+- 전체 병렬 `make integration-test`에서는 기존 migration 031의 schema-isolation race가 일부 패키지에서 재현됐으나, Plan 040 대상 패키지는 통과했고 새 전용 DB 순차 검증으로 migration 및 기능 결과를 확정했다.
+- Dashboard, Cloud와 Conformance에는 Responses managed billing 설정·가격 operation·usage evidence 계약을 이 문서의 `affected_repos` handoff로 남겼다.
 
 ## Rollback 계획
 
