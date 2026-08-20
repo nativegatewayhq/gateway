@@ -55,6 +55,9 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_DATABASE_URL` | required | PostgreSQL connection URL; treated as a secret and never logged |
 | `GATEWAY_GOOGLE_API_KEY` | unset | Optional Google upstream credential |
 | `GATEWAY_OPENAI_API_KEY` | unset | Optional OpenAI upstream credential |
+| `GATEWAY_OPENAI_CHAT_MODELS` | unset | Comma-separated exact OpenAI Chat model IDs; a non-empty value enables `POST /v1/chat/completions` |
+| `GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT` | `2m` | Non-streaming OpenAI Chat request timeout; maximum `10m` |
+| `GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES` | `8388608` | Maximum Chat request and response body; maximum 32 MiB |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
 | `GATEWAY_REPLICATE_API_TOKEN` | unset | Optional Replicate upstream credential; enables the native Predictions route when models and a public base URL are configured |
 | `GATEWAY_REPLICATE_API_ENDPOINT` | `https://api.replicate.com` | Fixed Replicate API origin; loopback HTTP is accepted only for local testing |
@@ -81,17 +84,6 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_JOB_MANAGEMENT_MODE` | `disabled` | `required` enables tenant-scoped `GET /gateway/v1/jobs` and `GET /gateway/v1/jobs/{job_id}` when an asynchronous provider is enabled |
 | `GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS` | unset | One active, or active and previous, comma-separated base64-encoded 32-byte HMAC secrets for opaque pagination cursors |
 
-When Job management is enabled, a service API key can read only the asynchronous Jobs created by that exact organization, project, and key. Responses deliberately omit prompts, raw provider payloads, provider Job IDs, credentials, upstream costs, and internal ledger identities.
-
-```http
-GET /gateway/v1/jobs?protocol=fal&status=SUCCEEDED&settlement_state=SETTLED&limit=25
-Authorization: Bearer SERVICE_API_KEY
-
-GET /gateway/v1/jobs/job_...
-Authorization: Bearer SERVICE_API_KEY
-```
-
-Lists use signed opaque keyset cursors. Keep the active cursor secret first and the previous secret second during rotation; remove the previous secret only after the maximum client pagination window has elapsed.
 | `GATEWAY_PUBLIC_BASE_URL` | unset | Public HTTPS Gateway origin used for durable Prediction get/cancel URLs; loopback HTTP is accepted for local testing |
 | `GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID` | unset | Current envelope-encryption write key ID; enables the database credential control plane with the keyring settings below |
 | `GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS` | unset | Ordered comma-separated key IDs; index corresponds to `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` |
@@ -154,6 +146,37 @@ Lists use signed opaque keyset cursors. Keep the active cursor secret first and 
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
+## OpenAI Chat Completions
+
+Set `GATEWAY_OPENAI_CHAT_MODELS` to enable the exact non-streaming models accepted by the native route. This foundation is BYOK-only: it does not mutate Wallet or Ledger state, retry, or fall back. `stream: true` is rejected until streaming and token settlement are implemented.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="SERVICE_API_KEY", base_url="https://gateway.example/v1")
+response = client.chat.completions.create(
+    model="gpt-4.1",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(response.choices[0].message.content)
+```
+
+API Keys using an explicit model allowlist require `openai:chat.completions:<model>`. Requests preserve unknown native JSON fields, but compressed bodies and responses above the configured bound are rejected. The Gateway never logs messages, prompts, tool arguments, authorization headers, or Provider credentials.
+
+## Asynchronous Job management
+
+When Job management is enabled, a service API key can read only the asynchronous Jobs created by that exact organization, project, and key. Responses deliberately omit prompts, raw provider payloads, provider Job IDs, credentials, upstream costs, and internal ledger identities.
+
+```http
+GET /gateway/v1/jobs?protocol=fal&status=SUCCEEDED&settlement_state=SETTLED&limit=25
+Authorization: Bearer SERVICE_API_KEY
+
+GET /gateway/v1/jobs/job_...
+Authorization: Bearer SERVICE_API_KEY
+```
+
+Lists use signed opaque keyset cursors. Keep the active cursor secret first and the previous secret second during rotation; remove the previous secret only after the maximum client pagination window has elapsed.
+
 ## OpenTelemetry observability
 
 Telemetry is disabled by default. Both enabled modes export OTLP HTTP/protobuf traces and metrics; `required` additionally treats exporter construction failure as a startup error. Collector connection, timeout, 401, 429, or 5xx failures after startup are isolated from native responses, Wallet/Ledger settlement, managed assets, readiness, and reconciliation leases. Graceful shutdown flushes metrics and traces only within `GATEWAY_TELEMETRY_SHUTDOWN_TIMEOUT`.
@@ -191,7 +214,7 @@ export GATEWAY_REDIS_URL='redis://127.0.0.1:56379/0'
 
 The token bucket is keyed only by the non-secret API Key ID and is shared across Gateway instances. Authentication failures do not consume a token. Authenticated generation, edit, Gemini, model-list and idempotent replay requests each consume one token before body parsing, price lookup, Wallet reservation or Provider dispatch. Rejected requests return native `429` errors plus `Retry-After` and `X-RateLimit-*` headers and never trigger routing fallback. Redis timeout or failure in required mode returns native `503`; `/health/live` stays live while `/health/ready` reports unavailable.
 
-`--allow-model` is optional and repeatable. Omitting it preserves backward-compatible access to all registered models; production Keys should use an explicit least-privilege allowlist. Supplying it changes the Key to an exact logical allowlist using `protocol:operation:model`; supported image operations are `openai:image.generate`, `openai:image.edit`, and `gemini:image.generate`. Wildcards and Provider-native model names are not expanded. A denied request consumes its rate-limit token but returns native `403` before routing, idempotency replay, pricing, Wallet reservation or Provider dispatch. `/v1/models` returns only the intersection of the Key permissions, model capabilities and configured Provider credentials. Removing a permission also prevents that Key from replaying a previously stored response for the removed model.
+`--allow-model` is optional and repeatable. Omitting it preserves backward-compatible access to all registered models; production Keys should use an explicit least-privilege allowlist. Supplying it changes the Key to an exact logical allowlist using `protocol:operation:model`; supported operations include `openai:image.generate`, `openai:image.edit`, `openai:chat.completions`, and `gemini:image.generate`. Wildcards and Provider-native model names are not expanded. A denied request consumes its rate-limit token but returns native `403` before Provider dispatch. `/v1/models` returns only the intersection of the Key permissions, model capabilities and configured Provider credentials.
 
 ## API Key network restrictions
 

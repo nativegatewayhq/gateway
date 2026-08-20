@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-036
 title: Phase 4 OpenAI Chat Completions Non-streaming Foundation
-status: accepted
+status: completed
 created_at: 2026-08-21T01:11:41+09:00
-updated_at: 2026-08-21T01:11:41+09:00
+updated_at: 2026-08-21T02:31:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-chat-completions-foundation
@@ -163,20 +163,25 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] 공식 OpenAI Python/JavaScript SDK의 비스트리밍 Chat Completions가 Base URL/Key 변경만으로 동작함
-- [ ] `stream:true`와 미지원 route가 Provider 호출 전에 명시적으로 거부됨
-- [ ] Chat model capability와 API Key exact model authorization이 image operation과 분리됨
-- [ ] native request/response와 unknown JSON field가 불필요하게 변환되지 않음
-- [ ] service/provider credential, prompt와 tool arguments가 응답·로그·telemetry에 노출되지 않음
-- [ ] timeout/cancellation/oversized body와 upstream 오류가 bounded하게 처리됨
-- [ ] `/v1/models`가 기존 image 계약을 깨지 않고 Chat model을 합성함
-- [ ] Wallet/Ledger mutation과 unsafe retry/fallback이 발생하지 않음
-- [ ] 전체 unit/race/integration test와 기존 protocol 회귀 검사가 통과함
-- [ ] README와 Conformance handoff가 갱신되고 검증 증거가 기록됨
+- [x] 공식 OpenAI Python/JavaScript SDK의 비스트리밍 Chat Completions가 Base URL/Key 변경만으로 동작함
+- [x] `stream:true`와 미지원 route가 Provider 호출 전에 명시적으로 거부됨
+- [x] Chat model capability와 API Key exact model authorization이 image operation과 분리됨
+- [x] native request/response와 unknown JSON field가 불필요하게 변환되지 않음
+- [x] service/provider credential, prompt와 tool arguments가 응답·로그·telemetry에 노출되지 않음
+- [x] timeout/cancellation/oversized body와 upstream 오류가 bounded하게 처리됨
+- [x] `/v1/models`가 기존 image 계약을 깨지 않고 Chat model을 합성함
+- [x] Wallet/Ledger mutation과 unsafe retry/fallback이 발생하지 않음
+- [x] 전체 unit/race/integration test와 기존 protocol 회귀 검사가 통과함
+- [x] README와 Conformance handoff가 갱신되고 검증 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 2026-08-21: `GOCACHE=/private/tmp/nativegateway-go-cache-036 make check` 통과 (`gofmt`, `go vet`, 전체 race test, 5개 binary build).
+- 2026-08-21: PostgreSQL에서 `go test -race -count=1 -tags=integration ./protocols/openai ./providers/openai ./internal/apikey ./internal/config` 통과. service key 인증, Provider credential 교체와 native body 보존을 검증했다.
+- 2026-08-21: 공식 OpenAI Python/JavaScript SDK를 사용한 `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAISDKsUseOnlyBaseURLAndKey` 통과. Base URL과 Key만 변경한 비스트리밍 호출을 검증했다.
+- 전체 `make integration-test`의 Chat 및 기존 대부분 패키지는 통과했으나 로컬 Docker PostgreSQL 시각이 호스트보다 앞서 기존 reconciliation/fal/gemini 즉시-claim 테스트가 간헐 실패했다. 최종 GitHub CI의 동기화된 service clock 결과를 release gate로 사용한다.
+- 2026-08-21: PR #40 GitHub Actions `check` 전체 통과: https://github.com/nativegatewayhq/gateway/actions/runs/32392463188
+- 2026-08-21: PR #40 plan-policy `validate` 통과: https://github.com/nativegatewayhq/gateway/actions/runs/32392463190
 
 ## Rollback 계획
 

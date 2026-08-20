@@ -11,6 +11,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 )
 
@@ -116,6 +117,23 @@ func TestModelsHandlerRequiresAuthenticationAndGET(t *testing.T) {
 	}
 	if response := modelsRequest(handler, http.MethodPost, true); response.Code != 405 || response.Header().Get("Allow") != "GET" || authCalls != 0 {
 		t.Fatalf("method = %d/%s/%d", response.Code, response.Header().Get("Allow"), authCalls)
+	}
+}
+
+func TestModelsHandlerMergesAuthorizedChatModels(t *testing.T) {
+	chat, err := chatoperation.NewRegistry([]string{"gpt-4.1", "gpt-image-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: "chat.completions", Model: "gpt-4.1"}, {Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1"}}}
+	handler := NewModelsHandlerWithChat(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), testRegistry(t), chat, availability{providercredentials.OpenAI})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 2 || list.Data[0].ID != "gpt-4.1" || list.Data[1].ID != "gpt-image-1" {
+		t.Fatalf("list=%+v", list)
 	}
 }
 

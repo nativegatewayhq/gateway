@@ -28,6 +28,7 @@ const (
 	defaultImagesTimeout       = 2 * time.Minute
 	maxImagesTimeout           = 10 * time.Minute
 	defaultImagesBodyBytes     = int64(1024 * 1024)
+	defaultChatBodyBytes       = int64(8 * 1024 * 1024)
 	defaultImageEditsBodyBytes = int64(64 * 1024 * 1024)
 	defaultReplayBodyBytes     = int64(32 * 1024 * 1024)
 	defaultReconcileInterval   = 5 * time.Second
@@ -83,6 +84,9 @@ type Config struct {
 	GeminiBodyBytes                int64
 	ImagesTimeout                  time.Duration
 	ImagesBodyBytes                int64
+	ChatTimeout                    time.Duration
+	ChatBodyBytes                  int64
+	OpenAIChatModels               []string
 	ImageEditsBodyBytes            int64
 	ImageEditSpoolLimit            int
 	BillingMode                    BillingMode
@@ -140,6 +144,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		GeminiBodyBytes:            defaultGeminiBodyBytes,
 		ImagesTimeout:              defaultImagesTimeout,
 		ImagesBodyBytes:            defaultImagesBodyBytes,
+		ChatTimeout:                defaultImagesTimeout,
+		ChatBodyBytes:              defaultChatBodyBytes,
 		ImageEditsBodyBytes:        defaultImageEditsBodyBytes,
 		ImageEditSpoolLimit:        8,
 		BillingMode:                BillingDisabled,
@@ -221,6 +227,36 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES: must be an integer between 1 and 1048576")
 		}
 		cfg.ImagesBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > maxImagesTimeout {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.ChatTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES"); ok {
+		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || bodyBytes <= 0 || bodyBytes > 32*1024*1024 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES: must be an integer between 1 and 33554432")
+		}
+		cfg.ChatBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_CHAT_MODELS"); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || seen[model] {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODELS: must contain unique non-empty model IDs")
+			}
+			for _, character := range model {
+				if character <= 0x20 || character == 0x7f {
+					return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODELS: contains an invalid model ID")
+				}
+			}
+			seen[model] = true
+			cfg.OpenAIChatModels = append(cfg.OpenAIChatModels, model)
+		}
 	}
 	if value, ok := lookup("GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES"); ok {
 		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
@@ -363,6 +399,9 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 	if cfg.JobManagementMode == JobManagementRequired && !cfg.ReplicateEnabled && !cfg.FalEnabled {
 		return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_MODE: requires an asynchronous provider")
+	}
+	if cfg.BillingMode == BillingRequired && len(cfg.OpenAIChatModels) > 0 {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODELS: paid Chat requires the token settlement plan")
 	}
 
 	return cfg, nil

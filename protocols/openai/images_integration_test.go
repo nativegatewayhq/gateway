@@ -17,6 +17,8 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 	"github.com/nativegatewayhq/gateway/providers/xai"
@@ -26,6 +28,61 @@ type integrationRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function integrationRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+func TestPostgresServiceKeyAuthenticatesOpenAIChatRoute(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	ctx := context.Background()
+	pool, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	record, raw, err := apikey.Generate(rand.Reader, "openai chat integration", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := apikey.NewPostgresStore(pool)
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Exec(ctx, `DELETE FROM service_api_keys WHERE id=$1`, record.ID)
+	credentials, err := providercredentials.Load(func(key string) (string, bool) {
+		if key == "GATEWAY_OPENAI_API_KEY" {
+			return "chat-provider-secret", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestBody := `{"model":"gpt-4.1","messages":[{"role":"user","content":"hello"}],"unknown_option":true}`
+	nativeBody := `{"id":"chatcmpl_1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	calls := 0
+	client := &http.Client{Transport: integrationRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		body, _ := io.ReadAll(request.Body)
+		if request.URL.Path != "/v1/chat/completions" || request.Header.Get("Authorization") != "Bearer chat-provider-secret" || string(body) != requestBody || strings.Contains(string(body), raw) {
+			t.Fatalf("unsafe upstream request path=%s body=%q", request.URL.Path, body)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(nativeBody))}, nil
+	})}
+	models, _ := chatoperation.NewRegistry([]string{"gpt-4.1"})
+	handler := NewChatHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), models, openaiProvider.NewChatWithClient(credentials, time.Second, client), credentials, providerhealth.NoopGate{}, 4096)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(requestBody))
+	request.Header.Set("Authorization", "Bearer "+raw)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || response.Body.String() != nativeBody || calls != 1 {
+		t.Fatalf("response=%d %q calls=%d", response.Code, response.Body.String(), calls)
+	}
 }
 
 func TestPostgresServiceKeyAuthenticatesOpenAIImagesRoute(t *testing.T) {

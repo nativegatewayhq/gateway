@@ -21,6 +21,7 @@ type Routes struct {
 	OpenAIImages     http.Handler
 	OpenAIImageEdits http.Handler
 	OpenAIModels     http.Handler
+	OpenAIChat       http.Handler
 	Replicate        http.Handler
 	ReplicateWebhook http.Handler
 	Fal              http.Handler
@@ -53,6 +54,12 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	if len(routeSets) > 0 && routeSets[0].OpenAIModels != nil {
 		mux.Handle("/v1/models", routeSets[0].OpenAIModels)
 	}
+	if len(routeSets) > 0 && routeSets[0].OpenAIChat != nil {
+		mux.Handle("/v1/chat/completions", routeSets[0].OpenAIChat)
+	}
+	mux.HandleFunc("/v1/chat/", func(writer http.ResponseWriter, request *http.Request) {
+		writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
+	})
 	if len(routeSets) > 0 && routeSets[0].Replicate != nil {
 		mux.Handle("/v1/predictions", routeSets[0].Replicate)
 		mux.Handle("/v1/predictions/", routeSets[0].Replicate)

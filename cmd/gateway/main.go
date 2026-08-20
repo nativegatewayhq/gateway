@@ -28,6 +28,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
@@ -162,6 +163,17 @@ func run(stdout, stderr io.Writer) int {
 		return 1
 	}
 	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
+	chatModels, err := chatoperation.NewRegistry(cfg.OpenAIChatModels)
+	if err != nil {
+		logger.Error("gateway chat model registry initialization failed")
+		return 1
+	}
+	var openAIChatHandler http.Handler
+	if len(cfg.OpenAIChatModels) > 0 {
+		chatHandler := openaiProtocol.NewChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes)
+		chatHandler.SetTelemetry(telemetryRuntime.Recorder)
+		openAIChatHandler = chatHandler
+	}
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
@@ -221,7 +233,7 @@ func run(stdout, stderr io.Writer) int {
 	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
-	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
+	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithChat(logger, apiKeyAuthenticator, imageModels, chatModels, providerCredentialRegistry)
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
@@ -361,6 +373,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIImages:        openAIImagesHandler,
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
+		OpenAIChat:          openAIChatHandler,
 		Replicate:           replicateHandler,
 		ReplicateWebhook:    replicateWebhookHandler,
 		Fal:                 falHandler,
