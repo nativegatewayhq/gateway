@@ -184,7 +184,7 @@ go test -tags=sdkconformance ./protocols/gemini -run TestOfficialGeminiLLMGenera
 
 ## 검증 증거
 
-- 구현 commit `47ed251`
+- 구현 commit `47ed251`, PR [#52](https://github.com/nativegatewayhq/gateway/pull/52), squash merge `777db00`
 - `GOCACHE=/private/tmp/nativegateway-go-cache make check`: gofmt, vet, 전체 race unit test와 모든 Gateway binary build 통과
 - 전용 PostgreSQL `gateway_plan042`과 Redis에서 `make integration-test`: migration 000036, API key 권한, Gemini image와 전체 Gateway integration 통과
 - `go test -tags=sdkconformance ./protocols/gemini -run TestOfficialGeminiLLMGenerateContentSDKs -count=1`: `google-genai` Python 2.19.0과 `@google/genai` JavaScript 공식 SDK 통과
