@@ -22,6 +22,7 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 	flags.SetOutput(stderr)
 	name := flags.String("name", "", "non-secret key name")
 	expires := flags.String("expires-at", "", "optional RFC3339 expiration")
+	projectID := flags.String("project-id", "project_legacy", "owning active project ID")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -39,7 +40,7 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 		}
 		expiresAt = &parsed
 	}
-	record, raw, err := apikey.Generate(entropy, *name, expiresAt)
+	record, raw, err := apikey.GenerateForProject(entropy, *name, *projectID, expiresAt)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2

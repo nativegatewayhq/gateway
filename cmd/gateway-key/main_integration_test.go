@@ -42,7 +42,7 @@ func TestRunStoresOnlyDigestAndPrintsKeyOnce(t *testing.T) {
 	defer pool.Close()
 	defer pool.Exec(ctx, `DELETE FROM service_api_keys WHERE key_digest=$1`, digest[:])
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM service_api_keys WHERE key_digest=$1 AND name='cli integration'`, digest[:]).Scan(&count); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM service_api_keys WHERE key_digest=$1 AND name='cli integration' AND project_id='project_legacy'`, digest[:]).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
