@@ -17,6 +17,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/observability"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/reconciliation"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
@@ -65,6 +66,7 @@ func run(stdout, stderr io.Writer) int {
 		providercredentials.XAI:    xAIExecutor,
 	}
 	var chargeBilling openaiProtocol.Billing
+	var reconciliationWorker *reconciliation.Worker
 	if cfg.BillingMode == config.BillingRequired {
 		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
 		if pricingErr != nil {
@@ -77,6 +79,15 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		chargeBilling = billingService
+		reconciliationWorker, billingErr = reconciliation.New(pool, billingService, reconciliation.Config{
+			Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease,
+			BaseBackoff: cfg.ReconcileBackoff, MaxBackoff: cfg.ReconcileMaxBackoff,
+			BatchSize: cfg.ReconcileBatchSize, MaxAttempts: cfg.ReconcileMaxAttempts,
+		})
+		if billingErr != nil {
+			logger.Error("gateway reconciliation initialization failed")
+			return 1
+		}
 	}
 	var openAIImagesHandler *openaiProtocol.Handler
 	var openAIImageEditsHandler *openaiProtocol.EditHandler
@@ -89,14 +100,29 @@ func run(stdout, stderr io.Writer) int {
 	}
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 
-	if err := app.Run(ctx, cfg, logger, app.Dependencies{
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	if reconciliationWorker != nil {
+		go func() {
+			defer close(workerDone)
+			reconciliationWorker.Run(workerCtx, func(err error) {
+				logger.Warn("reconciliation cycle failed", "category", "worker_cycle_failed")
+			})
+		}()
+	} else {
+		close(workerDone)
+	}
+	err = app.Run(ctx, cfg, logger, app.Dependencies{
 		Ready:               pool.Ping,
 		ProviderCredentials: providerCredentialRegistry,
 		Gemini:              geminiHandler,
 		OpenAIImages:        openAIImagesHandler,
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
-	}); err != nil {
+	})
+	cancelWorker()
+	<-workerDone
+	if err != nil {
 		logger.Error("gateway stopped with error", "error", err.Error())
 		return 1
 	}

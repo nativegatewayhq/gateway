@@ -41,7 +41,7 @@ func TestMigrateIsRepeatable(t *testing.T) {
 	}
 	var exists bool
 	if err := pool.QueryRow(ctx, `SELECT NOT EXISTS (
-		SELECT required.name FROM (VALUES ('users'),('organizations'),('organization_memberships'),('projects'),('service_api_keys'),('organization_wallets'),('wallet_reservations'),('wallet_operations'),('ledger_entries'),('provider_channels'),('provider_prices'),('price_publications'),('image_request_charges')) required(name)
+		SELECT required.name FROM (VALUES ('users'),('organizations'),('organization_memberships'),('projects'),('service_api_keys'),('organization_wallets'),('wallet_reservations'),('wallet_operations'),('ledger_entries'),('provider_channels'),('provider_prices'),('price_publications'),('image_request_charges'),('image_charge_reconciliations')) required(name)
 		WHERE NOT EXISTS (SELECT 1 FROM information_schema.tables t WHERE t.table_schema='public' AND t.table_name=required.name)
 	)`).Scan(&exists); err != nil {
 		t.Fatal(err)

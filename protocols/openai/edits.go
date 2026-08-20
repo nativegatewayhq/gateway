@@ -205,7 +205,7 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 	defer func() {
 		if recover() != nil {
 			if charge != nil {
-				handler.common.reconciliationError(writer, request.Context(), charge.ID)
+				handler.common.reconciliationError(writer, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: billing.ProviderPanic})
 			} else {
 				writeError(writer, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
 			}
@@ -231,12 +231,21 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 	response, err := executor.Generate(request.Context(), openaiimages.Request{Operation: openaiimages.Edit, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
 	if err != nil {
 		if charge != nil {
-			completed, completeErr := handler.common.complete(request.Context(), charge.ID, false, handler.common.executorErrorSnapshot(err))
-			if completeErr != nil {
-				handler.common.reconciliationError(writer, request.Context(), charge.ID)
+			snapshot := handler.common.executorErrorSnapshot(err)
+			if errors.Is(err, providercredentials.ErrCredentialUnavailable) {
+				completed, completeErr := handler.common.complete(request.Context(), charge.ID, false, snapshot)
+				if completeErr == nil {
+					handler.common.writeSnapshot(writer, completed.Response, false)
+					return
+				}
+				handler.common.reconciliationError(writer, request.Context(), charge.ID, knownObservation(false, billing.SettlementFailed, snapshot))
 				return
 			}
-			handler.common.writeSnapshot(writer, completed.Response, false)
+			reason := billing.ExecutorConnection
+			if errors.Is(err, openaiimages.ErrTimeout) {
+				reason = billing.ExecutorTimeout
+			}
+			handler.common.reconciliationError(writer, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: reason})
 			return
 		}
 		handler.common.writeExecutorError(writer, err)
@@ -246,12 +255,12 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 	if charge != nil {
 		responseBody, readErr := readBounded(response.Body, handler.common.billing.MaximumResponseBytes())
 		if readErr != nil {
-			handler.common.reconciliationError(writer, request.Context(), charge.ID)
+			handler.common.reconciliationError(writer, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.ResponseUnavailable, handler.common.responseUnavailableSnapshot()))
 			return
 		}
 		completed, completeErr := handler.common.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody})
 		if completeErr != nil {
-			handler.common.reconciliationError(writer, request.Context(), charge.ID)
+			handler.common.reconciliationError(writer, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.SettlementFailed, billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}))
 			return
 		}
 		handler.common.writeSnapshot(writer, completed.Response, false)

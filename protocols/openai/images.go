@@ -42,7 +42,7 @@ type Executor interface {
 type Billing interface {
 	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
 	Complete(context.Context, string, bool, billing.ResponseSnapshot) (billing.Charge, error)
-	MarkReconciling(context.Context, string) error
+	MarkReconciling(context.Context, string, billing.Observation) error
 	MaximumResponseBytes() int64
 }
 
@@ -79,7 +79,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	defer func() {
 		if recover() != nil {
 			if charge != nil {
-				handler.reconciliationError(tracked, request.Context(), charge.ID)
+				handler.reconciliationError(tracked, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: billing.ProviderPanic})
 			} else if !tracked.wroteHeader {
 				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
 			}
@@ -188,12 +188,20 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if err != nil {
 		if charge != nil {
 			snapshot := handler.executorErrorSnapshot(err)
-			completed, completeErr := handler.complete(request.Context(), charge.ID, false, snapshot)
-			if completeErr != nil {
-				handler.reconciliationError(tracked, request.Context(), charge.ID)
+			if errors.Is(err, providercredentials.ErrCredentialUnavailable) {
+				completed, completeErr := handler.complete(request.Context(), charge.ID, false, snapshot)
+				if completeErr == nil {
+					handler.writeSnapshot(tracked, completed.Response, false)
+					return
+				}
+				handler.reconciliationError(tracked, request.Context(), charge.ID, knownObservation(false, billing.SettlementFailed, snapshot))
 				return
 			}
-			handler.writeSnapshot(tracked, completed.Response, false)
+			reason := billing.ExecutorConnection
+			if errors.Is(err, openaiimages.ErrTimeout) {
+				reason = billing.ExecutorTimeout
+			}
+			handler.reconciliationError(tracked, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: reason})
 			return
 		}
 		handler.writeExecutorError(tracked, err)
@@ -203,13 +211,13 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if charge != nil {
 		responseBody, readErr := readBounded(response.Body, handler.billing.MaximumResponseBytes())
 		if readErr != nil {
-			handler.reconciliationError(tracked, request.Context(), charge.ID)
+			handler.reconciliationError(tracked, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.ResponseUnavailable, handler.responseUnavailableSnapshot()))
 			return
 		}
 		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}
 		completed, completeErr := handler.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, snapshot)
 		if completeErr != nil {
-			handler.reconciliationError(tracked, request.Context(), charge.ID)
+			handler.reconciliationError(tracked, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.SettlementFailed, snapshot))
 			return
 		}
 		handler.writeSnapshot(tracked, completed.Response, false)
@@ -258,11 +266,24 @@ func (handler *Handler) complete(ctx context.Context, chargeID string, success b
 	return handler.billing.Complete(settlementContext, chargeID, success, snapshot)
 }
 
-func (handler *Handler) reconciliationError(writer http.ResponseWriter, ctx context.Context, chargeID string) {
+func (handler *Handler) reconciliationError(writer http.ResponseWriter, ctx context.Context, chargeID string, observation billing.Observation) {
 	markContext, markCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer markCancel()
-	_ = handler.billing.MarkReconciling(markContext, chargeID)
+	_ = handler.billing.MarkReconciling(markContext, chargeID, observation)
 	writeError(writer, http.StatusServiceUnavailable, "server_error", "billing_reconciliation_required", "billing settlement is pending")
+}
+
+func knownObservation(success bool, reason billing.Reason, snapshot billing.ResponseSnapshot) billing.Observation {
+	outcome := billing.KnownFailure
+	if success {
+		outcome = billing.KnownSuccess
+	}
+	return billing.Observation{Outcome: outcome, Reason: reason, Snapshot: snapshot}
+}
+
+func (handler *Handler) responseUnavailableSnapshot() billing.ResponseSnapshot {
+	body, _ := json.Marshal(errorEnvelope{Error: errorBody{Message: "provider response unavailable", Type: "server_error", Code: "provider_response_unavailable"}})
+	return billing.ResponseSnapshot{Status: http.StatusBadGateway, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
 }
 
 func (handler *Handler) writeBillingError(writer http.ResponseWriter, err error) {

@@ -64,6 +64,12 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_BILLING_MODE` | `disabled` | `disabled` preserves BYOK pass-through; `required` enforces price and Wallet settlement |
 | `GATEWAY_MINIMUM_MARGIN_BPS` | `0` | Minimum sale margin from 0 to 10000 basis points |
 | `GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES` | `33554432` | Maximum native response snapshot size; maximum 256 MiB |
+| `GATEWAY_RECONCILIATION_INTERVAL` | `5s` | Billing-required worker polling interval; maximum 1 minute |
+| `GATEWAY_RECONCILIATION_LEASE` | `30s` | Durable task lease; maximum 10 minutes |
+| `GATEWAY_RECONCILIATION_BASE_BACKOFF` | `5s` | Initial retry backoff; maximum 1 hour |
+| `GATEWAY_RECONCILIATION_MAX_BACKOFF` | `1h` | Retry backoff ceiling; maximum 24 hours |
+| `GATEWAY_RECONCILIATION_BATCH_SIZE` | `10` | Tasks claimed per cycle; range 1–100 |
+| `GATEWAY_RECONCILIATION_MAX_ATTEMPTS` | `5` | Attempts before manual review; range 1–100 |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
@@ -205,6 +211,17 @@ There is no public price-management endpoint, and clients cannot supply trusted 
 When `GATEWAY_BILLING_MODE=required`, OpenAI/xAI image generation and editing resolve the exact active price, reserve project-owned organization credits, and call the Provider only after the reservation commits. Provider 2xx responses are returned only after Capture; native non-2xx responses and executor failures release the reservation first. An uncertain settlement fails closed with `billing_reconciliation_required`. Managed Cloud deployments must use `required`; the default `disabled` mode exists for self-hosted BYOK compatibility.
 
 Billable image requests may include a visible-ASCII `Idempotency-Key` of up to 200 bytes. Repeating the same exact request under the same organization returns the stored native response with `Idempotency-Replayed: true` without calling the Provider or changing the Wallet. Reusing a key with different wire bytes returns `idempotency_conflict`. Response snapshots retain only `Content-Type` and `Retry-After`; credentials, cookies, prompts, and request bodies are not stored.
+
+In billing-required mode, response loss and settlement uncertainty create durable reconciliation tasks. Known Provider success is captured and known failure is released by a leased PostgreSQL worker. Timeout, connection loss, and panic remain reserved because the Provider outcome is unknown; after bounded retries they move to `MANUAL_REVIEW` and are never automatically refunded. Operators can inspect the backlog without changing readiness:
+
+```sql
+SELECT state, outcome, reason, count(*)
+FROM image_charge_reconciliations
+WHERE state <> 'RESOLVED'
+GROUP BY state, outcome, reason;
+```
+
+Reconciliation rows and Ledger entries are append-only. Operators must not resolve them with direct SQL; manual resolution belongs to the Cloud control-plane follow-up.
 
 ## Verify
 

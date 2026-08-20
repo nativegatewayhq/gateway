@@ -46,6 +46,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ReplayBodyBytes != 32*1024*1024 {
 		t.Errorf("ReplayBodyBytes = %d", cfg.ReplayBodyBytes)
 	}
+	if cfg.ReconcileInterval != 5*time.Second || cfg.ReconcileLease != 30*time.Second || cfg.ReconcileBackoff != 5*time.Second || cfg.ReconcileMaxBackoff != time.Hour || cfg.ReconcileBatchSize != 10 || cfg.ReconcileMaxAttempts != 5 {
+		t.Errorf("reconciliation config = %+v", cfg)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -65,6 +68,12 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_BILLING_MODE":                         "required",
 		"GATEWAY_MINIMUM_MARGIN_BPS":                   "1250",
 		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":       "16777216",
+		"GATEWAY_RECONCILIATION_INTERVAL":              "2s",
+		"GATEWAY_RECONCILIATION_LEASE":                 "20s",
+		"GATEWAY_RECONCILIATION_BASE_BACKOFF":          "3s",
+		"GATEWAY_RECONCILIATION_MAX_BACKOFF":           "30m",
+		"GATEWAY_RECONCILIATION_BATCH_SIZE":            "20",
+		"GATEWAY_RECONCILIATION_MAX_ATTEMPTS":          "7",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -96,6 +105,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ReplayBodyBytes != 16777216 {
 		t.Errorf("ReplayBodyBytes = %d", cfg.ReplayBodyBytes)
+	}
+	if cfg.ReconcileInterval != 2*time.Second || cfg.ReconcileLease != 20*time.Second || cfg.ReconcileBackoff != 3*time.Second || cfg.ReconcileMaxBackoff != 30*time.Minute || cfg.ReconcileBatchSize != 20 || cfg.ReconcileMaxAttempts != 7 {
+		t.Errorf("reconciliation overrides = %+v", cfg)
 	}
 }
 
@@ -131,6 +143,9 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "excessive margin", key: "GATEWAY_MINIMUM_MARGIN_BPS", value: "10001", marker: ""},
 		{name: "invalid replay limit", key: "GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES", value: "secret-size", marker: "secret-size"},
 		{name: "excessive replay limit", key: "GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES", value: "268435457", marker: ""},
+		{name: "invalid reconciliation interval", key: "GATEWAY_RECONCILIATION_INTERVAL", value: "secret-duration", marker: "secret-duration"},
+		{name: "invalid reconciliation batch", key: "GATEWAY_RECONCILIATION_BATCH_SIZE", value: "secret-count", marker: "secret-count"},
+		{name: "invalid reconciliation attempts", key: "GATEWAY_RECONCILIATION_MAX_ATTEMPTS", value: "101", marker: ""},
 	}
 
 	for _, tt := range tests {

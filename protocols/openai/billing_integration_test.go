@@ -80,19 +80,19 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	}
 	executorFailure := billableProtocolRequest(handler, raw, "billable-executor", `{"model":"gpt-image-1","executor":true}`)
 	executorReplay := billableProtocolRequest(handler, raw, "billable-executor-retry", `{"model":"gpt-image-1","executor":true}`)
-	if executorFailure.Code != 502 || executorReplay.Body.String() != executorFailure.Body.String() || executorReplay.Header().Get("Idempotency-Replayed") != "true" || calls != 3 {
+	if executorFailure.Code != 503 || executorReplay.Code != 409 || executorReplay.Header().Get("Idempotency-Replayed") != "" || calls != 3 {
 		t.Fatalf("executor replay=%d/%d calls=%d", executorFailure.Code, executorReplay.Code, calls)
 	}
 	var available, reserved int64
 	if err := pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_protocol_billing'`).Scan(&available, &reserved); err != nil {
 		t.Fatal(err)
 	}
-	var captured, released int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state='CAPTURED'),count(*) FILTER (WHERE state='RELEASED') FROM image_request_charges WHERE organization_id='org_protocol_billing'`).Scan(&captured, &released); err != nil {
+	var captured, released, reconciling int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state='CAPTURED'),count(*) FILTER (WHERE state='RELEASED'),count(*) FILTER (WHERE state='RECONCILING') FROM image_request_charges WHERE organization_id='org_protocol_billing'`).Scan(&captured, &released, &reconciling); err != nil {
 		t.Fatal(err)
 	}
-	if available != 300 || reserved != 0 || captured != 1 || released != 2 {
-		t.Fatalf("wallet=%d/%d charges=%d/%d", available, reserved, captured, released)
+	if available != 200 || reserved != 100 || captured != 1 || released != 1 || reconciling != 1 {
+		t.Fatalf("wallet=%d/%d charges=%d/%d/%d", available, reserved, captured, released, reconciling)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE projects SET status='disabled' WHERE id='project_protocol_billing'`); err != nil {
 		t.Fatal(err)
