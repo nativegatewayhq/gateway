@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-018
 title: Phase 1 API Key Distributed Rate Limiting
-status: in_progress
+status: completed
 created_at: 2026-08-20T17:11:28+09:00
-updated_at: 2026-08-20T17:11:28+09:00
+updated_at: 2026-08-20T17:31:32+09:00
 owners:
   - gateway
 initiative: phase-1-api-key-rate-limiting
@@ -187,21 +187,28 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] 기존 Key는 migration 후 제한 없이 동일하게 동작함
-- [ ] 정책이 있는 Key는 모든 인스턴스에서 atomic RPM/burst 제한을 공유함
-- [ ] 요청당 token 소비 경계와 middleware 순서가 고정됨
-- [ ] 429 native envelope와 rate-limit headers가 protocol별로 정확함
-- [ ] 거부 요청은 body spool, Billing, Wallet, Ledger와 Provider effect가 없음
-- [ ] Redis 장애 required mode가 fail closed하고 readiness에 반영됨
-- [ ] raw API Key와 고카디널리티 식별자가 Redis/log/metric에 노출되지 않음
-- [ ] 기존 idempotency, fallback, reconciliation 불변 조건이 유지됨
-- [ ] Compose와 Cloud handoff 문서가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] 기존 Key는 migration 후 제한 없이 동일하게 동작함
+- [x] 정책이 있는 Key는 모든 인스턴스에서 atomic RPM/burst 제한을 공유함
+- [x] 요청당 token 소비 경계와 middleware 순서가 고정됨
+- [x] 429 native envelope와 rate-limit headers가 protocol별로 정확함
+- [x] 거부 요청은 body spool, Billing, Wallet, Ledger와 Provider effect가 없음
+- [x] Redis 장애 required mode가 fail closed하고 readiness에 반영됨
+- [x] raw API Key와 고카디널리티 식별자가 Redis/log/metric에 노출되지 않음
+- [x] 기존 idempotency, fallback, reconciliation 불변 조건이 유지됨
+- [x] Compose와 Cloud handoff 문서가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현: `cd00c79` (`feat: add distributed API key rate limiting`)
+- Pull Request: https://github.com/nativegatewayhq/gateway/pull/17
+- 로컬 검증: `make check` 통과
+- PostgreSQL·Redis 통합 검증: `make integration-test` 통과
+- process 검증: 저장된 Key 정책 429, Gateway 재시작 간 Redis bucket 유지, Redis 장애 시 live 200/ready 503 통과
+- Redis 검증: 다중 instance atomic burst, TTL, policy namespace 격리, malformed/future state fail-closed 통과
+- GitHub Actions: `check` 및 `validate` 통과
+- Cloud handoff: managed deployment는 Redis 8 endpoint를 secret으로 주입하고 `GATEWAY_RATE_LIMIT_MODE=required`를 설정하며 Key 생성 시 RPM/burst를 함께 provision해야 한다.
 
 ## Rollback 계획
 
