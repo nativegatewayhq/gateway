@@ -14,6 +14,9 @@ import (
 	"testing"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 )
@@ -68,6 +71,56 @@ assert chunks[-1].usage.total_tokens == 2`
 	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("JavaScript streaming SDK: %v: %s", err, output)
+	}
+}
+
+func TestOfficialOpenAISDKsUseLogicalModelThroughXAICompatibleRoute(t *testing.T) {
+	registry, err := chatoperation.NewRouteRegistry([]chatoperation.Route{{Model: "logical-chat", Owner: "gateway", Policy: chatoperation.Priority, Candidates: []chatoperation.Candidate{{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok-provider", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Capabilities: chatoperation.Capabilities{Streaming: true, Tools: true, JSONMode: true}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewRoutedChatHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, map[providercredentials.ProviderID]ChatExecutor{providercredentials.XAI: chatExecutorFunc(func(_ context.Context, request openaiProvider.ChatRequest) (*http.Response, error) {
+		body, _ := io.ReadAll(request.Body)
+		if !strings.Contains(string(body), `"model":"grok-provider"`) || !strings.Contains(string(body), `"tools"`) {
+			t.Fatalf("routed SDK request=%s", body)
+		}
+		if request.Streaming {
+			stream := "data: {\"id\":\"chatcmpl_route_stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"grok-provider\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"routed stream\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chatcmpl_route","object":"chat.completion","created":1,"model":"grok-provider","choices":[{"index":0,"message":{"role":"assistant","content":"routed ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))}, nil
+	})}, channelAvailability{"channel_00000000000000000000000000000002": true}, providerhealth.NoopGate{}, 8192)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+r=c.chat.completions.create(model="logical-chat",messages=[{"role":"user","content":"hello"}],tools=[{"type":"function","function":{"name":"lookup","description":"lookup","parameters":{"type":"object","properties":{}}}}])
+assert r.choices[0].message.content == "routed ok"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python routed SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});c.chat.completions.create({model:"logical-chat",messages:[{role:"user",content:"hello"}],tools:[{type:"function",function:{name:"lookup",description:"lookup",parameters:{type:"object",properties:{}}}}]}).then(r=>{if(r.choices[0].message.content!=="routed ok")process.exit(2)}).catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript routed SDK: %v: %s", err, output)
+	}
+	pythonStream := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+s=c.chat.completions.create(model="logical-chat",messages=[{"role":"user","content":"hello"}],tools=[{"type":"function","function":{"name":"lookup","description":"lookup","parameters":{"type":"object","properties":{}}}}],stream=True)
+assert "".join((x.choices[0].delta.content or "") for x in s if x.choices) == "routed stream"`
+	command = exec.Command("python3", "-c", pythonStream)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python routed streaming SDK: %v: %s", err, output)
+	}
+	javascriptStream := `const OpenAI=require("openai").default;(async()=>{const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});const s=await c.chat.completions.create({model:"logical-chat",messages:[{role:"user",content:"hello"}],tools:[{type:"function",function:{name:"lookup",description:"lookup",parameters:{type:"object",properties:{}}}}],stream:true});let text="";for await(const x of s){if(x.choices.length)text+=x.choices[0].delta.content||""}if(text!=="routed stream")process.exit(2)})().catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascriptStream)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript routed streaming SDK: %v: %s", err, output)
 	}
 }
 

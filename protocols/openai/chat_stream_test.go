@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/nativegatewayhq/gateway/internal/chatpricing"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
@@ -100,5 +101,27 @@ func TestBillableStreamingClientDisconnectHoldsReservation(t *testing.T) {
 	h.ServeHTTP(&disconnectWriter{}, chatRequest(`{"model":"gpt-4.1","stream":true,"stream_options":{"include_usage":true},"max_tokens":20}`))
 	if billingFake.completeCalls != 0 || billingFake.releaseCalls != 0 || billingFake.reconcileCalls != 1 {
 		t.Fatalf("billing=%+v", billingFake)
+	}
+}
+
+func TestRoutedStreamingDisconnectNeverDispatchesFallbackProvider(t *testing.T) {
+	registry := routedChatRegistry(t, chatoperation.Priority,
+		chatoperation.Candidate{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "gpt", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1, Capabilities: chatoperation.Capabilities{Streaming: true}},
+		chatoperation.Candidate{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2, Capabilities: chatoperation.Capabilities{Streaming: true}},
+	)
+	billingFake := &routedBillingFake{chatBillingFake: &chatBillingFake{}, quotes: map[string]int64{"channel_00000000000000000000000000000001": 10, "channel_00000000000000000000000000000002": 20}, beginErrors: map[string]error{}}
+	calls := map[providercredentials.ProviderID]int{}
+	executors := map[providercredentials.ProviderID]ChatExecutor{providercredentials.OpenAI: chatExecutorFunc(func(context.Context, openaiProvider.ChatRequest) (*http.Response, error) {
+		calls[providercredentials.OpenAI]++
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"choices\":[]}\n\n"))}, nil
+	}), providercredentials.XAI: chatExecutorFunc(func(context.Context, openaiProvider.ChatRequest) (*http.Response, error) {
+		calls[providercredentials.XAI]++
+		return nil, nil
+	})}
+	availability := channelAvailability{"channel_00000000000000000000000000000001": true, "channel_00000000000000000000000000000002": true}
+	handler := NewBillableRoutedChatHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), registry, executors, availability, providerhealth.NoopGate{}, 4096, billingFake)
+	handler.ServeHTTP(&disconnectWriter{}, chatRequest(`{"model":"logical-chat","stream":true,"stream_options":{"include_usage":true},"max_tokens":20}`))
+	if calls[providercredentials.OpenAI] != 1 || calls[providercredentials.XAI] != 0 || billingFake.reconcileCalls != 1 || billingFake.releaseCalls != 0 {
+		t.Fatalf("calls=%v billing=%+v", calls, billingFake)
 	}
 }

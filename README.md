@@ -58,6 +58,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_API_KEY` | unset | Optional OpenAI upstream credential |
 | `GATEWAY_OPENAI_CHAT_MODELS` | unset | Comma-separated exact OpenAI Chat model IDs; a non-empty value enables `POST /v1/chat/completions` |
 | `GATEWAY_OPENAI_CHAT_MODEL_LIMITS` | unset | Required in billing mode: comma-separated `model:maximum_input_tokens:maximum_output_tokens` entries |
+| `GATEWAY_OPENAI_CHAT_ROUTES_JSON` | unset | Versioned static logical-model route array; replaces the two legacy Chat model settings and supports OpenAI/xAI fixed, priority, weighted, and lowest-cost candidates |
 | `GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT` | `2m` | Non-streaming OpenAI Chat request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_STREAM_IDLE_TIMEOUT` | `30s` | Maximum idle interval between upstream streaming reads; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES` | `8388608` | Maximum Chat request and response body; maximum 32 MiB |
@@ -207,7 +208,47 @@ Both BYOK and managed modes support native `stream: true` SSE. Managed requests 
 
 Streaming settlement captures validated terminal usage exactly once. A client disconnect, upstream reset or idle timeout, missing `[DONE]`, malformed/duplicate/missing usage, and downstream write failure retain the reservation for durable reconciliation; the Gateway never repeats the Provider request. Completed streaming idempotency keys are deliberately non-replayable because transcripts are not stored: reuse returns a conflict without another Provider call or Ledger mutation.
 
-Provider fallback and exact tokenizer-based preflight counting remain outside this phase.
+For protocol-preserving multi-provider routing, set `GATEWAY_OPENAI_CHAT_ROUTES_JSON` instead of `GATEWAY_OPENAI_CHAT_MODELS`. Each logical model declares exact OpenAI/xAI candidates, provider models, channels, capabilities, and one of `fixed`, `priority`, `weighted`, or `lowest_cost`. Example:
+
+```json
+[
+  {
+    "model": "logical-chat",
+    "owner": "gateway",
+    "policy": "lowest_cost",
+    "maximum_input_tokens": 128000,
+    "maximum_output_tokens": 16384,
+    "candidates": [
+      {
+        "id": "candidate_openai",
+        "provider": "openai",
+        "provider_model": "gpt-4.1",
+        "channel_id": "channel_00000000000000000000000000000001",
+        "priority": 1,
+        "enabled": true,
+        "streaming": true,
+        "tools": true,
+        "json_mode": true
+      },
+      {
+        "id": "candidate_xai",
+        "provider": "xai",
+        "provider_model": "grok-4",
+        "channel_id": "channel_00000000000000000000000000000002",
+        "priority": 2,
+        "enabled": true,
+        "streaming": true,
+        "tools": true,
+        "json_mode": true
+      }
+    ]
+  }
+]
+```
+
+The Gateway rewrites only the top-level `model` string and preserves all other request bytes and native JSON/SSE response bytes. Candidate capability, credential, circuit, exact price, and spend-cap failures may select another candidate only before a Provider dispatch. Once a request may have reached a Provider—including HTTP 429/5xx, timeout, reset, or stream failure—the Gateway never calls a second Provider. Managed idempotency replay retains the originally committed route and immutable route/price evidence.
+
+Cross-protocol conversion to Gemini or Anthropic and exact tokenizer-based preflight counting remain outside this plan.
 
 ## OpenAI Responses
 

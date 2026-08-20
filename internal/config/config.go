@@ -2,8 +2,11 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -92,6 +95,7 @@ type Config struct {
 	ChatBodyBytes                  int64
 	OpenAIChatModels               []string
 	OpenAIChatModelLimits          map[string]ChatModelLimit
+	OpenAIChatRoutes               []ChatRoute
 	OpenAIResponsesModels          []string
 	OpenAIResponsesModelLimits     map[string]ChatModelLimit
 	ResponsesTimeout               time.Duration
@@ -148,6 +152,27 @@ type Config struct {
 	JobManagementCursorSecrets     [][]byte
 }
 type ChatModelLimit struct{ MaximumInputTokens, MaximumOutputTokens int64 }
+type ChatRoute struct {
+	Model               string          `json:"model"`
+	Owner               string          `json:"owner"`
+	Policy              string          `json:"policy"`
+	FixedCandidateID    string          `json:"fixed_candidate_id"`
+	MaximumInputTokens  int64           `json:"maximum_input_tokens"`
+	MaximumOutputTokens int64           `json:"maximum_output_tokens"`
+	Candidates          []ChatCandidate `json:"candidates"`
+}
+type ChatCandidate struct {
+	ID            string `json:"id"`
+	Provider      string `json:"provider"`
+	ProviderModel string `json:"provider_model"`
+	ChannelID     string `json:"channel_id"`
+	Priority      int    `json:"priority"`
+	Weight        uint32 `json:"weight"`
+	Enabled       bool   `json:"enabled"`
+	Streaming     bool   `json:"streaming"`
+	Tools         bool   `json:"tools"`
+	JSONMode      bool   `json:"json_mode"`
+}
 
 // Load reads configuration through lookup and validates every value before
 // the server starts. Errors name the setting but never echo its value.
@@ -331,6 +356,27 @@ func Load(lookup LookupEnv) (Config, error) {
 			}
 			seen[model] = true
 			cfg.OpenAIChatModels = append(cfg.OpenAIChatModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_CHAT_ROUTES_JSON"); ok {
+		decoder := json.NewDecoder(bytes.NewBufferString(value))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&cfg.OpenAIChatRoutes); err != nil || decoder.Decode(&struct{}{}) != io.EOF || len(cfg.OpenAIChatRoutes) == 0 || len(cfg.OpenAIChatRoutes) > 1000 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_ROUTES_JSON: must contain a bounded valid route array")
+		}
+		if len(cfg.OpenAIChatModels) > 0 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_ROUTES_JSON: cannot be combined with GATEWAY_OPENAI_CHAT_MODELS")
+		}
+		seen := map[string]bool{}
+		for _, route := range cfg.OpenAIChatRoutes {
+			if route.Model == "" || seen[route.Model] || len(route.Model) > 200 || len(route.Candidates) == 0 || len(route.Candidates) > 128 || route.MaximumInputTokens < 0 || route.MaximumOutputTokens < 0 || (route.MaximumInputTokens == 0) != (route.MaximumOutputTokens == 0) {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_ROUTES_JSON: contains an invalid route")
+			}
+			seen[route.Model] = true
+			cfg.OpenAIChatModels = append(cfg.OpenAIChatModels, route.Model)
+			if route.MaximumInputTokens > 0 {
+				cfg.OpenAIChatModelLimits[route.Model] = ChatModelLimit{route.MaximumInputTokens, route.MaximumOutputTokens}
+			}
 		}
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_MODELS"); ok {

@@ -1,9 +1,9 @@
 ---
 id: gateway-20260822-048
 title: Phase 4 OpenAI-protocol LLM Routing and Pre-dispatch Fallback
-status: accepted
+status: completed
 created_at: 2026-08-22T04:00:00+09:00
-updated_at: 2026-08-22T04:00:00+09:00
+updated_at: 2026-08-22T06:30:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-protocol-llm-routing-fallback
@@ -213,20 +213,29 @@ client endpoint, 인증과 성공 wire 형식은 바뀌지 않는다. logical mo
 
 ## 완료 조건
 
-- [ ] logical OpenAI Chat model이 OpenAI/xAI 호환 candidate를 정책에 따라 선택함
-- [ ] fixed, priority, weighted, lowest-cost 정책과 tie-break가 자동 테스트로 고정됨
-- [ ] capability, health, credential, spend cap과 price 실패가 reserve 전에만 fallback됨
-- [ ] dispatch 이후 오류와 disconnect에서 두 번째 Provider 호출이 없음
-- [ ] 최종 candidate에만 reserve/capture/release/reconciliation이 exactly once 적용됨
-- [ ] idempotency replay가 최초 route/price identity를 유지함
-- [ ] native JSON/SSE와 tool calling 데이터가 손실 없이 전달됨
-- [ ] route evidence와 bounded telemetry가 저장되고 secret/content가 유출되지 않음
-- [ ] 공식 OpenAI Python/JavaScript SDK 및 전체 회귀 테스트가 통과함
-- [ ] README, migration, multi-repo handoff와 검증 증거가 갱신됨
+- [x] logical OpenAI Chat model이 OpenAI/xAI 호환 candidate를 정책에 따라 선택함
+- [x] fixed, priority, weighted, lowest-cost 정책과 tie-break가 자동 테스트로 고정됨
+- [x] capability, health, credential, spend cap과 price 실패가 reserve 전에만 fallback됨
+- [x] dispatch 이후 오류와 disconnect에서 두 번째 Provider 호출이 없음
+- [x] 최종 candidate에만 reserve/capture/release/reconciliation이 exactly once 적용됨
+- [x] idempotency replay가 최초 route/price identity를 유지함
+- [x] native JSON/SSE와 tool calling 데이터가 손실 없이 전달됨
+- [x] route evidence와 bounded telemetry가 저장되고 secret/content가 유출되지 않음
+- [x] 공식 OpenAI Python/JavaScript SDK 및 전체 회귀 테스트가 통과함
+- [x] README, migration, multi-repo handoff와 검증 증거가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과: gofmt, vet, 전체 race test와 모든 binary build
+- fresh PostgreSQL `gateway_plan048`, Redis DB 12에서 `GOFLAGS=-p=1 make integration-test` 전체 통과
+- `go test -tags=sdkconformance ./protocols/openai ./protocols/gemini ./protocols/anthropic -count=1` 통과
+- OpenAI Python/JavaScript SDK의 logical model non-streaming 및 streaming 요청이 xAI-compatible candidate로 전달됨
+- fixed/priority/weighted 재표본화/lowest-cost tie-break, capability·credential·health·price·spend-cap fallback fixture 통과
+- Provider 500 및 streaming client disconnect 이후 두 번째 executor 미호출 fixture 통과
+- migration `000042` fresh 적용, immutable route evidence와 original-route idempotency replay 통과
+- 12개 동시 동일 idempotency 요청에서 하나의 charge와 Wallet reservation만 생성됨
+- spend-cap으로 첫 candidate transaction이 rollback된 뒤 최종 candidate 하나만 영속 예약됨
+- 구현 PR: [#64](https://github.com/nativegatewayhq/gateway/pull/64); GitHub `check`와 `validate` 결과는 merge gate로 확인한다.
 
 ## Rollback 계획
 
