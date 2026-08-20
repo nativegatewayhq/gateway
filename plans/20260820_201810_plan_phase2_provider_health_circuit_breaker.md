@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-026
 title: Phase 2 Provider Health Score and Circuit Breaker
-status: in_progress
+status: completed
 created_at: 2026-08-20T20:18:10+09:00
-updated_at: 2026-08-20T20:18:10+09:00
+updated_at: 2026-08-20T20:51:00+09:00
 owners:
   - gateway
 initiative: phase-2-provider-health
@@ -206,27 +206,34 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] 실제 Provider dispatch만 bounded health observation을 생성함
-- [ ] channel rolling score가 minimum sample/failure threshold를 정확히 적용함
-- [ ] CLOSED/OPEN/HALF_OPEN 전이가 Redis에서 원자적임
-- [ ] 다중 인스턴스에서 half-open probe가 하나만 발급됨
-- [ ] probe success reset, failure reopen과 lease expiry가 정확함
-- [ ] OPEN candidate가 모든 route policy에서 dispatch 전에 제외됨
-- [ ] probe pre-dispatch 실패가 permit을 release하고 failure로 집계되지 않음
-- [ ] global/customer 오류와 post-dispatch 실패는 다른 Provider로 fallback하지 않음
-- [ ] observation dedupe가 동일 dispatch 중복 집계를 막음
-- [ ] terminal replay가 health store를 읽거나 변경하지 않음
-- [ ] Redis required-mode 장애가 fail closed하고 readiness를 낮춤
-- [ ] OpenAI 생성·편집과 Gemini가 동일 health 계약을 사용함
-- [ ] response/Redis/log에 secret/request content/raw error/비용 정보가 노출되지 않음
-- [ ] disabled mode와 기존 fixed/priority/lowest-cost/weighted wire behavior가 회귀하지 않음
-- [ ] README와 Cloud/Conformance handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] 실제 Provider dispatch만 bounded health observation을 생성함
+- [x] channel rolling score가 minimum sample/failure threshold를 정확히 적용함
+- [x] CLOSED/OPEN/HALF_OPEN 전이가 Redis에서 원자적임
+- [x] 다중 인스턴스에서 half-open probe가 하나만 발급됨
+- [x] probe success reset, failure reopen과 lease expiry가 정확함
+- [x] OPEN candidate가 모든 route policy에서 dispatch 전에 제외됨
+- [x] probe pre-dispatch 실패가 permit을 release하고 failure로 집계되지 않음
+- [x] global/customer 오류와 post-dispatch 실패는 다른 Provider로 fallback하지 않음
+- [x] observation dedupe가 동일 dispatch 중복 집계를 막음
+- [x] terminal replay가 health store를 읽거나 변경하지 않음
+- [x] Redis required-mode 장애가 fail closed하고 readiness를 낮춤
+- [x] OpenAI 생성·편집과 Gemini가 동일 health 계약을 사용함
+- [x] response/Redis/log에 secret/request content/raw error/비용 정보가 노출되지 않음
+- [x] disabled mode와 기존 fixed/priority/lowest-cost/weighted wire behavior가 회귀하지 않음
+- [x] README와 Cloud/Conformance handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- PR: `https://github.com/nativegatewayhq/gateway/pull/25`
+- Redis health state machine 구현: `da9675c`
+- protocol routing, required readiness와 운영 문서 구현: `600afe5`
+- `git diff --check` 통과
+- `make check` 통과
+- `TEST_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/0' make integration-test` 통과
+- GitHub Plan policy `validate` 통과
+- GitHub CI `check` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32365350239`
 
 ## 후속 작업
 
