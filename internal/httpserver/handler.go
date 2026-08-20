@@ -22,6 +22,7 @@ type Routes struct {
 	OpenAIImageEdits http.Handler
 	OpenAIModels     http.Handler
 	Replicate        http.Handler
+	Fal              http.Handler
 }
 
 // NewHandler builds the Gateway-owned and accepted provider-native routes.
@@ -63,9 +64,13 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 		}
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
-		writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
-	})
+	if len(routeSets) > 0 && routeSets[0].Fal != nil {
+		mux.Handle("/", routeSets[0].Fal)
+	} else {
+		mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+			writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
+		})
+	}
 
 	handler := recovery(logger, mux)
 	handler = accessLog(logger, handler)

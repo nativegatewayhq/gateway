@@ -22,6 +22,7 @@ import (
 )
 
 const openAIChannel = "channel_00000000000000000000000000000001"
+const falChannel = "channel_00000000000000000000000000000005"
 
 func billingPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -88,6 +89,26 @@ func billingFixture(t *testing.T, balance int64) (*Service, *pgxpool.Pool) {
 type sequenceEstimator struct {
 	estimates []pricing.Estimate
 	next      int
+}
+
+func TestFalQueueChargeCapturesDurableResult(t *testing.T) {
+	service, pool := billingFixture(t, 1000)
+	estimator, err := pricing.NewService(pool, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := estimator.Publish(context.Background(), pricing.Price{ChannelID: falChannel, Protocol: "fal", Operation: "image.generate", Model: "fal-ai/flux/dev", Size: "default", Quality: "default", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "fal-price"); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(context.Background(), BeginRequest{RequestID: "fal-request", OrganizationID: "org_billing", ProjectID: "project_billing", APIKeyID: "key_billing", Protocol: "fal", Operation: "image.generate", Model: "fal-ai/flux/dev", ChannelID: falChannel, Quantity: 1, Size: "default", Quality: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"images":[{"url":"https://delivery.example/image.png"}]}`)}
+	captured, err := service.Complete(context.Background(), charge.ID, true, result)
+	if err != nil || captured.State != "CAPTURED" || captured.CapturedSale != 100 {
+		t.Fatalf("charge=%+v err=%v", captured, err)
+	}
 }
 
 func (estimator *sequenceEstimator) EstimateInTx(_ context.Context, _ pgx.Tx, request pricing.Request) (pricing.Estimate, error) {

@@ -178,3 +178,17 @@ func TestWeightedRegistryValidatesAndPreservesWeights(t *testing.T) {
 		t.Fatalf("non-weighted weight err=%v", err)
 	}
 }
+
+func TestDefaultRegistryWithFalUsesExactModelScopedRoute(t *testing.T) {
+	registry, err := DefaultRegistryWithAsync(nil, []string{"fal-ai/flux/dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := registry.ResolveProtocol("fal", "fal-ai/flux/dev", Generate, JSON)
+	if err != nil || route.Provider != providercredentials.Fal || route.ChannelID != "channel_00000000000000000000000000000005" {
+		t.Fatalf("route=%+v err=%v", route, err)
+	}
+	if _, err := DefaultRegistryWithAsync(nil, []string{"fal-ai/../secret"}); !errors.Is(err, ErrInvalidModel) {
+		t.Fatalf("unsafe model error=%v", err)
+	}
+}

@@ -61,6 +61,11 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_REPLICATE_MODELS` | unset | Comma-separated exact community model versions in `owner/model:version` form |
 | `GATEWAY_REPLICATE_REQUEST_TIMEOUT` | `2m` | Replicate submit, poll, and cancel request timeout; maximum `10m` |
 | `GATEWAY_REPLICATE_MAX_BODY_BYTES` | `1048576` | Maximum Replicate native request or response body; maximum 256 MiB |
+| `GATEWAY_FAL_API_KEY` | unset | Optional fal upstream credential; enables native Queue routes when models and a public base URL are configured |
+| `GATEWAY_FAL_QUEUE_ENDPOINT` | `https://queue.fal.run` | Fixed fal Queue origin; loopback HTTP is accepted only for local testing |
+| `GATEWAY_FAL_MODELS` | unset | Comma-separated exact model-scoped IDs such as `fal-ai/flux/dev` |
+| `GATEWAY_FAL_REQUEST_TIMEOUT` | `2m` | fal submit, status, result, and cancel timeout; maximum `10m` |
+| `GATEWAY_FAL_MAX_BODY_BYTES` | `1048576` | Maximum fal native request or response body; maximum 256 MiB |
 | `GATEWAY_PUBLIC_BASE_URL` | unset | Public HTTPS Gateway origin used for durable Prediction get/cancel URLs; loopback HTTP is accepted for local testing |
 | `GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID` | unset | Current envelope-encryption write key ID; enables the database credential control plane with the keyring settings below |
 | `GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS` | unset | Ordered comma-separated key IDs; index corresponds to `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` |
@@ -448,6 +453,22 @@ export GATEWAY_PUBLIC_BASE_URL='https://gateway.example.com'
 The Gateway accepts `POST /v1/predictions`, `GET /v1/predictions/{id}`, and `POST /v1/predictions/{id}/cancel`. It replaces the upstream Prediction ID and control URLs with a durable Gateway Job ID, and GET reads the stored native snapshot rather than polling Replicate directly. A background worker owns upstream polling and exact-once terminal billing settlement. Client-supplied webhooks are rejected in this release.
 
 The official JavaScript client can use its `baseUrl` option, and the Replicate Python v2 client can use `base_url` (or `REPLICATE_BASE_URL`). In both cases, pass the service API key as the client credential. See [`examples/replicate`](./examples/replicate). Legacy Python v1 clients do not expose the same custom base-URL contract; use v2 or direct HTTP.
+
+## fal native Queue
+
+Enable fal with an exact model allowlist and stable public origin:
+
+```bash
+export GATEWAY_FAL_API_KEY='your-fal-provider-key'
+export GATEWAY_FAL_MODELS='fal-ai/flux/dev'
+export GATEWAY_PUBLIC_BASE_URL='https://gateway.example.com'
+```
+
+The Gateway preserves fal's model-scoped Queue routes: submit at `POST /{model}`, status at `GET /{model}/requests/{id}/status`, result at `GET /{model}/requests/{id}`, and cancellation at `PUT /{model}/requests/{id}/cancel`. Public request IDs and control URLs belong to the Gateway. Client status/result reads use durable snapshots; only the background worker polls fal, and it retrieves a completed result before scheduling Capture.
+
+Managed billing publishes each initial fal model price with `size=default` and `quality=default`; model-specific runtime or output-unit pricing is deferred. Replicate asynchronous prices use the same default dimensions.
+
+The official JavaScript client is supported through its documented `proxyUrl` middleware at `/fal/proxy`; the Gateway validates `x-fal-target-url` as an exact `https://queue.fal.run` target and uses it only to recover the native path, never as a fetch destination. The official Python client reads `FAL_QUEUE_RUN_HOST` at import time and can point directly at the Gateway HTTPS host. Both clients continue to send `Authorization: Key SERVICE_KEY`. See [`examples/fal`](./examples/fal). Webhooks, upload, streaming, and synchronous `fal.run` are intentionally outside this release.
 
 ## Verify
 

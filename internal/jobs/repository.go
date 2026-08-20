@@ -29,10 +29,10 @@ type CreateRequest struct {
 }
 
 type ProviderAttempt struct {
-	JobID, Provider, ChannelID, ProviderJobID string
-	AttemptNo, PollCount                      int
-	State, LeaseOwner, LeaseToken             string
-	LeaseUntil, NextPollAt                    time.Time
+	JobID, Model, Provider, ChannelID, ProviderJobID string
+	AttemptNo, PollCount                             int
+	State, LeaseOwner, LeaseToken                    string
+	LeaseUntil, NextPollAt                           time.Time
 }
 
 type Lease struct{ ProviderAttempt }
@@ -168,7 +168,7 @@ func (repository *Repository) BeginSubmit(ctx context.Context, owner joboperatio
 	if err := tx.Commit(ctx); err != nil {
 		return ProviderAttempt{}, err
 	}
-	return ProviderAttempt{JobID: id, AttemptNo: 1, Provider: current.Provider, ChannelID: current.ChannelID, State: "SUBMITTING", LeaseOwner: leaseOwner, LeaseToken: token, LeaseUntil: until}, nil
+	return ProviderAttempt{JobID: id, Model: current.Model, AttemptNo: 1, Provider: current.Provider, ChannelID: current.ChannelID, State: "SUBMITTING", LeaseOwner: leaseOwner, LeaseToken: token, LeaseUntil: until}, nil
 }
 
 func (repository *Repository) ConfirmSubmit(ctx context.Context, owner joboperation.Owner, attempt ProviderAttempt, providerJobID string, status joboperation.Status, nextPollAt time.Time) (joboperation.Job, error) {
@@ -236,13 +236,13 @@ func (repository *Repository) ClaimDue(ctx context.Context, owner string, at tim
 	}
 	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `WITH candidates AS (
-		SELECT attempt.job_id,attempt.attempt_no FROM async_job_provider_attempts attempt JOIN async_jobs job ON job.id=attempt.job_id
+		SELECT attempt.job_id,attempt.attempt_no,job.model FROM async_job_provider_attempts attempt JOIN async_jobs job ON job.id=attempt.job_id
 		WHERE job.status NOT IN ('SUCCEEDED','FAILED','CANCELED') AND attempt.state IN ('SUBMITTING','SUBMITTED','RECONCILING')
 		AND ((attempt.lease_until IS NULL AND attempt.next_poll_at<=$1) OR attempt.lease_until<=$1)
 		ORDER BY attempt.next_poll_at,attempt.job_id FOR UPDATE SKIP LOCKED LIMIT $2
 	) UPDATE async_job_provider_attempts attempt SET lease_owner=$3,lease_token=$4,lease_until=$5,poll_count=poll_count+1,updated_at=$1
 	FROM candidates WHERE attempt.job_id=candidates.job_id AND attempt.attempt_no=candidates.attempt_no
-	RETURNING attempt.job_id,attempt.attempt_no,attempt.provider,attempt.channel_id,attempt.provider_job_id,attempt.state,attempt.lease_owner,attempt.lease_token,attempt.lease_until,attempt.poll_count,attempt.next_poll_at`, at.UTC(), limit, owner, token, at.UTC().Add(lease))
+		RETURNING attempt.job_id,candidates.model,attempt.attempt_no,attempt.provider,attempt.channel_id,attempt.provider_job_id,attempt.state,attempt.lease_owner,attempt.lease_token,attempt.lease_until,attempt.poll_count,attempt.next_poll_at`, at.UTC(), limit, owner, token, at.UTC().Add(lease))
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ func (repository *Repository) ClaimDue(ctx context.Context, owner string, at tim
 	for rows.Next() {
 		var item Lease
 		var providerJobID *string
-		if err := rows.Scan(&item.JobID, &item.AttemptNo, &item.Provider, &item.ChannelID, &providerJobID, &item.State, &item.LeaseOwner, &item.LeaseToken, &item.LeaseUntil, &item.PollCount, &item.NextPollAt); err != nil {
+		if err := rows.Scan(&item.JobID, &item.Model, &item.AttemptNo, &item.Provider, &item.ChannelID, &providerJobID, &item.State, &item.LeaseOwner, &item.LeaseToken, &item.LeaseUntil, &item.PollCount, &item.NextPollAt); err != nil {
 			return nil, err
 		}
 		if providerJobID != nil {
@@ -389,6 +389,7 @@ func (repository *Repository) ClaimCancel(ctx context.Context, owner joboperatio
 		return current, Lease{}, false, tx.Commit(ctx)
 	}
 	var attempt ProviderAttempt
+	attempt.Model = current.Model
 	var providerID *string
 	err = tx.QueryRow(ctx, `SELECT job_id,attempt_no,provider,channel_id,provider_job_id,state,poll_count,next_poll_at FROM async_job_provider_attempts WHERE job_id=$1 AND attempt_no=1 FOR UPDATE`, id).Scan(&attempt.JobID, &attempt.AttemptNo, &attempt.Provider, &attempt.ChannelID, &providerID, &attempt.State, &attempt.PollCount, &attempt.NextPollAt)
 	if errors.Is(err, pgx.ErrNoRows) || attempt.State == "SUBMITTING" || providerID == nil {

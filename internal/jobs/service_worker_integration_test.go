@@ -27,6 +27,7 @@ type fakeAsyncProvider struct {
 	cancelError       error
 	submitStarted     chan struct{}
 	submitRelease     chan struct{}
+	pollAttempt       chan ProviderAttempt
 }
 
 func (provider *fakeAsyncProvider) Submit(_ context.Context, _ joboperation.Job, _ any) (SubmitResult, error) {
@@ -71,8 +72,14 @@ func TestConcurrentServiceSubmitDispatchesProviderOnce(t *testing.T) {
 		t.Fatalf("submits=%d", provider.submits.Load())
 	}
 }
-func (provider *fakeAsyncProvider) Poll(_ context.Context, _ ProviderAttempt) (joboperation.Observation, error) {
+func (provider *fakeAsyncProvider) Poll(_ context.Context, attempt ProviderAttempt) (joboperation.Observation, error) {
 	provider.polls.Add(1)
+	if provider.pollAttempt != nil {
+		select {
+		case provider.pollAttempt <- attempt:
+		default:
+		}
+	}
 	return provider.pollObservation, provider.pollError
 }
 func (provider *fakeAsyncProvider) Cancel(_ context.Context, _ ProviderAttempt) (joboperation.Observation, error) {
@@ -89,7 +96,7 @@ func jobWorkerConfig() WorkerConfig {
 
 func TestServiceSubmitsOnceAndWorkerRecoversToTerminal(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
-	provider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "provider-" + request.RequestID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"output":"done"}`)}}}
+	provider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "provider-" + request.RequestID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"output":"done"}`)}}, pollAttempt: make(chan ProviderAttempt, 1)}
 	service, err := NewService(repository, map[string]Provider{"openai": provider}, jobServiceConfig(), "api-instance")
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +117,14 @@ func TestServiceSubmitsOnceAndWorkerRecoversToTerminal(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 	if _, err := worker.RunOnce(ctx); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case attempt := <-provider.pollAttempt:
+		if attempt.Model != request.Model {
+			t.Fatalf("poll model=%q want=%q", attempt.Model, request.Model)
+		}
+	default:
+		t.Fatal("poll attempt was not observed")
 	}
 	terminal, err := service.Get(ctx, owner, created.ID)
 	if err != nil || terminal.Status != joboperation.Succeeded || terminal.SettlementState != "SETTLED" {

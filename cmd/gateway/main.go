@@ -29,9 +29,11 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
+	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
 	replicateProtocol "github.com/nativegatewayhq/gateway/protocols/replicate"
+	falProvider "github.com/nativegatewayhq/gateway/providers/fal"
 	"github.com/nativegatewayhq/gateway/providers/google"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 	replicateProvider "github.com/nativegatewayhq/gateway/providers/replicate"
@@ -153,7 +155,7 @@ func run(stdout, stderr io.Writer) int {
 		return nil
 	}
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
-	imageModels, err := imageoperation.DefaultRegistryWithReplicate(cfg.ReplicateModels)
+	imageModels, err := imageoperation.DefaultRegistryWithAsync(cfg.ReplicateModels, cfg.FalModels)
 	if err != nil {
 		logger.Error("gateway model registry initialization failed")
 		return 1
@@ -220,32 +222,50 @@ func run(stdout, stderr io.Writer) int {
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 	var replicateHandler http.Handler
+	var falHandler http.Handler
 	var asyncWorker *jobs.Worker
+	asyncProviders := map[string]jobs.Provider{}
 	if cfg.ReplicateEnabled {
 		replicateAdapter, replicateErr := replicateProvider.New(replicateProvider.Config{Endpoint: cfg.ReplicateEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.ReplicateTimeout, MaximumBodyBytes: cfg.ReplicateBodyBytes}, providerCredentialRegistry)
 		if replicateErr != nil {
 			logger.Error("gateway Replicate provider initialization failed")
 			return 1
 		}
+		asyncProviders["replicate"] = replicateAdapter
+	}
+	if cfg.FalEnabled {
+		falAdapter, falErr := falProvider.New(falProvider.Config{Endpoint: cfg.FalEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.FalTimeout, MaximumBodyBytes: cfg.FalBodyBytes}, providerCredentialRegistry)
+		if falErr != nil {
+			logger.Error("gateway fal provider initialization failed")
+			return 1
+		}
+		asyncProviders["fal"] = falAdapter
+	}
+	if len(asyncProviders) > 0 {
 		jobRepository, repositoryErr := jobs.NewRepository(pool, cfg.ReplayBodyBytes)
 		if repositoryErr != nil {
 			logger.Error("gateway Job repository initialization failed")
 			return 1
 		}
-		jobService, serviceErr := jobs.NewService(jobRepository, map[string]jobs.Provider{"replicate": replicateAdapter}, jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval}, "gateway-submit")
+		jobService, serviceErr := jobs.NewService(jobRepository, asyncProviders, jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval}, "gateway-submit")
 		if serviceErr != nil {
 			logger.Error("gateway Job service initialization failed")
 			return 1
 		}
 		jobService.SetTelemetry(telemetryRuntime.Recorder)
 		workerConfig := jobs.WorkerConfig{Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval, BaseBackoff: cfg.ReconcileBackoff, MaximumBackoff: cfg.ReconcileMaxBackoff, BatchSize: cfg.ReconcileBatchSize, MaximumAttempts: cfg.ReconcileMaxAttempts}
-		asyncWorker, serviceErr = jobs.NewWorker(jobRepository, map[string]jobs.Provider{"replicate": replicateAdapter}, billingService, workerConfig, "gateway-job-worker")
+		asyncWorker, serviceErr = jobs.NewWorker(jobRepository, asyncProviders, billingService, workerConfig, "gateway-job-worker")
 		if serviceErr != nil {
 			logger.Error("gateway Job worker initialization failed")
 			return 1
 		}
 		asyncWorker.SetTelemetry(telemetryRuntime.Recorder)
-		replicateHandler = replicateProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.ReplicateBodyBytes, cfg.PublicBaseURL)
+		if cfg.ReplicateEnabled {
+			replicateHandler = replicateProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.ReplicateBodyBytes, cfg.PublicBaseURL)
+		}
+		if cfg.FalEnabled {
+			falHandler = falProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.FalBodyBytes, cfg.PublicBaseURL)
+		}
 		readinessChecks = append(readinessChecks, jobRepository.Ready)
 	}
 	clientIPResolver, resolverErr := clientip.New(cfg.TrustedProxyPrefixes)
@@ -292,6 +312,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
 		Replicate:           replicateHandler,
+		Fal:                 falHandler,
 		ClientIPResolver:    clientIPResolver,
 		Telemetry:           telemetryRuntime.Recorder,
 		TracePropagator:     telemetryRuntime.Propagator,

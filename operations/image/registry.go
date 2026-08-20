@@ -136,8 +136,12 @@ func DefaultRegistry() *Registry {
 }
 
 func DefaultRegistryWithReplicate(models []string) (*Registry, error) {
+	return DefaultRegistryWithAsync(models, nil)
+}
+
+func DefaultRegistryWithAsync(replicateModels, falModels []string) (*Registry, error) {
 	routes := defaultRoutes()
-	for _, model := range models {
+	for _, model := range replicateModels {
 		digest := sha256.Sum256([]byte(model))
 		candidateID := "candidate_replicate_" + hex.EncodeToString(digest[:8])
 		owner := "replicate"
@@ -145,6 +149,12 @@ func DefaultRegistryWithReplicate(models []string) (*Registry, error) {
 			owner = before
 		}
 		routes = append(routes, ModelRoute{Protocol: "replicate", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Replicate, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000004", Enabled: true}}})
+	}
+	for _, model := range falModels {
+		digest := sha256.Sum256([]byte(model))
+		candidateID := "candidate_fal_" + hex.EncodeToString(digest[:8])
+		owner, _, _ := strings.Cut(model, "/")
+		routes = append(routes, ModelRoute{Protocol: "fal", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Fal, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000005", Enabled: true}}})
 	}
 	return NewRegistry(routes...)
 }
@@ -233,11 +243,11 @@ func (registry *Registry) ListProtocol(protocol string) []ModelRoute {
 }
 
 func validProtocol(protocol string) bool {
-	return protocol == "openai" || protocol == "gemini" || protocol == "replicate"
+	return protocol == "openai" || protocol == "gemini" || protocol == "replicate" || protocol == "fal"
 }
 
 func validRouteProtocol(protocol string, provider providercredentials.ProviderID) bool {
-	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google) || (protocol == "replicate" && provider == providercredentials.Replicate)
+	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google) || (protocol == "replicate" && provider == providercredentials.Replicate) || (protocol == "fal" && provider == providercredentials.Fal)
 }
 
 func validCandidateID(value string) bool {
@@ -270,6 +280,21 @@ func validModelID(model string) bool {
 }
 
 func validProtocolModelID(protocol, model string) bool {
+	if protocol == "fal" {
+		if len(model) > 200 {
+			return false
+		}
+		parts := strings.Split(model, "/")
+		if len(parts) < 2 {
+			return false
+		}
+		for _, part := range parts {
+			if part == "." || part == ".." || !validModelID(part) {
+				return false
+			}
+		}
+		return true
+	}
 	if protocol != "replicate" {
 		return validModelID(model)
 	}

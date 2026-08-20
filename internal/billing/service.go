@@ -622,7 +622,7 @@ func sameRequest(charge Charge, request BeginRequest) bool {
 func validBeginRequest(request BeginRequest) bool {
 	hasFingerprint := request.RequestFingerprint != ([32]byte{})
 	validIdempotency := (request.IdempotencyKey == "" && !hasFingerprint) || (idempotency.Valid(request.IdempotencyKey) && hasFingerprint)
-	validProtocolOperation := (request.Protocol == "openai" && (request.Operation == "image.generate" || request.Operation == "image.edit")) || (request.Protocol == "gemini" && request.Operation == "image.generate") || (request.Protocol == "replicate" && request.Operation == "image.generate")
+	validProtocolOperation := (request.Protocol == "openai" && (request.Operation == "image.generate" || request.Operation == "image.edit")) || ((request.Protocol == "gemini" || request.Protocol == "replicate" || request.Protocol == "fal") && request.Operation == "image.generate")
 	validRouting := request.RoutingPolicy == "" && request.ExpectedQuote == nil && request.EvaluationAt.IsZero()
 	if request.RoutingPolicy == "lowest_cost" {
 		validRouting = request.CostRank >= 0 && !request.EvaluationAt.IsZero() && (request.ExpectedQuote == nil || validBoundQuote(*request.ExpectedQuote, request))

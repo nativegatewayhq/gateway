@@ -19,7 +19,7 @@ type candidate struct {
 
 func Extract(request *http.Request) (string, error) {
 	candidates := []candidate{
-		headerCandidate(request.Header.Values("Authorization"), true),
+		authorizationCandidate(request.Header.Values("Authorization")),
 		headerCandidate(request.Header.Values("x-api-key"), false),
 		headerCandidate(request.Header.Values("x-goog-api-key"), false),
 		queryCandidate(request.URL.Query()["key"]),
@@ -46,6 +46,20 @@ func Extract(request *http.Request) (string, error) {
 		return "", ErrMalformed
 	}
 	return value, nil
+}
+
+func authorizationCandidate(values []string) candidate {
+	if len(values) == 0 {
+		return candidate{}
+	}
+	if len(values) != 1 {
+		return candidate{present: true}
+	}
+	parts := strings.Split(values[0], " ")
+	if len(parts) != 2 || (!strings.EqualFold(parts[0], "Bearer") && !strings.EqualFold(parts[0], "Key")) || parts[1] == "" {
+		return candidate{present: true}
+	}
+	return candidate{present: true, value: parts[1]}
 }
 
 func headerCandidate(values []string, bearer bool) candidate {

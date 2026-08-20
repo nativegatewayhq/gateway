@@ -232,6 +232,10 @@ func requestMetadata(request *http.Request) (string, string, string) {
 		return "gateway", "health.live", "/health/live"
 	case path == "/health/ready":
 		return "gateway", "health.ready", "/health/ready"
+	case strings.Contains(path, "/requests/"):
+		return "fal", "image.generate", "/{model}/requests/{id}"
+	case strings.Count(strings.Trim(path, "/"), "/") >= 1:
+		return "fal", "image.generate", "/{model}"
 	default:
 		return "gateway", "unknown", "unmatched"
 	}
@@ -257,7 +261,9 @@ func boundedProtocol(value string) string {
 func boundedOperation(value string) string {
 	return allowed(value, "image.generate", "image.edit", "models.list", "health.live", "health.ready", "unknown")
 }
-func boundedProvider(value string) string { return allowed(value, "openai", "xai", "google") }
+func boundedProvider(value string) string {
+	return allowed(value, "openai", "xai", "google", "replicate", "fal")
+}
 func boundedPolicy(value string) string {
 	return allowed(value, "fixed", "priority", "lowest_cost", "weighted")
 }
