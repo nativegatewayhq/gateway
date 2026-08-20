@@ -12,26 +12,38 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/google"
 )
 
 type geminiBillingFake struct {
-	beginRequest chargebilling.BeginRequest
-	beginCharge  chargebilling.Charge
-	beginErr     error
-	completeOK   bool
-	snapshot     chargebilling.ResponseSnapshot
-	completeErr  error
-	observation  chargebilling.Observation
-	events       []string
+	beginRequest  chargebilling.BeginRequest
+	beginCharge   chargebilling.Charge
+	beginErr      error
+	completeOK    bool
+	snapshot      chargebilling.ResponseSnapshot
+	completeErr   error
+	observation   chargebilling.Observation
+	events        []string
+	quoteErrors   map[string]error
+	beginChannels []string
 }
 
 func (fake *geminiBillingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
 	fake.events = append(fake.events, "begin")
+	fake.beginChannels = append(fake.beginChannels, request.ChannelID)
 	fake.beginRequest = request
 	return fake.beginCharge, fake.beginErr
+}
+
+func (fake *geminiBillingFake) Replay(context.Context, chargebilling.BeginRequest) (chargebilling.Charge, bool, error) {
+	return chargebilling.Charge{}, false, nil
+}
+
+func (fake *geminiBillingFake) Quote(_ context.Context, request chargebilling.BeginRequest) (pricing.Estimate, error) {
+	return pricing.Estimate{}, fake.quoteErrors[request.ChannelID]
 }
 
 func (fake *geminiBillingFake) Complete(_ context.Context, _ string, success bool, snapshot chargebilling.ResponseSnapshot) (chargebilling.Charge, error) {
@@ -92,6 +104,26 @@ func TestBillableGeminiUsesSelectedProviderModel(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != 200 || executor.request.Model != "google-provider-model" || fake.beginRequest.Model != "gemini-logical" || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000003" {
 		t.Fatalf("response=%d providerModel=%s begin=%+v", response.Code, executor.request.Model, fake.beginRequest)
+	}
+}
+
+func TestBillableGeminiFallsBackToNextExactPricedCandidate(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "gemini", Model: "gemini-logical", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_first", Provider: providercredentials.Google, ProviderModel: "first-model", ChannelID: "channel_00000000000000000000000000000003", Enabled: true, Priority: 1},
+		{ID: "candidate_second", Provider: providercredentials.Google, ProviderModel: "second-model", ChannelID: "channel_00000000000000000000000000000004", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &geminiBillingFake{beginCharge: chargebilling.Charge{ID: "charge_test"}, quoteErrors: map[string]error{"channel_00000000000000000000000000000003": pricing.ErrPriceUnavailable}}
+	executor := &stubExecutor{response: &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}}
+	handler := NewBillableHandler(slog.Default(), &stubAuthenticator{principal: apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test"}}, registry, executor, 4096, fake)
+	request := geminiRequest(strings.NewReader(`{"contents":[]}`))
+	request.URL.Path = "/v1beta/models/gemini-logical:generateContent"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || executor.request.Model != "second-model" || len(fake.beginChannels) != 1 || fake.beginChannels[0] != "channel_00000000000000000000000000000004" {
+		t.Fatalf("response=%d model=%s begin=%v", response.Code, executor.request.Model, fake.beginChannels)
 	}
 }
 

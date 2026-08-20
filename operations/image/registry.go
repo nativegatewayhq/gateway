@@ -123,16 +123,28 @@ func DefaultRegistry() *Registry {
 }
 
 func (registry *Registry) Resolve(model string, operation Operation, mediaType MediaType) (RoutingDecision, error) {
-	return registry.ResolveProtocol("openai", model, operation, mediaType)
+	decisions, err := registry.Candidates("openai", model, operation, mediaType)
+	if err != nil {
+		return RoutingDecision{}, err
+	}
+	return decisions[0], nil
 }
 
 func (registry *Registry) ResolveProtocol(protocol, model string, operation Operation, mediaType MediaType) (RoutingDecision, error) {
+	decisions, err := registry.Candidates(protocol, model, operation, mediaType)
+	if err != nil {
+		return RoutingDecision{}, err
+	}
+	return decisions[0], nil
+}
+
+func (registry *Registry) Candidates(protocol, model string, operation Operation, mediaType MediaType) ([]RoutingDecision, error) {
 	if registry == nil {
-		return RoutingDecision{}, ErrModelNotFound
+		return nil, ErrModelNotFound
 	}
 	route, exists := registry.routes[protocol+"\x00"+model]
 	if !exists {
-		return RoutingDecision{}, ErrModelNotFound
+		return nil, ErrModelNotFound
 	}
 	supported := false
 	for _, capability := range route.Capabilities {
@@ -142,7 +154,7 @@ func (registry *Registry) ResolveProtocol(protocol, model string, operation Oper
 		}
 	}
 	if !supported {
-		return RoutingDecision{}, ErrUnsupported
+		return nil, ErrUnsupported
 	}
 	candidates := append([]ChannelCandidate(nil), route.Candidates...)
 	sort.Slice(candidates, func(i, j int) bool {
@@ -151,13 +163,17 @@ func (registry *Registry) ResolveProtocol(protocol, model string, operation Oper
 		}
 		return candidates[i].Priority < candidates[j].Priority
 	})
+	decisions := make([]RoutingDecision, 0, len(candidates))
 	for _, candidate := range candidates {
 		if !candidate.Enabled || (route.Policy == Fixed && candidate.ID != route.FixedCandidateID) {
 			continue
 		}
-		return RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy}, nil
+		decisions = append(decisions, RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy})
 	}
-	return RoutingDecision{}, ErrUnsupported
+	if len(decisions) == 0 {
+		return nil, ErrUnsupported
+	}
+	return decisions, nil
 }
 
 func (registry *Registry) List() []ModelRoute {

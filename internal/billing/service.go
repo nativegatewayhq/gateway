@@ -44,7 +44,7 @@ type BeginRequest struct {
 	Quality            string
 	IdempotencyKey     string
 	RequestFingerprint [32]byte
-	LegacyFingerprint  [32]byte
+	LegacyFingerprints [][32]byte
 }
 
 type ResponseSnapshot struct {
@@ -203,6 +203,51 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 		return Charge{}, err
 	}
 	return charge, nil
+}
+
+func (service *Service) Replay(ctx context.Context, request BeginRequest) (Charge, bool, error) {
+	request.Size = defaultDimension(request.Size)
+	request.Quality = defaultDimension(request.Quality)
+	if !validBeginRequest(request) {
+		return Charge{}, false, ErrInvalidRequest
+	}
+	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return Charge{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	existing, found, err := loadForBegin(ctx, tx, request)
+	if err != nil || !found {
+		return Charge{}, false, err
+	}
+	if !sameRequest(existing, request) {
+		return Charge{}, false, ErrRequestConflict
+	}
+	if existing.State == "RESERVED" || existing.State == "RECONCILING" || existing.State == "RESERVING" {
+		return Charge{}, false, ErrRequestPending
+	}
+	if request.IdempotencyKey == "" {
+		return Charge{}, false, ErrAlreadySettled
+	}
+	if existing.SnapshotVersion != 1 || !validStoredSnapshot(existing) {
+		return Charge{}, false, ErrSnapshotCorrupt
+	}
+	existing.Replay = true
+	return existing, true, nil
+}
+
+func (service *Service) Quote(ctx context.Context, request BeginRequest) (pricing.Estimate, error) {
+	request.Size = defaultDimension(request.Size)
+	request.Quality = defaultDimension(request.Quality)
+	if !validBeginRequest(request) {
+		return pricing.Estimate{}, ErrInvalidRequest
+	}
+	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return pricing.Estimate{}, err
+	}
+	defer tx.Rollback(ctx)
+	return service.estimator.EstimateInTx(ctx, tx, pricing.Request{Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, ChannelID: request.ChannelID, Quantity: request.Quantity, Size: request.Size, Quality: request.Quality})
 }
 
 func (service *Service) Capture(ctx context.Context, chargeID string) (Charge, error) {
@@ -419,7 +464,10 @@ func sameRequest(charge Charge, request BeginRequest) bool {
 	requestIdentityMatches := charge.RequestID == request.RequestID
 	routeMatches := charge.ChannelID == request.ChannelID
 	if request.IdempotencyKey != "" {
-		fingerprintMatches := bytes.Equal(charge.RequestFingerprint[:], request.RequestFingerprint[:]) || (request.LegacyFingerprint != ([32]byte{}) && bytes.Equal(charge.RequestFingerprint[:], request.LegacyFingerprint[:]))
+		fingerprintMatches := bytes.Equal(charge.RequestFingerprint[:], request.RequestFingerprint[:])
+		for _, legacy := range request.LegacyFingerprints {
+			fingerprintMatches = fingerprintMatches || bytes.Equal(charge.RequestFingerprint[:], legacy[:])
+		}
 		requestIdentityMatches = charge.IdempotencyKey == request.IdempotencyKey && fingerprintMatches
 		routeMatches = true
 	}

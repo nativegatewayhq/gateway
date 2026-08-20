@@ -21,24 +21,36 @@ import (
 )
 
 type billingFake struct {
-	beginRequest chargebilling.BeginRequest
-	beginCharge  chargebilling.Charge
-	beginErr     error
-	captureErr   error
-	releaseErr   error
-	maxResponse  int64
-	observation  chargebilling.Observation
-	events       []string
+	beginRequest  chargebilling.BeginRequest
+	beginCharge   chargebilling.Charge
+	beginErr      error
+	captureErr    error
+	releaseErr    error
+	maxResponse   int64
+	observation   chargebilling.Observation
+	events        []string
+	quoteErrors   map[string]error
+	beginChannels []string
+	replayCharge  chargebilling.Charge
+	replayFound   bool
+	replayErr     error
 }
 
 func (fake *billingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
 	fake.beginRequest = request
+	fake.beginChannels = append(fake.beginChannels, request.ChannelID)
 	fake.events = append(fake.events, "begin")
 	charge := fake.beginCharge
 	if charge.ID == "" {
 		charge.ID = "charge_00000000000000000000000000000001"
 	}
 	return charge, fake.beginErr
+}
+func (fake *billingFake) Replay(context.Context, chargebilling.BeginRequest) (chargebilling.Charge, bool, error) {
+	return fake.replayCharge, fake.replayFound, fake.replayErr
+}
+func (fake *billingFake) Quote(_ context.Context, request chargebilling.BeginRequest) (pricing.Estimate, error) {
+	return pricing.Estimate{}, fake.quoteErrors[request.ChannelID]
 }
 func (fake *billingFake) Capture(context.Context, string) (chargebilling.Charge, error) {
 	fake.events = append(fake.events, "capture")
@@ -122,6 +134,98 @@ func TestBillableImagesUsesPriorityCandidateChannelAndProviderModel(t *testing.T
 	response := billableImageRequest(handler, `{"model":"logical-image","prompt":"secret"}`)
 	if response.Code != 200 || openAICalls != 0 || xAICalls != 1 || fake.beginRequest.Model != "logical-image" || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000002" {
 		t.Fatalf("response=%d calls=%d/%d begin=%+v", response.Code, openAICalls, xAICalls, fake.beginRequest)
+	}
+}
+
+func TestBillableImagesFallsBackBeforeReserveWhenFirstCandidatePriceIsUnavailable(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{quoteErrors: map[string]error{"channel_00000000000000000000000000000001": pricing.ErrPriceUnavailable}}
+	openAICalls, xAICalls := 0, 0
+	handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			openAICalls++
+			return nil, errors.New("unexpected call")
+		}),
+		providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+			xAICalls++
+			body, _ := io.ReadAll(request.Body)
+			if string(body) != `{"model":"xai-provider-model","prompt":"secret"}` {
+				t.Fatalf("provider body=%s", body)
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+		}),
+	}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+	response := billableImageRequest(handler, `{"model":"logical-image","prompt":"secret"}`)
+	if response.Code != 200 || openAICalls != 0 || xAICalls != 1 || len(fake.beginChannels) != 1 || fake.beginChannels[0] != "channel_00000000000000000000000000000002" {
+		t.Fatalf("response=%d calls=%d/%d begin=%v", response.Code, openAICalls, xAICalls, fake.beginChannels)
+	}
+}
+
+func TestBillableImagesDoesNotFallbackAfterReserveOnTimeout(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{}
+	secondCalls := 0
+	handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			return nil, openaiimages.ErrTimeout
+		}),
+		providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			secondCalls++
+			return nil, errors.New("unexpected call")
+		}),
+	}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+	response := billableImageRequest(handler, `{"model":"logical-image","prompt":"secret"}`)
+	if response.Code != 503 || secondCalls != 0 || len(fake.beginChannels) != 1 || fake.observation.Outcome != chargebilling.Unknown {
+		t.Fatalf("response=%d second=%d begin=%v observation=%+v", response.Code, secondCalls, fake.beginChannels, fake.observation)
+	}
+}
+
+func TestBillableImagesAllCandidatesUnavailableHasNoFinancialOrProviderEffect(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{}
+	providerCalls := 0
+	handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+		providercredentials.XAI:    executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+	}, 1024, fake, availability{})
+	response := billableImageRequest(handler, `{"model":"logical-image","prompt":"secret"}`)
+	if response.Code != 503 || providerCalls != 0 || len(fake.events) != 0 || len(fake.beginChannels) != 0 {
+		t.Fatalf("response=%d providers=%d events=%v begin=%v", response.Code, providerCalls, fake.events, fake.beginChannels)
+	}
+}
+
+func TestBillableImagesTerminalReplayIgnoresCurrentAvailability(t *testing.T) {
+	fake := &billingFake{replayFound: true, replayCharge: chargebilling.Charge{Replay: true, Response: chargebilling.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"stored":true}`)}}}
+	providerCalls := 0
+	handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+	}, 1024, fake, availability{})
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"gpt-image-1","prompt":"secret"}`))
+	request.Header.Set("Authorization", "Bearer service-key")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "terminal-replay")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || response.Body.String() != `{"stored":true}` || providerCalls != 0 || len(fake.events) != 0 {
+		t.Fatalf("response=%d %s providers=%d events=%v", response.Code, response.Body.String(), providerCalls, fake.events)
 	}
 }
 

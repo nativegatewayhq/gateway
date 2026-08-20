@@ -141,9 +141,9 @@ The request's exact `model` value selects a provider. Phase 0 does not guess by 
 | `gpt-image-1` | OpenAI | `GATEWAY_OPENAI_API_KEY` |
 | `grok-imagine-image-quality` | xAI | `GATEWAY_XAI_API_KEY` |
 
-Image models are logical protocol models backed by one or more immutable channel candidates. Each candidate identifies a Provider, provider-native model, pricing channel, enabled state, and priority. Built-in models currently use a single `fixed` candidate. A `priority` model selects the enabled candidate with the lowest numeric priority and then candidate ID, once before billing begins. The selected provider model is applied only to the outbound request; the client-visible model and charge identity remain logical.
+Image models are logical protocol models backed by one or more immutable channel candidates. Each candidate identifies a Provider, provider-native model, pricing channel, enabled state, and priority. Built-in models currently use a single `fixed` candidate. A `priority` model evaluates enabled candidates by numeric priority and candidate ID. Before any reservation or Provider call, candidates without an executor, configured credential, or valid exact price/margin are skipped. The first candidate whose Wallet reservation succeeds is fixed for that request. The selected provider model is applied only to the outbound request; the client-visible model and idempotency identity remain logical. `/v1/models` lists a logical model when at least one ordered candidate has a configured Provider credential.
 
-This routing foundation does not retry another Provider after an upstream call. Missing prices, credentials, disabled candidates, timeout, or other Provider errors fail closed through the existing native error and reconciliation paths. Weighted, lowest-cost, health-aware routing and fallback are separate plans.
+Fallback is strictly pre-dispatch. Once a Wallet reservation succeeds, the Gateway calls exactly one Provider and never tries another candidate after credential races, timeout, connection loss, panic, or any HTTP response. Those outcomes use the existing release or reconciliation paths, preventing ambiguous duplicate generation and charging. A `fixed` model never selects an alternate candidate. Weighted, lowest-cost, and health-aware routing remain separate plans.
 
 Python:
 
@@ -177,7 +177,7 @@ const response = await client.images.generate({
 });
 ```
 
-The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, retries, fallback, and storage remain excluded; billing is opt-in through the required mode described below.
+The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, post-dispatch retries, and storage remain excluded; billing is opt-in through the required mode described below.
 
 ## Image editing
 
