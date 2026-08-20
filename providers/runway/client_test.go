@@ -22,6 +22,11 @@ func TestClientUsesFixedWireAndSanitizesTaskIdentity(t *testing.T) {
 			t.Fatalf("invalid upstream headers: %#v", r.Header)
 		}
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/uploads":
+			if r.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("upload content type=%s", r.Header.Get("Content-Type"))
+			}
+			_, _ = io.WriteString(w, `{"uploadUrl":"https://storage.example/upload","fields":{"key":"opaque"},"runwayUri":"runway://uploads/asset"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/text_to_video":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"id":"provider-task"}`)
@@ -48,6 +53,10 @@ func TestClientUsesFixedWireAndSanitizesTaskIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := joboperation.Job{ID: "job_0123456789abcdef0123456789abcdef", ChannelID: "channel_00000000000000000000000000000007"}
+	upload, err := client.CreateEphemeralUpload(context.Background(), job.ChannelID, []byte(`{"filename":"input.mp4","type":"ephemeral"}`))
+	if err != nil || upload.Status != http.StatusOK || upload.URI != "runway://uploads/asset" || strings.Contains(string(upload.Body), "upstream-secret") {
+		t.Fatalf("upload: %#v %v", upload, err)
+	}
 	submitted, err := client.Submit(context.Background(), job, SubmitPayload{Path: "/v1/text_to_video", Body: []byte(`{"model":"gen4_turbo"}`)})
 	if err != nil || submitted.ProviderJobID != "provider-task" {
 		t.Fatalf("submit: %#v %v", submitted, err)
@@ -61,7 +70,7 @@ func TestClientUsesFixedWireAndSanitizesTaskIdentity(t *testing.T) {
 	if err != nil || canceled.Status != joboperation.Canceled {
 		t.Fatalf("cancel: %#v %v", canceled, err)
 	}
-	if requests != 3 {
+	if requests != 4 {
 		t.Fatalf("requests=%d", requests)
 	}
 }
@@ -91,5 +100,21 @@ func TestRunwayCostUsesBoundedFixedPointMicrocredits(t *testing.T) {
 		if _, ok := parseCostMicros([]byte(raw)); ok {
 			t.Fatalf("accepted %s", raw)
 		}
+	}
+}
+
+func TestUploadCapabilityValidationIsBounded(t *testing.T) {
+	for _, value := range []string{"https://storage.example/upload?signature=opaque", "https://bucket.example/path"} {
+		if !validUploadURL(value) {
+			t.Fatalf("valid upload URL rejected: %s", value)
+		}
+	}
+	for _, value := range []string{"http://storage.example/upload", "https://user@storage.example/upload", "https://storage.example/upload#fragment"} {
+		if validUploadURL(value) {
+			t.Fatalf("unsafe upload URL accepted: %s", value)
+		}
+	}
+	if !validUploadURI("runway://uploads/asset") || validUploadURI("runway://bad uri") || validUploadURI("https://example.com") {
+		t.Fatal("Runway URI validation mismatch")
 	}
 }

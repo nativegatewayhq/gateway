@@ -364,6 +364,10 @@ gateway-video-price \
 
 The Gateway reserves the maximum sale before creating the durable Job. Terminal `cost.credits` evidence settles succeeded, failed, and canceled tasks; explicit zero releases the reservation. Missing, malformed, or over-estimate cost remains reserved for manual reconciliation. BYOK mode creates no charge.
 
+Official Runway SDK ephemeral uploads are supported through `POST /v1/uploads`. The SDK sends only the filename bootstrap JSON to the Gateway, receives the native signed `uploadUrl`, multipart `fields`, and `runwayUri`, then streams the file directly to Runway storage. Media bytes—up to Runway's native 200MB limit and at least 512 bytes—never pass through Gateway memory, disk, or egress. A failed direct upload must start with a new bootstrap rather than retrying an old signed form.
+
+Returned `runway://` capabilities expire after 24 hours. The Gateway stores only their SHA-256 digest and binds it to the issuing organization, project, API Key, and Runway channel. A video request using an unknown, expired, cross-Key, cross-tenant, or cross-channel URI is rejected before Billing reservation, Job creation, or Provider dispatch. Signed upload URLs, form fields, filenames, raw URIs, and file contents must never be logged or persisted.
+
 The protocol-neutral Job core persists tenant ownership, immutable routing/charge identity, a separate internal Provider Job identifier, state transitions, append-only events, polling leases, cancellation intent, and terminal result snapshots in PostgreSQL. This release intentionally exposes no new HTTP route; the subsequent Replicate and fal native facades consume this application contract.
 
 `PENDING`, `QUEUED`, `PROCESSING`, and `RECONCILING` Jobs are non-terminal. `SUCCEEDED`, `FAILED`, and `CANCELED` are immutable terminal states. A submit intent is persisted before the single Provider call. If that call or its response is uncertain, the Job moves to `RECONCILING`; the Gateway never submits it again or falls back to another Provider. Expired submit/poll leases are recovered after restart with `FOR UPDATE SKIP LOCKED` claims.

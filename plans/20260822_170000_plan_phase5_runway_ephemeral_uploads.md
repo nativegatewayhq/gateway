@@ -1,9 +1,9 @@
 ---
 id: gateway-20260822-052
 title: Phase 5 Runway Native Ephemeral Uploads and Tenant Asset Binding
-status: accepted
+status: completed
 created_at: 2026-08-22T17:00:00+09:00
-updated_at: 2026-08-22T17:00:00+09:00
+updated_at: 2026-08-22T19:30:00+09:00
 owners:
   - gateway
 initiative: phase-5-runway-ephemeral-uploads
@@ -208,19 +208,23 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/r
 
 ## 완료 조건
 
-- [ ] 공식 Runway Python/JavaScript SDK가 Key와 Base URL만 변경해 ephemeral upload bootstrap을 사용함
-- [ ] media byte가 Gateway 메모리, 디스크 또는 egress를 통과하지 않음
-- [ ] 512 bytes–200MB와 24시간 expiry가 native signed-upload 계약으로 보존됨
-- [ ] `runway://`가 tenant/channel/expiry에 묶여 cross-tenant 재사용이 pre-dispatch 차단됨
-- [ ] signed URL/form, URI, filename, content와 credential이 persistence/telemetry/log에 노출되지 않음
-- [ ] bootstrap timeout/429/5xx와 failed direct upload가 자동 retry 또는 과금 효과를 만들지 않음
-- [ ] authorized URI를 사용한 managed video 요청이 Plan 051 정산 불변 조건을 유지함
-- [ ] 전체 unit/race/integration/SDK 회귀가 통과함
-- [ ] README, migration, 운영 runbook과 멀티레포 handoff가 갱신됨
+- [x] 공식 Runway Python/JavaScript SDK가 Key와 Base URL만 변경해 ephemeral upload bootstrap을 사용함
+- [x] media byte가 Gateway 메모리, 디스크 또는 egress를 통과하지 않음
+- [x] 512 bytes–200MB와 24시간 expiry가 native signed-upload 계약으로 보존됨
+- [x] `runway://`가 tenant/channel/expiry에 묶여 cross-tenant 재사용이 pre-dispatch 차단됨
+- [x] signed URL/form, URI, filename, content와 credential이 persistence/telemetry/log에 노출되지 않음
+- [x] bootstrap timeout/429/5xx와 failed direct upload가 자동 retry 또는 과금 효과를 만들지 않음
+- [x] authorized URI를 사용한 managed video 요청이 Plan 051 정산 불변 조건을 유지함
+- [x] 전체 unit/race/integration/SDK 회귀가 통과함
+- [x] README, migration, 운영 runbook과 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과: format, vet, 전체 race unit test와 binary build.
+- fresh PostgreSQL `gateway_plan052` 및 격리 Redis DB 14에서 전체 `make integration-test` 통과. migration 000001–000046과 기존 Billing/Job 회귀 포함.
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/runway -count=1` 통과.
+- 공식 Runway Python sync/async 및 JavaScript SDK가 Gateway bootstrap 뒤 별도 storage server로 multipart file stream을 직접 전송하고 반환 URI로 image-to-video를 생성함을 검증했다.
+- tenant/API Key/channel digest binding, 24시간 expiry, cross-tenant 거부와 append-only history를 PostgreSQL 통합 테스트로 검증했다.
 
 ## Rollback 계획
 

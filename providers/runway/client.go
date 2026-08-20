@@ -35,6 +35,12 @@ type SubmitPayload struct {
 	Body []byte
 }
 
+type UploadResponse struct {
+	Status int
+	Body   []byte
+	URI    string
+}
+
 type Client struct {
 	endpoint         *url.URL
 	credentials      *providercredentials.Registry
@@ -86,6 +92,51 @@ func (client *Client) Submit(ctx context.Context, value joboperation.Job, payloa
 		return jobs.SubmitResult{}, &jobs.ProviderError{Category: "invalid_response"}
 	}
 	return jobs.SubmitResult{ProviderJobID: envelope.ID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: 5 * time.Second}, nil
+}
+
+// CreateEphemeralUpload obtains a Provider-signed direct-upload form. Media
+// bytes are uploaded by the SDK directly to the returned storage URL.
+func (client *Client) CreateEphemeralUpload(ctx context.Context, channelID string, body []byte) (UploadResponse, error) {
+	if len(body) == 0 || len(body) > 4096 {
+		return UploadResponse{}, &jobs.ProviderError{Category: "invalid_request"}
+	}
+	request, err := client.request(ctx, http.MethodPost, "/v1/uploads", channelID, bytes.NewReader(body))
+	if err != nil {
+		return UploadResponse{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, responseBody, err := client.do(request)
+	if err != nil {
+		return UploadResponse{}, err
+	}
+	result := UploadResponse{Status: response.StatusCode, Body: responseBody}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return result, nil
+	}
+	var envelope struct {
+		UploadURL string            `json:"uploadUrl"`
+		Fields    map[string]string `json:"fields"`
+		RunwayURI string            `json:"runwayUri"`
+	}
+	if json.Unmarshal(responseBody, &envelope) != nil || !validUploadURL(envelope.UploadURL) || len(envelope.Fields) == 0 || len(envelope.Fields) > 32 || !validUploadURI(envelope.RunwayURI) {
+		return UploadResponse{}, &jobs.ProviderError{Category: "invalid_response"}
+	}
+	for key, value := range envelope.Fields {
+		if key == "" || len(key) > 128 || len(value) > 8192 || strings.TrimSpace(key) != key || strings.IndexFunc(key+value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			return UploadResponse{}, &jobs.ProviderError{Category: "invalid_response"}
+		}
+	}
+	result.URI = envelope.RunwayURI
+	return result, nil
+}
+
+func validUploadURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.Fragment == "" && len(value) <= 8192
+}
+
+func validUploadURI(value string) bool {
+	return strings.HasPrefix(value, "runway://") && len(value) >= 13 && len(value) <= 5000 && strings.TrimSpace(value) == value && strings.IndexFunc(value, func(r rune) bool { return r < 0x21 || r == 0x7f }) == -1
 }
 
 func (client *Client) Poll(ctx context.Context, attempt jobs.ProviderAttempt) (joboperation.Observation, error) {
