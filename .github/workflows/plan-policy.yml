@@ -1,0 +1,34 @@
+name: Plan policy
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate pull request plan reference
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! printf '%s' "$BODY" | grep -Eq '(gateway-[0-9]{8}-[0-9]{3}|[Nn]o-plan exception)'; then
+            echo "Reference a gateway plan ID or document a no-plan exception."
+            exit 1
+          fi
+      - name: Validate plan files
+        run: |
+          test -f plans/README.md
+          test -f plans/TEMPLATE.md
+          for file in plans/[0-9]*.md; do
+            grep -q '^id: gateway-' "$file"
+            grep -q '^status: ' "$file"
+            grep -q '^initiative: ' "$file"
+            grep -q '^## 완료 조건' "$file"
+            grep -q '^## 검증 증거' "$file"
+          done

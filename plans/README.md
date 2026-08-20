@@ -1,0 +1,145 @@
+# Gateway Plan Log
+
+이 디렉터리는 Gateway 저장소의 구현 계획과 실행 이력을 시간순으로 관리한다.
+
+일반적인 `PLAN.md`처럼 하나의 문서를 계속 덮어쓰지 않는다. 데이터베이스 마이그레이션과 유사하게 새 계획, 변경, 중단, 대체를 각각 새로운 파일로 추가한다. 이를 통해 특정 시점에 무엇을 왜 구현했는지 추적할 수 있다.
+
+기여 절차와 리뷰 기준은 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)를 따르고, 새 계획은 [`TEMPLATE.md`](./TEMPLATE.md)에서 시작한다.
+
+## 운영 원칙
+
+1. 계획 파일은 생성 시각을 접두사로 사용한다.
+2. 파일명과 `id`는 한 번 사용한 뒤 재사용하지 않는다.
+3. 승인되어 구현이 시작된 계획의 범위와 완료 조건은 원칙적으로 수정하지 않는다.
+4. 계획 변경은 기존 파일을 덮어쓰지 않고 새로운 계획 파일을 추가한다.
+5. 새 계획은 필요하면 `depends_on` 또는 `supersedes`로 기존 계획을 참조한다.
+6. 구현 완료는 코드, 테스트, 문서 등 검증 가능한 증거로 판단한다.
+7. 하나의 계획은 독립적으로 검증하고 완료할 수 있는 크기로 작성한다.
+8. 여러 저장소에 걸친 작업은 각 저장소에 로컬 계획을 만들고 동일한 `initiative` 값으로 연결한다.
+
+## 파일명 규칙
+
+```text
+YYYYMMDD_HHMMSS_<kind>_<slug>.md
+```
+
+시간대는 프로젝트 기본 시간대인 `Asia/Seoul`을 사용한다. 동일 초 충돌이 발생하면 더 늦게 생성되는 파일의 시각을 증가시킨다.
+
+종류:
+
+| kind | 의미 |
+|---|---|
+| `plan` | 신규 기능 또는 구현 작업 |
+| `change` | 승인된 계획의 범위나 접근 방식 변경 |
+| `rollback` | 구현 또는 정책의 명시적 철회 |
+| `close` | 별도 증거를 포함한 계획 종료 기록이 필요할 때 |
+
+예시:
+
+```text
+20260820_113825_plan_phase0_gateway_bootstrap.md
+20260822_091500_change_replace_router_contract.md
+20260825_170000_rollback_disable_unsafe_url_fetch.md
+```
+
+## 계획 메타데이터
+
+모든 계획 파일은 다음 front matter로 시작한다.
+
+```yaml
+---
+id: gateway-20260820-001
+title: Phase 0 Gateway Bootstrap
+status: proposed
+created_at: 2026-08-20T11:38:25+09:00
+updated_at: 2026-08-20T11:38:25+09:00
+owners:
+  - gateway
+initiative: phase-0-native-sdk-validation
+depends_on: []
+supersedes: []
+affected_repos:
+  - gateway
+---
+```
+
+허용 상태:
+
+```text
+proposed → accepted → in_progress → completed
+                              ├──→ blocked
+                              └──→ superseded
+```
+
+- `proposed`: 검토 전 초안
+- `accepted`: 구현 대상으로 승인됨
+- `in_progress`: 구현 또는 검증 진행 중
+- `completed`: 모든 완료 조건과 검증 증거가 충족됨
+- `blocked`: 외부 조건 때문에 진행할 수 없음
+- `superseded`: 후속 계획이 이 계획을 대체함
+
+상태와 검증 증거는 실행 이력에 해당하므로 해당 파일에서 갱신할 수 있다. 범위, 설계, 완료 조건을 실질적으로 변경해야 할 때는 새로운 `change` 계획을 추가한다.
+
+## 필수 본문 구조
+
+각 계획은 최소한 다음 항목을 포함한다.
+
+```markdown
+## 목적
+## 배경
+## 범위
+## 제외 범위
+## 설계 및 구현 순서
+## 인터페이스와 데이터 변경
+## 보안 및 과금 고려사항
+## 테스트 계획
+## 완료 조건
+## 검증 증거
+## 후속 작업
+```
+
+## 계획 작성 단위
+
+좋은 계획은 다음 특성을 가진다.
+
+- 단일한 사용자 또는 시스템 결과를 만든다.
+- 선행 조건과 영향을 받는 저장소가 명확하다.
+- 구현 순서가 코드 변경 단위로 나뉜다.
+- 실패, 재시도, 멱등성, 보안 조건을 포함한다.
+- 자동화 가능한 완료 조건을 가진다.
+- 다음 계획 없이도 완료 여부를 판단할 수 있다.
+
+큰 Phase 전체를 하나의 실행 계획으로 만들지 않는다. Phase는 루트 마스터 플랜에서 관리하고, 이 디렉터리에서는 다음 수준으로 나눈다.
+
+```text
+Phase 0
+├─ Gateway bootstrap
+├─ Service API key authentication
+├─ Gemini native pass-through
+├─ OpenAI image pass-through
+├─ Credential redaction
+└─ SDK conformance handoff
+```
+
+## 멀티레포 연결 규칙
+
+여러 저장소가 함께 변경되는 기능은 저장소마다 독립 계획을 가진다.
+
+예를 들어 Gemini SDK 검증은 다음처럼 연결한다.
+
+```text
+initiative: phase-0-gemini-sdk-e2e
+
+gateway/plans/...plan_gemini_native_passthrough.md
+conformance/plans/...plan_gemini_python_conformance.md
+```
+
+Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 않는다. 대신 필요한 공개 API 계약과 인수 조건을 명시한다.
+
+## 현재 계획 목록
+
+| ID | 상태 | 계획 | Initiative |
+|---|---|---|---|
+| `gateway-20260820-001` | accepted | [Phase 0 Gateway Bootstrap](./20260820_113825_plan_phase0_gateway_bootstrap.md) | `phase-0-native-sdk-validation` |
+
+새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
