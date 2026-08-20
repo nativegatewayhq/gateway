@@ -42,6 +42,22 @@ func TestGeminiPricingSelectorIsExplicitlyUnavailable(t *testing.T) {
 	}
 }
 
+func TestParseGeminiJSONPricingSelector(t *testing.T) {
+	selector, err := ParseGeminiJSONPricingSelector("gemini-image", []byte(`{"contents":[],"generationConfig":{"candidateCount":1,"imageConfig":{"aspectRatio":"16:9","imageSize":"2K"}}}`))
+	if err != nil || selector.Model != "gemini-image" || selector.Quantity != 1 || selector.Size != "16:9" || selector.Quality != "2K" {
+		t.Fatalf("selector=%+v error=%v", selector, err)
+	}
+	defaults, err := ParseGeminiJSONPricingSelector("gemini-image", []byte(`{"contents":[]}`))
+	if err != nil || defaults.Size != "default" || defaults.Quality != "default" {
+		t.Fatalf("defaults=%+v error=%v", defaults, err)
+	}
+	for _, body := range []string{`[]`, `{"generationConfig":null}`, `{"generationConfig":{"imageConfig":[]}}`, `{"generationConfig":{"imageConfig":{"aspectRatio":1}}}`, `{"generationConfig":{"imageConfig":{"imageSize":""}}}`, `{"contents":[],"contents":[]}`, `{"generationConfig":{"imageConfig":{},"imageConfig":{}}}`} {
+		if _, err := ParseGeminiJSONPricingSelector("gemini-image", []byte(body)); !errors.Is(err, ErrInvalidPricingSelector) {
+			t.Errorf("body %s error=%v", body, err)
+		}
+	}
+}
+
 func TestParseOpenAIMultipartPricingSelectorDiscardsFiles(t *testing.T) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)

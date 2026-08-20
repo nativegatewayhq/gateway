@@ -79,7 +79,7 @@ func TestPostgresServiceKeyAuthenticatesOpenAIImagesRoute(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(nativeBody))}, nil
 	})}
 	executor := openaiProvider.NewWithClient(registry, time.Second, client)
-	models, _ := imageoperation.NewRegistry(imageoperation.ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}})
+	models, _ := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "gpt-image-1", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}})
 	handler := NewImagesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), models, map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executor}, 1024)
 	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations?key="+raw, strings.NewReader(requestBody))
 	request.Header.Set("Content-Type", "application/json")

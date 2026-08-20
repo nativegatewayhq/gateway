@@ -5,6 +5,7 @@ package database
 import (
 	"context"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -55,6 +56,13 @@ func TestMigrateIsRepeatable(t *testing.T) {
 	}
 	if nullable != "NO" {
 		t.Fatalf("service_api_keys.project_id nullable=%s", nullable)
+	}
+	var protocolConstraint string
+	if err := pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='image_request_charges'::regclass AND conname='image_request_charges_protocol_check'`).Scan(&protocolConstraint); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(protocolConstraint, "openai") || !strings.Contains(protocolConstraint, "gemini") {
+		t.Fatalf("protocol constraint=%s", protocolConstraint)
 	}
 }
 

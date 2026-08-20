@@ -29,6 +29,75 @@ func ParseJSONPricingSelector(protocol string, body []byte) (PricingSelector, er
 	return ParseOpenAIJSONPricingSelector(body)
 }
 
+func ParseGeminiJSONPricingSelector(model string, body []byte) (PricingSelector, error) {
+	if !validModelID(model) {
+		return PricingSelector{}, ErrInvalidPricingSelector
+	}
+	root, err := parseUniqueObject(body)
+	if err != nil {
+		return PricingSelector{}, ErrInvalidPricingSelector
+	}
+	selector := PricingSelector{Model: model, Quantity: 1, Size: "default", Quality: "default"}
+	configuration, exists := root["generationConfig"]
+	if !exists {
+		return selector, nil
+	}
+	generation, err := parseUniqueObject(configuration)
+	if err != nil {
+		return PricingSelector{}, ErrInvalidPricingSelector
+	}
+	imageRaw, exists := generation["imageConfig"]
+	if !exists {
+		return selector, nil
+	}
+	imageConfig, err := parseUniqueObject(imageRaw)
+	if err != nil {
+		return PricingSelector{}, ErrInvalidPricingSelector
+	}
+	if raw, exists := imageConfig["aspectRatio"]; exists {
+		if json.Unmarshal(raw, &selector.Size) != nil || !validDimension(selector.Size) {
+			return PricingSelector{}, ErrInvalidPricingSelector
+		}
+	}
+	if raw, exists := imageConfig["imageSize"]; exists {
+		if json.Unmarshal(raw, &selector.Quality) != nil || !validDimension(selector.Quality) {
+			return PricingSelector{}, ErrInvalidPricingSelector
+		}
+	}
+	return selector, nil
+}
+
+func parseUniqueObject(body []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, ErrInvalidPricingSelector
+	}
+	values := map[string]json.RawMessage{}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, ErrInvalidPricingSelector
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, ErrInvalidPricingSelector
+		}
+		if _, duplicate := values[key]; duplicate {
+			return nil, ErrInvalidPricingSelector
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, ErrInvalidPricingSelector
+		}
+		values[key] = raw
+	}
+	if _, err := decoder.Token(); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, ErrInvalidPricingSelector
+	}
+	return values, nil
+}
+
 func ParseOpenAIJSONPricingSelector(body []byte) (PricingSelector, error) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	token, err := decoder.Token()
