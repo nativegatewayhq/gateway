@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-003
 title: Phase 0 Provider Credential Security Boundary
-status: in_progress
+status: completed
 created_at: 2026-08-20T13:07:04+09:00
-updated_at: 2026-08-20T13:12:55+09:00
+updated_at: 2026-08-20T13:21:34+09:00
 owners:
   - gateway
 initiative: phase-0-provider-credential-boundary
@@ -230,9 +230,9 @@ make integration-test
 - [x] 입력 요청 객체가 sanitizer에 의해 변경되지 않음
 - [x] 로그, 오류, JSON과 debug formatting에 credential 원문이 없음
 - [x] 정상·오류·panic·동시성 테스트가 통과함
-- [ ] formatter, vet, race test, build와 integration test가 CI에서 통과함
+- [x] formatter, vet, race test, build와 integration test가 CI에서 통과함
 - [x] README에 secret 주입 방식과 로컬 개발 주의사항이 기록됨
-- [ ] 검증 증거가 이 계획에 기록됨
+- [x] 검증 증거가 이 계획에 기록됨
 
 ## 검증 증거
 
@@ -246,7 +246,11 @@ make integration-test
   - scope mismatch와 credential unavailable이 outbound request 반환 전에 실패함
   - 입력 요청의 header와 URL이 변경되지 않음
   - 일반 formatting, JSON, 설정 오류와 process log에 credential 원문이 포함되지 않음
-- commit, pull request와 CI: 아직 게시 전
+- 구현 commit: `c15ad93` (`feat: add provider credential security boundary`)
+- Draft PR: `https://github.com/nativegatewayhq/gateway/pull/3`
+- CI:
+  - `check`: `https://github.com/nativegatewayhq/gateway/actions/runs/32331503026/job/96312903874`
+  - `validate`: `https://github.com/nativegatewayhq/gateway/actions/runs/32331503198/job/96312904461`
 
 ## Rollback 계획
 
