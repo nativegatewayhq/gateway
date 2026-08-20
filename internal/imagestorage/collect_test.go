@@ -75,7 +75,7 @@ func TestCollectorAuthorizationRejectsPrivateDNSAndUnknownOrigin(t *testing.T) {
 		t.Fatalf("private err=%v", err)
 	}
 	collector.resolver = resolverFake{addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
-	for _, raw := range []string{"https://unknown.example.com/result.png", "https://user:secret@images.example.com/result.png", "http://images.example.com/result.png", "https://127.0.0.1/result.png"} {
+	for _, raw := range []string{"https://unknown.example.com/result.png", "https://user:secret@images.example.com/result.png", "http://images.example.com/result.png", "https://images.example.com:8443/result.png", "https://127.0.0.1/result.png"} {
 		if _, _, err := collector.authorize(context.Background(), "openai", raw); !errors.Is(err, ErrFetchRejected) {
 			t.Fatalf("raw=%q err=%v", raw, err)
 		}

@@ -32,6 +32,14 @@ func TestConfigRejectsIncompleteManagedAndUnsafeEndpoints(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsUnsafeProviderFetchOriginPort(t *testing.T) {
+	config := managedTestConfig("http://127.0.0.1:9000")
+	config.FetchOrigins = map[string][]string{"openai": {"https://images.example.com:8443"}}
+	if config.Validate() == nil {
+		t.Fatal("accepted unsafe Provider fetch port")
+	}
+}
+
 func TestObjectKeyIsDeterministicAndBounded(t *testing.T) {
 	digest := sha256.Sum256([]byte("image"))
 	key, err := ObjectKey("openai", "charge_abc", 2, digest, ".png")
