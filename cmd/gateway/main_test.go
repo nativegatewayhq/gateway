@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -288,6 +289,65 @@ func TestGatewayProcessRedisLossKeepsLivenessAndFailsReadiness(t *testing.T) {
 				t.Fatalf("exit=%v logs=%s", err, output.String())
 			}
 		})
+	}
+}
+
+func TestGatewayProcessManagedStorageControlsReadiness(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	var available atomic.Bool
+	available.Store(true)
+	storage := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodHead || request.URL.Path != "/gateway-images" || request.Header.Get("Authorization") == "" {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !available.Load() {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer storage.Close()
+	executable, address := buildGateway(t), availableAddress(t)
+	command := exec.Command(executable)
+	command.Env = append(gatewayEnvironment(address),
+		"GATEWAY_IMAGE_STORAGE_MODE=managed",
+		"GATEWAY_IMAGE_STORAGE_ENDPOINT="+storage.URL,
+		"GATEWAY_IMAGE_STORAGE_REGION=auto",
+		"GATEWAY_IMAGE_STORAGE_BUCKET=gateway-images",
+		"GATEWAY_IMAGE_STORAGE_ACCESS_KEY_ID=test-access",
+		"GATEWAY_IMAGE_STORAGE_SECRET_ACCESS_KEY=test-secret",
+		"GATEWAY_IMAGE_STORAGE_CDN_BASE_URL=https://images.example.test",
+	)
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForHealth(t, "http://"+address+"/health/ready", command, &output)
+	available.Store(false)
+	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + address + "/health/ready")
+	if err != nil {
+		_ = command.Process.Kill()
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		_ = command.Process.Kill()
+		t.Fatalf("ready=%d logs=%s", response.StatusCode, output.String())
+	}
+	available.Store(true)
+	waitForHealth(t, "http://"+address+"/health/ready", command, &output)
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("exit=%v logs=%s", err, output.String())
+	}
+	if strings.Contains(output.String(), "test-secret") {
+		t.Fatal("storage secret leaked in process logs")
 	}
 }
 
