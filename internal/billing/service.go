@@ -470,6 +470,9 @@ func (service *Service) MarkReconciling(ctx context.Context, chargeID string, ob
 		if observation.Reason != ResponseUnavailable && observation.Reason != SettlementFailed && observation.Reason != StorageFailed {
 			return ErrInvalidRequest
 		}
+		if observation.Reason == StorageFailed && observation.Outcome != KnownSuccess {
+			return ErrInvalidRequest
+		}
 		canonical, headersJSON, bodyDigest, err = service.prepareSnapshot(observation.Snapshot)
 		if err != nil {
 			return err

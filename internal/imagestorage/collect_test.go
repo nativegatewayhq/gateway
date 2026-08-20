@@ -80,4 +80,23 @@ func TestCollectorAuthorizationRejectsPrivateDNSAndUnknownOrigin(t *testing.T) {
 			t.Fatalf("raw=%q err=%v", raw, err)
 		}
 	}
+	for _, address := range []string{"100.64.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "2001:db8::1"} {
+		collector.resolver = resolverFake{addresses: []netip.Addr{netip.MustParseAddr(address)}}
+		if _, _, err := collector.authorize(context.Background(), "openai", "https://images.example.com/result.png"); !errors.Is(err, ErrFetchRejected) {
+			t.Fatalf("reserved=%s err=%v", address, err)
+		}
+	}
+}
+
+func TestCollectorCanonicalizesTrailingSlashOrigin(t *testing.T) {
+	config := collectorTestConfig(t)
+	config.FetchOrigins["openai"] = []string{"https://images.example.com/"}
+	collector, err := NewCollector(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector.resolver = resolverFake{addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+	if _, _, err := collector.authorize(context.Background(), "openai", "https://images.example.com/result.png"); err != nil {
+		t.Fatalf("err=%v", err)
+	}
 }

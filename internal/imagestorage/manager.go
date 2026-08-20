@@ -220,6 +220,9 @@ func (manager *Manager) persist(ctx context.Context, input TransformInput, index
 	}
 	owner := hex.EncodeToString(ownerBytes)
 	lease := manager.config.UploadTimeout + 5*time.Second
+	if lease > 10*time.Minute {
+		lease = 10 * time.Minute
+	}
 	for {
 		claimedAsset, claimed, claimErr := manager.assets.Claim(ctx, id, owner, lease)
 		if claimErr != nil {
@@ -238,18 +241,28 @@ func (manager *Manager) persist(ctx context.Context, input TransformInput, index
 		}
 	}
 	if _, err := collected.File.Seek(0, io.SeekStart); err != nil {
-		_, _ = manager.assets.Release(context.WithoutCancel(ctx), id, owner, "persistence_failed")
+		manager.release(id, owner, "persistence_failed")
 		return "", ErrUnavailable
 	}
 	stored, err := manager.objects.Put(ctx, Object{Key: key, ContentType: collected.ContentType, Size: collected.Size, SHA256: collected.SHA256}, collected.File)
 	if err != nil {
-		_, _ = manager.assets.Release(context.WithoutCancel(ctx), id, owner, "upload_failed")
+		manager.release(id, owner, "upload_failed")
 		return "", ErrUnavailable
 	}
-	if _, err := manager.assets.MarkAvailable(context.WithoutCancel(ctx), id, owner); err != nil {
+	finishContext, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	_, finishErr := manager.assets.MarkAvailable(finishContext, id, owner)
+	finishCancel()
+	if finishErr != nil {
+		manager.release(id, owner, "persistence_failed")
 		return "", fmt.Errorf("asset persistence: %w", ErrUnavailable)
 	}
 	return stored.URL, nil
+}
+
+func (manager *Manager) release(id, owner, category string) {
+	releaseContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = manager.assets.Release(releaseContext, id, owner, category)
 }
 
 func FailureCategory(err error) string {

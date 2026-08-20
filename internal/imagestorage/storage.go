@@ -80,7 +80,7 @@ func (config Config) Validate() error {
 		}
 		for _, origin := range origins {
 			parsed, err := url.Parse(origin)
-			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 				return ErrInvalidConfig
 			}
 		}

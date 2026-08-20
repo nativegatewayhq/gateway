@@ -47,6 +47,7 @@ func NewCollector(config Config) (*Collector, error) {
 	if err := config.Validate(); err != nil || config.Mode != Managed {
 		return nil, ErrInvalidConfig
 	}
+	config.FetchOrigins = canonicalOrigins(config.FetchOrigins)
 	return &Collector{config: config, resolver: net.DefaultResolver}, nil
 }
 
@@ -177,7 +178,38 @@ func (collector *Collector) authorize(ctx context.Context, provider, raw string)
 }
 
 func unsafeAddress(address netip.Addr) bool {
-	return !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified()
+	if !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified() {
+		return true
+	}
+	for _, prefix := range reservedNetworkPrefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+var reservedNetworkPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+func canonicalOrigins(input map[string][]string) map[string][]string {
+	result := make(map[string][]string, len(input))
+	for provider, origins := range input {
+		for _, origin := range origins {
+			parsed, _ := url.Parse(origin)
+			result[provider] = append(result[provider], parsed.Scheme+"://"+parsed.Host)
+		}
+	}
+	return result
 }
 
 func validateImageType(declared, detected string) (string, string, error) {
