@@ -55,6 +55,7 @@ type RateLimitMode string
 type ProviderHealthMode string
 type ReplicateWebhookMode string
 type FalWebhookMode string
+type JobManagementMode string
 
 const (
 	BillingDisabled          BillingMode          = "disabled"
@@ -67,6 +68,8 @@ const (
 	ReplicateWebhookRequired ReplicateWebhookMode = "required"
 	FalWebhookDisabled       FalWebhookMode       = "disabled"
 	FalWebhookRequired       FalWebhookMode       = "required"
+	JobManagementDisabled    JobManagementMode    = "disabled"
+	JobManagementRequired    JobManagementMode    = "required"
 )
 
 // Config contains non-provider process settings. Provider credentials remain
@@ -122,6 +125,8 @@ type Config struct {
 	FalJWKSCacheTTL                time.Duration
 	FalJWKSRefreshCooldown         time.Duration
 	PublicBaseURL                  string
+	JobManagementMode              JobManagementMode
+	JobManagementCursorSecrets     [][]byte
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -166,6 +171,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		FalJWKSTimeout:             defaultFalJWKSTimeout,
 		FalJWKSCacheTTL:            defaultFalJWKSCacheTTL,
 		FalJWKSRefreshCooldown:     defaultFalJWKSRefresh,
+		JobManagementMode:          JobManagementDisabled,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -292,6 +298,25 @@ func Load(lookup LookupEnv) (Config, error) {
 	if err := loadFal(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
+	if value, ok := lookup("GATEWAY_JOB_MANAGEMENT_MODE"); ok {
+		cfg.JobManagementMode = JobManagementMode(strings.TrimSpace(value))
+	}
+	if cfg.JobManagementMode != JobManagementDisabled && cfg.JobManagementMode != JobManagementRequired {
+		return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_MODE: must be disabled or required")
+	}
+	if value, ok := lookup("GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS"); ok {
+		parts := strings.Split(value, ",")
+		if len(parts) < 1 || len(parts) > 2 {
+			return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS: must contain one or two base64 secrets")
+		}
+		for _, part := range parts {
+			secret, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(part))
+			if decodeErr != nil || len(secret) != 32 {
+				return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS: each secret must decode to exactly 32 bytes")
+			}
+			cfg.JobManagementCursorSecrets = append(cfg.JobManagementCursorSecrets, secret)
+		}
+	}
 	if value, ok := lookup("GATEWAY_TRUSTED_PROXY_CIDRS"); ok {
 		parts := strings.Split(value, ",")
 		if len(parts) > 128 {
@@ -332,6 +357,12 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 	if cfg.ImageStorage.Mode == imagestorage.Managed && cfg.BillingMode == BillingRequired && cfg.ReplayBodyBytes < cfg.ImageStorage.MaximumTotalBytes*4/3+1<<20 {
 		return Config{}, fmt.Errorf("GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES: must cover the managed image response limit")
+	}
+	if cfg.JobManagementMode == JobManagementRequired && len(cfg.JobManagementCursorSecrets) == 0 {
+		return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS: required when Job management is required")
+	}
+	if cfg.JobManagementMode == JobManagementRequired && !cfg.ReplicateEnabled && !cfg.FalEnabled {
+		return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_MODE: requires an asynchronous provider")
 	}
 
 	return cfg, nil

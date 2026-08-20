@@ -78,6 +78,20 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_FAL_JWKS_TIMEOUT` | `5s` | Bounded JWKS request timeout; maximum `1m` |
 | `GATEWAY_FAL_JWKS_CACHE_TTL` | `24h` | Maximum successful key cache lifetime; HTTP cache headers may shorten it |
 | `GATEWAY_FAL_JWKS_REFRESH_COOLDOWN` | `1m` | Minimum interval between signature-mismatch refresh attempts |
+| `GATEWAY_JOB_MANAGEMENT_MODE` | `disabled` | `required` enables tenant-scoped `GET /gateway/v1/jobs` and `GET /gateway/v1/jobs/{job_id}` when an asynchronous provider is enabled |
+| `GATEWAY_JOB_MANAGEMENT_CURSOR_SECRETS` | unset | One active, or active and previous, comma-separated base64-encoded 32-byte HMAC secrets for opaque pagination cursors |
+
+When Job management is enabled, a service API key can read only the asynchronous Jobs created by that exact organization, project, and key. Responses deliberately omit prompts, raw provider payloads, provider Job IDs, credentials, upstream costs, and internal ledger identities.
+
+```http
+GET /gateway/v1/jobs?protocol=fal&status=SUCCEEDED&settlement_state=SETTLED&limit=25
+Authorization: Bearer SERVICE_API_KEY
+
+GET /gateway/v1/jobs/job_...
+Authorization: Bearer SERVICE_API_KEY
+```
+
+Lists use signed opaque keyset cursors. Keep the active cursor secret first and the previous secret second during rotation; remove the previous secret only after the maximum client pagination window has elapsed.
 | `GATEWAY_PUBLIC_BASE_URL` | unset | Public HTTPS Gateway origin used for durable Prediction get/cancel URLs; loopback HTTP is accepted for local testing |
 | `GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID` | unset | Current envelope-encryption write key ID; enables the database credential control plane with the keyring settings below |
 | `GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS` | unset | Ordered comma-separated key IDs; index corresponds to `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` |
