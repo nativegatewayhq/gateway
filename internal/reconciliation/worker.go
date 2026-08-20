@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 )
 
 var ErrInvalidConfig = errors.New("invalid reconciliation configuration")
@@ -45,19 +46,34 @@ type Worker struct {
 	config    Config
 	owner     string
 	now       func() time.Time
+	results   ResultManager
+}
+
+type ResultManager interface {
+	Transform(context.Context, imagestorage.TransformInput) ([]byte, error)
 }
 
 type task struct {
-	ChargeID string
-	Outcome  billing.Outcome
-	Reason   billing.Reason
-	Snapshot billing.ResponseSnapshot
-	BodyHash [32]byte
-	Attempt  int
+	ChargeID                                 string
+	Outcome                                  billing.Outcome
+	Reason                                   billing.Reason
+	Snapshot                                 billing.ResponseSnapshot
+	BodyHash                                 [32]byte
+	Attempt                                  int
+	RequestID, Protocol, Provider, ChannelID string
 }
 
 func New(pool *pgxpool.Pool, completer Completer, config Config) (*Worker, error) {
 	return newWorker(pool, completer, config, rand.Reader, time.Now)
+}
+
+func NewWithResultManager(pool *pgxpool.Pool, completer Completer, config Config, results ResultManager) (*Worker, error) {
+	worker, err := newWorker(pool, completer, config, rand.Reader, time.Now)
+	if err != nil {
+		return nil, err
+	}
+	worker.results = results
+	return worker, nil
 }
 
 func newWorker(pool *pgxpool.Pool, completer Completer, config Config, entropy io.Reader, now func() time.Time) (*Worker, error) {
@@ -112,6 +128,34 @@ func (worker *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 			result.Manual++
 			continue
 		}
+		if task.Reason == billing.StorageFailed {
+			if worker.results == nil {
+				manual, retryErr := worker.retry(ctx, task, "storage_manager_unavailable")
+				if retryErr != nil {
+					return result, retryErr
+				}
+				if manual {
+					result.Manual++
+				} else {
+					result.Retried++
+				}
+				continue
+			}
+			managedBody, transformErr := worker.results.Transform(ctx, imagestorage.TransformInput{Protocol: task.Protocol, Provider: task.Provider, ChannelID: task.ChannelID, RequestID: task.RequestID, ChargeID: task.ChargeID, Body: task.Snapshot.Body})
+			if transformErr != nil {
+				manual, retryErr := worker.retry(ctx, task, "storage_retry_failed")
+				if retryErr != nil {
+					return result, retryErr
+				}
+				if manual {
+					result.Manual++
+				} else {
+					result.Retried++
+				}
+				continue
+			}
+			task.Snapshot.Body = managedBody
+		}
 		_, completeErr := worker.completer.Complete(ctx, task.ChargeID, task.Outcome == billing.KnownSuccess, task.Snapshot)
 		if completeErr != nil {
 			manual, err := worker.retry(ctx, task, "settlement_retry_failed")
@@ -145,8 +189,8 @@ func (worker *Worker) claim(ctx context.Context, at time.Time) ([]task, error) {
 		ORDER BY next_attempt_at,charge_id FOR UPDATE SKIP LOCKED LIMIT $2
 	) UPDATE image_charge_reconciliations reconciliation
 	SET state='LEASED',lease_owner=$3,lease_until=$4,attempt_count=attempt_count+1,updated_at=$1
-	FROM candidates WHERE reconciliation.charge_id=candidates.charge_id
-	RETURNING reconciliation.charge_id,reconciliation.outcome,reconciliation.reason,reconciliation.response_status,reconciliation.response_headers,reconciliation.response_body,reconciliation.response_body_sha256,reconciliation.attempt_count`, at, worker.config.BatchSize, worker.owner, at.Add(worker.config.Lease))
+	FROM candidates,image_request_charges charge,provider_channels channel WHERE reconciliation.charge_id=candidates.charge_id AND charge.id=reconciliation.charge_id AND channel.id=charge.channel_id
+	RETURNING reconciliation.charge_id,reconciliation.outcome,reconciliation.reason,reconciliation.response_status,reconciliation.response_headers,reconciliation.response_body,reconciliation.response_body_sha256,reconciliation.attempt_count,charge.request_id,charge.protocol,channel.provider,charge.channel_id`, at, worker.config.BatchSize, worker.owner, at.Add(worker.config.Lease))
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +200,7 @@ func (worker *Worker) claim(ctx context.Context, at time.Time) ([]task, error) {
 		var item task
 		var status *int
 		var headersJSON, body, bodyHash []byte
-		if err := rows.Scan(&item.ChargeID, &item.Outcome, &item.Reason, &status, &headersJSON, &body, &bodyHash, &item.Attempt); err != nil {
+		if err := rows.Scan(&item.ChargeID, &item.Outcome, &item.Reason, &status, &headersJSON, &body, &bodyHash, &item.Attempt, &item.RequestID, &item.Protocol, &item.Provider, &item.ChannelID); err != nil {
 			return nil, err
 		}
 		if item.Outcome != billing.Unknown {

@@ -158,11 +158,16 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		chargeBilling = billingService
-		reconciliationWorker, billingErr = reconciliation.New(pool, billingService, reconciliation.Config{
+		reconciliationConfig := reconciliation.Config{
 			Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease,
 			BaseBackoff: cfg.ReconcileBackoff, MaxBackoff: cfg.ReconcileMaxBackoff,
 			BatchSize: cfg.ReconcileBatchSize, MaxAttempts: cfg.ReconcileMaxAttempts,
-		})
+		}
+		if imageResults != nil {
+			reconciliationWorker, billingErr = reconciliation.NewWithResultManager(pool, billingService, reconciliationConfig, imageResults)
+		} else {
+			reconciliationWorker, billingErr = reconciliation.New(pool, billingService, reconciliationConfig)
+		}
 		if billingErr != nil {
 			logger.Error("gateway reconciliation initialization failed")
 			return 1

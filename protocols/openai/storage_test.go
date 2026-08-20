@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
@@ -39,7 +40,7 @@ func TestBillableImagesStoresManagedBodyBeforeCapture(t *testing.T) {
 	}
 }
 
-func TestProviderSuccessStorageFailureCapturesBoundedError(t *testing.T) {
+func TestProviderSuccessStorageFailureReconcilesWithoutRelease(t *testing.T) {
 	billing := &billingFake{}
 	results := &resultManagerFake{err: errors.New("secret storage failure")}
 	handler := NewBillableImagesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), billingAuth(), testRegistry(t), map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
@@ -47,7 +48,7 @@ func TestProviderSuccessStorageFailureCapturesBoundedError(t *testing.T) {
 	})}, 1024, billing)
 	handler.SetResultManager(results)
 	response := billableImageRequest(handler, `{"model":"gpt-image-1"}`)
-	if response.Code != http.StatusBadGateway || !billing.completeOK || billing.snapshot.Status != http.StatusBadGateway || strings.Contains(response.Body.String(), "secret") || len(billing.events) == 0 || billing.events[len(billing.events)-1] != "capture" {
-		t.Fatalf("response=%d %s complete=%v snapshot=%+v events=%v", response.Code, response.Body.String(), billing.completeOK, billing.snapshot, billing.events)
+	if response.Code != http.StatusServiceUnavailable || billing.completeOK || billing.observation.Outcome != chargebilling.KnownSuccess || billing.observation.Reason != chargebilling.StorageFailed || strings.Contains(response.Body.String(), "secret") || len(billing.events) == 0 || billing.events[len(billing.events)-1] != "reconciling" {
+		t.Fatalf("response=%d %s complete=%v observation=%+v events=%v", response.Code, response.Body.String(), billing.completeOK, billing.observation, billing.events)
 	}
 }

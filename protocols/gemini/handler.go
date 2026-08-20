@@ -312,10 +312,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
 			managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "gemini", Provider: "google", ChannelID: channelID, RequestID: requestid.FromContext(request.Context()), ChargeID: charge.ID, Body: responseBody})
 			if storageErr != nil {
-				snapshot = handler.storageErrorSnapshot()
-			} else {
-				snapshot.Body = managedBody
+				handler.reconciliationError(tracked, request.Context(), charge.ID, geminiKnownObservation(true, billing.StorageFailed, snapshot))
+				return
 			}
+			snapshot.Body = managedBody
 		}
 		completed, completeErr := handler.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, snapshot)
 		if completeErr != nil {

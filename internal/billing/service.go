@@ -81,6 +81,7 @@ const (
 
 	ResponseUnavailable Reason = "response_unavailable"
 	SettlementFailed    Reason = "settlement_failed"
+	StorageFailed       Reason = "storage_failed"
 	ExecutorTimeout     Reason = "executor_timeout"
 	ExecutorConnection  Reason = "executor_connection_lost"
 	ProviderPanic       Reason = "provider_panic"
@@ -466,7 +467,7 @@ func (service *Service) MarkReconciling(ctx context.Context, chargeID string, ob
 	var bodyDigest [32]byte
 	var err error
 	if observation.Outcome == KnownSuccess || observation.Outcome == KnownFailure {
-		if observation.Reason != ResponseUnavailable && observation.Reason != SettlementFailed {
+		if observation.Reason != ResponseUnavailable && observation.Reason != SettlementFailed && observation.Reason != StorageFailed {
 			return ErrInvalidRequest
 		}
 		canonical, headersJSON, bodyDigest, err = service.prepareSnapshot(observation.Snapshot)
