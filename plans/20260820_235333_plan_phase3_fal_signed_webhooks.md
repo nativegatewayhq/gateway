@@ -228,7 +228,8 @@ make integration-test
 - 비밀 경계: callback token은 keyed digest만 저장하고 fal request/user ID, signature, callback URL과 payload를 bounded route/log/metric label에서 제외함.
 - 로컬 검증: `make check` 통과.
 - 통합 검증: Compose PostgreSQL/Redis에서 migration, Job replay/race, Capture/Release와 Replicate/fal/OpenAI/Gemini 회귀를 포함한 `make integration-test` 통과.
-- PR 및 최종 GitHub Actions run은 본 구현 PR 병합 직전에 기록함.
+- PR: https://github.com/nativegatewayhq/gateway/pull/34
+- CI: GitHub Actions `check`(run `32384523604`) 및 `Plan policy / validate`(run `32384523652`) 통과.
 
 ## Rollback 계획
 
