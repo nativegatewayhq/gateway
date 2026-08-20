@@ -81,6 +81,7 @@ type Config struct {
 	ShutdownTimeout                time.Duration
 	DatabaseURL                    string
 	GoogleTimeout                  time.Duration
+	GeminiStreamIdleTimeout        time.Duration
 	GeminiBodyBytes                int64
 	GeminiLLMModels                []string
 	GeminiLLMModelLimits           map[string]ChatModelLimit
@@ -151,6 +152,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		LogLevel:                   slog.LevelInfo,
 		ShutdownTimeout:            defaultShutdownTimeout,
 		GoogleTimeout:              defaultGoogleTimeout,
+		GeminiStreamIdleTimeout:    30 * time.Second,
 		GeminiBodyBytes:            defaultGeminiBodyBytes,
 		ImagesTimeout:              defaultImagesTimeout,
 		ImagesBodyBytes:            defaultImagesBodyBytes,
@@ -223,6 +225,13 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_GOOGLE_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
 		}
 		cfg.GoogleTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_GEMINI_STREAM_IDLE_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_GEMINI_STREAM_IDLE_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.GeminiStreamIdleTimeout = duration
 	}
 	if value, ok := lookup("GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES"); ok {
 		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)

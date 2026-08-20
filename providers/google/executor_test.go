@@ -90,6 +90,63 @@ func TestGenerateContentBuildsTrustedRequest(t *testing.T) {
 	}
 }
 
+func TestStreamGenerateContentBuildsNativeStreamingRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/proxy-prefix/v1beta/models/gemini-2.5-pro:streamGenerateContent" || request.URL.Query().Get("alt") != "sse" {
+			t.Fatalf("URL=%s", request.URL.String())
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "data: {}\n\n")
+	}))
+	defer server.Close()
+	executor := executorForServer(t, server, time.Second, googleRegistry(t, true))
+	response, err := executor.GenerateContent(context.Background(), GenerateContentRequest{Model: "gemini-2.5-pro", Action: "streamGenerateContent", Streaming: true, Query: url.Values{"alt": {"sse"}}, Body: strings.NewReader(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || string(body) != "data: {}\n\n" {
+		t.Fatalf("body=%q err=%v", body, err)
+	}
+}
+
+func TestStreamingBodyEnforcesIdleTimeout(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	body := &idleReadCloser{ReadCloser: reader, timeout: 10 * time.Millisecond}
+	defer body.Close()
+	buffer := make([]byte, 1)
+	if _, err := body.Read(buffer); !errors.Is(err, ErrStreamIdle) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestStreamingRequestTimeoutEndsAtHeaders(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {}\n\n")), Request: request}, nil
+	})}
+	executor := NewWithClient(googleRegistry(t, true), 10*time.Millisecond, client)
+	response, err := executor.GenerateContent(context.Background(), GenerateContentRequest{Model: "model", Action: "streamGenerateContent", Streaming: true, Body: strings.NewReader(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	time.Sleep(20 * time.Millisecond)
+	if body, readErr := io.ReadAll(response.Body); readErr != nil || string(body) != "data: {}\n\n" {
+		t.Fatalf("body=%q err=%v", body, readErr)
+	}
+
+	blocking := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}
+	executor = NewWithClient(googleRegistry(t, true), 10*time.Millisecond, blocking)
+	if _, err = executor.GenerateContent(context.Background(), GenerateContentRequest{Model: "model", Action: "streamGenerateContent", Streaming: true, Body: strings.NewReader(`{}`)}); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("header timeout error=%v", err)
+	}
+}
+
 func TestGenerateContentDoesNotFollowRedirect(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32

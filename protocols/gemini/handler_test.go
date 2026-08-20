@@ -150,14 +150,16 @@ func TestManagedLLMGenerateContentFailsBeforeBodyBillingAndProvider(t *testing.T
 }
 
 type geminiLLMBillingFake struct {
-	beginRequest chatbilling.BeginRequest
-	usage        chatpricing.Usage
-	snapshot     chargebilling.ResponseSnapshot
-	charge       chatbilling.Charge
-	reason       string
-	beginCalls   int
-	replay       bool
-	released     bool
+	beginRequest    chatbilling.BeginRequest
+	usage           chatpricing.Usage
+	snapshot        chargebilling.ResponseSnapshot
+	charge          chatbilling.Charge
+	reason          string
+	beginCalls      int
+	replay          bool
+	released        bool
+	streamComplete  bool
+	streamReconcile bool
 }
 
 func (fake *geminiLLMBillingFake) Begin(_ context.Context, request chatbilling.BeginRequest) (chatbilling.Charge, error) {
@@ -188,6 +190,18 @@ func (fake *geminiLLMBillingFake) MarkReconciling(_ context.Context, _ string, r
 }
 func (fake *geminiLLMBillingFake) MarkReconcilingUsage(_ context.Context, _ string, reason string, _ *chargebilling.ResponseSnapshot, usage chatpricing.Usage) error {
 	fake.reason, fake.usage = reason, usage
+	return nil
+}
+func (fake *geminiLLMBillingFake) CompleteStreamUsage(_ context.Context, _ string, usage chatpricing.Usage, _ [32]byte) (chatbilling.Charge, error) {
+	fake.streamComplete, fake.usage = true, usage
+	return chatbilling.Charge{}, nil
+}
+func (fake *geminiLLMBillingFake) MarkStreamReconcilingUsage(_ context.Context, _ string, usage chatpricing.Usage, _ [32]byte) error {
+	fake.streamReconcile, fake.usage = true, usage
+	return nil
+}
+func (fake *geminiLLMBillingFake) MarkStreamReconciling(_ context.Context, _ string, reason, _, _ string) error {
+	fake.streamReconcile, fake.reason = true, reason
 	return nil
 }
 

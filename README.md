@@ -96,8 +96,9 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS` | unset | Ordered comma-separated key IDs; index corresponds to `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` |
 | `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` | unset | Base64-encoded 32-byte master key injected by the deployment secret manager; keep previous keys while their ciphertext exists |
 | `GATEWAY_GOOGLE_REQUEST_TIMEOUT` | `2m` | Google request timeout; maximum `10m` |
+| `GATEWAY_GEMINI_STREAM_IDLE_TIMEOUT` | `30s` | Maximum silence between Gemini SSE reads; maximum `10m` |
 | `GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES` | `33554432` | Positive Gemini body limit up to 32 MiB |
-| `GATEWAY_GEMINI_LLM_MODELS` | unset | Comma-separated exact Gemini LLM model IDs enabled for native non-streaming `generateContent` |
+| `GATEWAY_GEMINI_LLM_MODELS` | unset | Comma-separated exact Gemini LLM model IDs enabled for native `generateContent` and `streamGenerateContent` |
 | `GATEWAY_GEMINI_LLM_MODEL_LIMITS` | unset | Comma-separated `model:maximum_input:maximum_output` token bounds; required for every enabled Gemini LLM model when billing is required |
 | `GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT` | `2m` | OpenAI/xAI image request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES` | `1048576` | Positive OpenAI Images JSON body limit up to 1 MiB |
@@ -155,13 +156,15 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
-## Gemini LLM generateContent
+## Gemini LLM generateContent and streaming
 
 Set `GATEWAY_GEMINI_LLM_MODELS` to enable exact native Gemini LLM models. BYOK requests and Google error responses remain native JSON. In billing-required mode every model needs a `GATEWAY_GEMINI_LLM_MODEL_LIMITS` entry, and requests must contain a positive `generationConfig.maxOutputTokens` within that limit.
 
 Publish a protocol-isolated price with `gateway-chat-price -protocol gemini -operation chat.completions`. Before dispatch, the Gateway reserves the request-byte input upper bound plus the requested output bound across Wallet, quota, and Google channel spend cap. Successful settlement strictly validates `usageMetadata`: cached tokens are priced as a subset of prompt input, tool-use prompt tokens use the input rate, and thought tokens use the output rate without double counting.
 
 Confirmed non-2xx responses release the reservation. Timeout, connection loss, truncated responses, missing/invalid/excess usage, and settlement failure retain it for durable reconciliation. `Idempotency-Key` is isolated by protocol and operation and replays the stored native response without another Provider call or Ledger mutation. Prompts, system instructions, tool payloads, candidates, and thought content are never stored for billing.
+
+`POST /v1beta/models/{model}:streamGenerateContent?alt=sse` relays Google native SSE bytes with bounded backpressure. Managed streams use the same maximum-cost reservation, then Capture only after a clean terminal frame with strict cumulative `usageMetadata`. Streaming transcripts are never retained or replayed. Client disconnect, write failure, upstream reset or idle timeout, malformed events, and missing terminal usage keep the reservation for reconciliation; only a confirmed HTTP non-2xx before the stream starts releases it.
 
 ```bash
 gateway-chat-price \

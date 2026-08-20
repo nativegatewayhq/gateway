@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-044
 title: Phase 4 Gemini Native SSE Streaming and Disconnect Settlement
-status: proposed
+status: completed
 created_at: 2026-08-21T19:00:00+09:00
-updated_at: 2026-08-21T19:00:00+09:00
+updated_at: 2026-08-21T21:00:00+09:00
 owners:
   - gateway
 initiative: phase-4-gemini-streaming-settlement
@@ -183,21 +183,29 @@ go test -tags=sdkconformance ./protocols/gemini -run TestOfficialGeminiLLMStream
 
 ## 완료 조건
 
-- [ ] 공식 Google Gen AI Python/JavaScript SDK가 native Gemini SSE를 소비함
-- [ ] Provider dispatch 전에 Wallet/quota/spend cap 최대 비용이 원자적으로 예약됨
-- [ ] valid final cumulative usage가 exact token 금액으로 exactly-once Capture됨
-- [ ] disconnect/timeout/missing·invalid usage가 자동 Release되지 않고 reconciliation에 보존됨
-- [ ] confirmed pre-stream non-2xx만 native snapshot과 함께 Release됨
-- [ ] recoverable settlement failure가 worker로 복구되고 ambiguous 결과는 manual review로 수렴함
-- [ ] streaming idempotency가 Provider redispatch와 Ledger 중복을 방지함
-- [ ] relay가 native SSE bytes를 유지하고 bounded backpressure/cancellation로 동작함
-- [ ] secret, prompt, tool, candidate, thought와 high-cardinality identity가 노출되지 않음
-- [ ] 전체 unit/race/integration/공식 SDK/장애 회귀가 통과함
-- [ ] README와 멀티레포 handoff 및 재현 가능한 검증 증거가 갱신됨
+- [x] 공식 Google Gen AI Python/JavaScript SDK가 native Gemini SSE를 소비함
+- [x] Provider dispatch 전에 Wallet/quota/spend cap 최대 비용이 원자적으로 예약됨
+- [x] valid final cumulative usage가 exact token 금액으로 exactly-once Capture됨
+- [x] disconnect/timeout/missing·invalid usage가 자동 Release되지 않고 reconciliation에 보존됨
+- [x] confirmed pre-stream non-2xx만 native snapshot과 함께 Release됨
+- [x] recoverable settlement failure가 worker로 복구되고 ambiguous 결과는 manual review로 수렴함
+- [x] streaming idempotency가 Provider redispatch와 Ledger 중복을 방지함
+- [x] relay가 native SSE bytes를 유지하고 bounded backpressure/cancellation로 동작함
+- [x] secret, prompt, tool, candidate, thought와 high-cardinality identity가 노출되지 않음
+- [x] 전체 unit/race/integration/공식 SDK/장애 회귀가 통과함
+- [x] README와 멀티레포 handoff 및 재현 가능한 검증 증거가 갱신됨
 
 ## 검증 증거
 
-구현 PR에서 commit, CI run, fresh DB migration, 공식 SDK 버전, 필수 명령과 결과를 기록한다.
+- 구현 commit `cf798ea`, PR [#56](https://github.com/nativegatewayhq/gateway/pull/56)
+- GitHub `check`와 plan-policy `validate` 통과: [Actions run 32410083475](https://github.com/nativegatewayhq/gateway/actions/runs/32410083475), [Actions run 32410083436](https://github.com/nativegatewayhq/gateway/actions/runs/32410083436)
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check`: gofmt, vet, 전체 race unit test와 모든 binary build 통과
+- fresh PostgreSQL `gateway_plan044`에 migration `000038_gemini_streaming_settlement.sql` 적용 후, 격리된 Redis DB 12에서 `GOFLAGS=-p=1 make integration-test` 전체 통과
+- `go test -tags=sdkconformance ./protocols/gemini -run TestOfficialGeminiLLMStreamingSDKs -count=1` 통과
+  - `google-genai` Python 2.19.0 sync/async stream
+  - `@google/genai` JavaScript 2.18.0 async iterator와 AbortSignal
+- CRLF/LF, comment, multiline data, unknown field, cumulative usage regression, duplicate key, truncated event, non-2xx Release, downstream write failure, header/idle timeout과 transcript-free replay 회귀 통과
+- Dashboard, Cloud와 Conformance에는 delivery mode, terminal category, timeout과 SDK fixture 계약을 `affected_repos` handoff로 남겼다.
 
 ## Rollback 계획
 
