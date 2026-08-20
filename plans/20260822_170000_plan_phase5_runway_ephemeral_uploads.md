@@ -220,6 +220,7 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/r
 
 ## 검증 증거
 
+- 구현 PR: `#73`, merge commit `f2f55aa` (`feat: add tenant-bound Runway uploads`)
 - `GOCACHE=/private/tmp/gateway-go-cache make check` 통과: format, vet, 전체 race unit test와 binary build.
 - fresh PostgreSQL `gateway_plan052` 및 격리 Redis DB 14에서 전체 `make integration-test` 통과. migration 000001–000046과 기존 Billing/Job 회귀 포함.
 - `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/runway -count=1` 통과.
