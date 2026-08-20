@@ -125,6 +125,33 @@ func TestAnthropicFourAxisSettlementIsProtocolIsolated(t *testing.T) {
 	}
 }
 
+func TestAnthropicStreamSettlementStoresFourAxisTerminalEvidence(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	_, err := prices.Publish(ctx, chatpricing.Price{Protocol: "anthropic", Operation: "messages.create", ChannelID: "channel_00000000000000000000000000000006", Model: "claude-stream", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 1_000_000, CachedInputSale: 1_000_000, CacheWriteCost: 2_000_000, CacheWriteSale: 3_000_000, OutputCost: 4_000_000, OutputSale: 5_000_000}}, "anthropic-stream-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := BeginRequest{Protocol: "anthropic", Operation: "messages.create", RequestID: "anthropic-stream-request", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "claude-stream", ChannelID: "channel_00000000000000000000000000000006", MaximumInputTokens: 100, MaximumOutputTokens: 50, DeliveryMode: "stream"}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := chatpricing.Usage{PromptTokens: 10, CachedInputTokens: 3, CacheWriteTokens: 2, CompletionTokens: 4}
+	digest := [32]byte{47}
+	settled, err := service.CompleteStreamUsage(ctx, charge.ID, usage, digest)
+	if err != nil || settled.CapturedSale != 39 {
+		t.Fatalf("settled=%+v err=%v", settled, err)
+	}
+	var schema string
+	var writes int64
+	var stored []byte
+	if err = pool.QueryRow(ctx, `SELECT schema_version,cache_write_tokens,terminal_event_sha256 FROM chat_usage_evidence WHERE charge_id=$1`, charge.ID).Scan(&schema, &writes, &stored); err != nil || schema != "anthropic-stream-usage-v1" || writes != 2 || !bytes.Equal(stored, digest[:]) {
+		t.Fatalf("schema=%s writes=%d digest=%x err=%v", schema, writes, stored, err)
+	}
+}
+
 func TestResponsesOperationPriceSettlementAndEvidenceAreIsolated(t *testing.T) {
 	service, pool := chatBillingFixture(t)
 	ctx := context.Background()

@@ -1,9 +1,9 @@
 ---
 id: gateway-20260822-047
 title: Phase 4 Anthropic Messages Native SSE and Disconnect Settlement
-status: proposed
+status: completed
 created_at: 2026-08-22T01:30:00+09:00
-updated_at: 2026-08-22T01:30:00+09:00
+updated_at: 2026-08-22T03:20:00+09:00
 owners:
   - gateway
 initiative: phase-4-anthropic-messages-streaming-settlement
@@ -185,20 +185,25 @@ go test -tags=sdkconformance ./protocols/anthropic -run TestOfficialAnthropicStr
 
 ## 완료 조건
 
-- [ ] 공식 Anthropic Python sync/async 및 TypeScript SDK가 native SSE를 소비함
-- [ ] valid SSE bytes와 text/tool/future events가 변형 없이 relay됨
-- [ ] input/cache-write/cache-read/output usage와 message_stop이 정확히 capture됨
-- [ ] Provider non-2xx만 release되고 불확실 stream은 reconciliation됨
-- [ ] client disconnect가 upstream 취소 및 exactly-once evidence 저장을 보장함
-- [ ] response-header/idle timeout과 body/event bounds가 독립적으로 동작함
-- [ ] stream event/content/key가 log·metric·trace·response header로 유출되지 않음
-- [ ] 동시 stream에서 Wallet/ledger/health 불변식이 유지됨
-- [ ] 기존 Anthropic non-streaming 및 OpenAI/Gemini stream 회귀가 통과함
-- [ ] README, migration, multi-repo handoff와 검증 증거가 갱신됨
+- [x] 공식 Anthropic Python sync/async 및 TypeScript SDK가 native SSE를 소비함
+- [x] valid SSE bytes와 text/tool/future events가 변형 없이 relay됨
+- [x] input/cache-write/cache-read/output usage와 message_stop이 정확히 capture됨
+- [x] Provider non-2xx만 release되고 불확실 stream은 reconciliation됨
+- [x] client disconnect가 upstream 취소 및 exactly-once evidence 저장을 보장함
+- [x] response-header/idle timeout과 body/event bounds가 독립적으로 동작함
+- [x] stream event/content/key가 log·metric·trace·response header로 유출되지 않음
+- [x] 동시 stream에서 Wallet/ledger/health 불변식이 유지됨
+- [x] 기존 Anthropic non-streaming 및 OpenAI/Gemini stream 회귀가 통과함
+- [x] README, migration, multi-repo handoff와 검증 증거가 갱신됨
 
 ## 검증 증거
 
-구현 PR에서 commit, CI run, 공식 SDK 버전, fault fixture, migration DB와 필수 명령 결과를 기록한다.
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- fresh PostgreSQL `gateway_plan047`, Redis DB 15에서 `GOFLAGS=-p=1 make integration-test` 통과
+- `go test -tags=sdkconformance ./protocols/anthropic -run TestOfficialAnthropic -v` 통과
+- 공식 SDK Anthropic Python `0.68.0` sync/async `messages.stream`, `@anthropic-ai/sdk` `0.68.0` `messages.stream` 검증
+- byte preservation, four-axis cumulative usage, malformed lifecycle, error event, missing terminal, idle timeout과 exactly-once terminal evidence fixture 통과
+- 구현 PR 및 GitHub CI run은 PR 생성 후 기록한다.
 
 ## Rollback 계획
 

@@ -292,9 +292,9 @@ func run(stdout, stderr io.Writer) int {
 	if len(cfg.AnthropicMessagesModels) > 0 {
 		var handler *anthropicProtocol.Handler
 		if anthropicChargeBilling == nil {
-			handler = anthropicProtocol.NewHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, false)
+			handler = anthropicProtocol.NewHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout, cfg.AnthropicStreamIdleTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, false)
 		} else {
-			handler = anthropicProtocol.NewBillableHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, anthropicChargeBilling)
+			handler = anthropicProtocol.NewBillableHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout, cfg.AnthropicStreamIdleTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, anthropicChargeBilling)
 		}
 		handler.SetTelemetry(telemetryRuntime.Recorder)
 		anthropicHandler = handler

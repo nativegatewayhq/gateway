@@ -98,6 +98,7 @@ type Config struct {
 	ResponsesStreamIdleTimeout     time.Duration
 	ResponsesBodyBytes             int64
 	AnthropicTimeout               time.Duration
+	AnthropicStreamIdleTimeout     time.Duration
 	AnthropicBodyBytes             int64
 	AnthropicMessagesModels        []string
 	AnthropicMessagesModelLimits   map[string]ChatModelLimit
@@ -170,6 +171,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ResponsesStreamIdleTimeout:   30 * time.Second,
 		ResponsesBodyBytes:           defaultChatBodyBytes,
 		AnthropicTimeout:             defaultImagesTimeout,
+		AnthropicStreamIdleTimeout:   30 * time.Second,
 		AnthropicBodyBytes:           defaultChatBodyBytes,
 		AnthropicMessagesModelLimits: map[string]ChatModelLimit{},
 		ImageEditsBodyBytes:          defaultImageEditsBodyBytes,
@@ -369,6 +371,13 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
 		}
 		cfg.AnthropicTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_ANTHROPIC_STREAM_IDLE_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_STREAM_IDLE_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.AnthropicStreamIdleTimeout = duration
 	}
 	if value, ok := lookup("GATEWAY_ANTHROPIC_MAX_BODY_BYTES"); ok {
 		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)

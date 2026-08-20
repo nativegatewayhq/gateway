@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -50,6 +51,27 @@ func TestCreateMessageRejectsRedirect(t *testing.T) {
 		t.Fatalf("response=%v err=%v", response, err)
 	}
 	_ = response.Body.Close()
+}
+
+func TestStreamingBodyEnforcesIdleTimeout(t *testing.T) {
+	registry, _ := providercredentials.Load(func(key string) (string, bool) { return "provider-secret", key == "GATEWAY_ANTHROPIC_API_KEY" })
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: reader}, nil
+	})}
+	origin, _ := url.Parse("https://api.anthropic.test")
+	executor := newExecutor(origin, client, registry, time.Second)
+	executor.streamIdle = time.Millisecond
+	channel, _ := providercredentials.LegacyChannel(providercredentials.Anthropic)
+	response, err := executor.CreateMessage(context.Background(), MessagesRequest{ChannelID: channel, Version: "2023-06-01", Body: strings.NewReader(`{}`), Streaming: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if _, err = response.Body.Read(make([]byte, 1)); !errors.Is(err, ErrStreamIdle) {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

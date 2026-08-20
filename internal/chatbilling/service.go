@@ -232,7 +232,7 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		}
 		return Charge{}, err
 	}
-	if !((charge.Protocol == "openai" && (charge.Operation == "chat.completions" || charge.Operation == "responses.create")) || (charge.Protocol == "gemini" && charge.Operation == "chat.completions")) || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
+	if !((charge.Protocol == "openai" && (charge.Operation == "chat.completions" || charge.Operation == "responses.create")) || (charge.Protocol == "gemini" && charge.Operation == "chat.completions") || (charge.Protocol == "anthropic" && charge.Operation == "messages.create")) || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
 		return Charge{}, ErrInvalid
 	}
 	amounts, err := chatpricing.Calculate(charge.Rates, usage)
@@ -253,6 +253,8 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		operationKey = "responses.create:stream:capture:" + id
 	} else if charge.Protocol == "gemini" {
 		operationKey = "gemini:chat.completions:stream:capture:" + id
+	} else if charge.Protocol == "anthropic" {
+		operationKey = "anthropic:messages.create:stream:capture:" + id
 	}
 	if _, err = s.wallet.CaptureInTx(ctx, tx, charge.ReservationID, amounts.Sale, operationKey); err != nil {
 		return Charge{}, err
@@ -272,6 +274,8 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		schemaVersion = "openai-responses-stream-usage-v1"
 	} else if charge.Protocol == "gemini" {
 		schemaVersion = "gemini-stream-usage-v1"
+	} else if charge.Protocol == "anthropic" {
+		schemaVersion = "anthropic-stream-usage-v1"
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,cache_write_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,schema_version,body_sha256,delivery_mode,terminal_event_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'stream',$9) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, schemaVersion, terminalDigest[:])
 	if err != nil {
