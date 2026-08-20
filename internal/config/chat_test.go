@@ -34,7 +34,7 @@ func TestOpenAIChatConfiguration(t *testing.T) {
 	}
 }
 
-func TestResponsesConfigurationFailsClosedWithBilling(t *testing.T) {
+func TestResponsesConfigurationRequiresLimitsWithBilling(t *testing.T) {
 	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_OPENAI_RESPONSES_MODELS": "gpt-4.1", "GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT": "40s", "GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES": "4096"}
 	lookup := func(key string) (string, bool) { v, ok := values[key]; return v, ok }
 	cfg, err := Load(lookup)
@@ -43,6 +43,10 @@ func TestResponsesConfigurationFailsClosedWithBilling(t *testing.T) {
 	}
 	values["GATEWAY_BILLING_MODE"] = "required"
 	if _, err = Load(lookup); err == nil {
-		t.Fatal("managed Responses accepted without settlement")
+		t.Fatal("managed Responses accepted without limits")
+	}
+	values["GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS"] = "gpt-4.1:128000:16384"
+	if cfg, err = Load(lookup); err != nil || cfg.OpenAIResponsesModelLimits["gpt-4.1"].MaximumOutputTokens != 16384 {
+		t.Fatalf("paid cfg=%+v err=%v", cfg, err)
 	}
 }

@@ -33,7 +33,7 @@ type Price struct {
 	EffectiveUntil                                      *time.Time
 }
 type Request struct {
-	ChannelID, Model                        string
+	ChannelID, Operation, Model             string
 	MaximumInputTokens, MaximumOutputTokens int64
 	At                                      time.Time
 }
@@ -66,12 +66,12 @@ func (s *Service) Publish(ctx context.Context, p Price, key string) (Price, erro
 		return Price{}, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "chat-price:"+key); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "token-price:"+p.Operation+":"+key); err != nil {
 		return Price{}, err
 	}
 	var existing Price
 	existing.Rates = Rates{}
-	err = tx.QueryRow(ctx, selectPrice+` JOIN chat_token_price_publications pub ON pub.price_id=p.id WHERE pub.publication_key=$1`, key).Scan(scanPrice(&existing)...)
+	err = tx.QueryRow(ctx, selectPrice+` JOIN chat_token_price_publications pub ON pub.price_id=p.id WHERE pub.operation=$1 AND pub.publication_key=$2`, p.Operation, key).Scan(scanPrice(&existing)...)
 	if err == nil {
 		if !samePrice(existing, p) {
 			return Price{}, ErrConflict
@@ -85,11 +85,11 @@ func (s *Service) Publish(ctx context.Context, p Price, key string) (Price, erro
 	if err != nil {
 		return Price{}, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_token_prices(id,channel_id,protocol,operation,model,currency,input_cost_per_million,input_sale_per_million,cached_input_cost_per_million,cached_input_sale_per_million,output_cost_per_million,output_sale_per_million,effective_from,effective_until) VALUES($1,$2,'openai','chat.completions',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, p.ID, p.ChannelID, p.Model, p.Currency, p.Rates.InputCost, p.Rates.InputSale, p.Rates.CachedInputCost, p.Rates.CachedInputSale, p.Rates.OutputCost, p.Rates.OutputSale, p.EffectiveFrom, p.EffectiveUntil)
+	_, err = tx.Exec(ctx, `INSERT INTO chat_token_prices(id,channel_id,protocol,operation,model,currency,input_cost_per_million,input_sale_per_million,cached_input_cost_per_million,cached_input_sale_per_million,output_cost_per_million,output_sale_per_million,effective_from,effective_until) VALUES($1,$2,'openai',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, p.ID, p.ChannelID, p.Operation, p.Model, p.Currency, p.Rates.InputCost, p.Rates.InputSale, p.Rates.CachedInputCost, p.Rates.CachedInputSale, p.Rates.OutputCost, p.Rates.OutputSale, p.EffectiveFrom, p.EffectiveUntil)
 	if err != nil {
 		return Price{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO chat_token_price_publications(publication_key,price_id) VALUES($1,$2)`, key, p.ID); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO chat_token_price_publications(operation,publication_key,price_id) VALUES($1,$2,$3)`, p.Operation, key, p.ID); err != nil {
 		return Price{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -112,6 +112,9 @@ type rowQuerier interface {
 }
 
 func (s *Service) estimate(ctx context.Context, q rowQuerier, r Request) (Estimate, error) {
+	if r.Operation == "" {
+		r.Operation = "chat.completions"
+	}
 	if !validID(r.ChannelID, "channel_") || !validText(r.Model, 200) || r.MaximumInputTokens < 1 || r.MaximumOutputTokens < 1 {
 		return Estimate{}, ErrInvalid
 	}
@@ -119,7 +122,7 @@ func (s *Service) estimate(ctx context.Context, q rowQuerier, r Request) (Estima
 		r.At = s.now().UTC()
 	}
 	var p Price
-	err := q.QueryRow(ctx, selectPrice+` JOIN provider_channels c ON c.id=p.channel_id WHERE p.channel_id=$1 AND p.protocol='openai' AND p.operation='chat.completions' AND p.model=$2 AND c.status='active' AND p.effective_from<=$3 AND (p.effective_until IS NULL OR p.effective_until>$3)`, r.ChannelID, r.Model, r.At).Scan(scanPrice(&p)...)
+	err := q.QueryRow(ctx, selectPrice+` JOIN provider_channels c ON c.id=p.channel_id WHERE p.channel_id=$1 AND p.protocol='openai' AND p.operation=$2 AND p.model=$3 AND c.status='active' AND p.effective_from<=$4 AND (p.effective_until IS NULL OR p.effective_until>$4)`, r.ChannelID, r.Operation, r.Model, r.At).Scan(scanPrice(&p)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Estimate{}, ErrUnavailable
 	}
@@ -210,7 +213,9 @@ func scanPrice(p *Price) []any {
 func canonical(p Price) Price {
 	p.ID = ""
 	p.Protocol = "openai"
-	p.Operation = "chat.completions"
+	if p.Operation == "" {
+		p.Operation = "chat.completions"
+	}
 	p.Currency = ledger.Currency
 	p.EffectiveFrom = p.EffectiveFrom.UTC().Truncate(time.Microsecond)
 	if p.EffectiveUntil != nil {
@@ -220,10 +225,10 @@ func canonical(p Price) Price {
 	return p
 }
 func validPrice(p Price) bool {
-	return validID(p.ChannelID, "channel_") && validText(p.Model, 200) && p.Currency == ledger.Currency && p.EffectiveFrom != time.Time{} && (p.EffectiveUntil == nil || p.EffectiveUntil.After(p.EffectiveFrom)) && p.Rates.InputCost >= 0 && p.Rates.InputSale > 0 && p.Rates.CachedInputCost >= 0 && p.Rates.CachedInputSale > 0 && p.Rates.OutputCost >= 0 && p.Rates.OutputSale > 0 && p.Rates.InputSale >= p.Rates.InputCost && p.Rates.CachedInputSale >= p.Rates.CachedInputCost && p.Rates.OutputSale >= p.Rates.OutputCost
+	return (p.Operation == "chat.completions" || p.Operation == "responses.create") && validID(p.ChannelID, "channel_") && validText(p.Model, 200) && p.Currency == ledger.Currency && p.EffectiveFrom != time.Time{} && (p.EffectiveUntil == nil || p.EffectiveUntil.After(p.EffectiveFrom)) && p.Rates.InputCost >= 0 && p.Rates.InputSale > 0 && p.Rates.CachedInputCost >= 0 && p.Rates.CachedInputSale > 0 && p.Rates.OutputCost >= 0 && p.Rates.OutputSale > 0 && p.Rates.InputSale >= p.Rates.InputCost && p.Rates.CachedInputSale >= p.Rates.CachedInputCost && p.Rates.OutputSale >= p.Rates.OutputCost
 }
 func samePrice(a, b Price) bool {
-	return a.ChannelID == b.ChannelID && a.Model == b.Model && a.Rates == b.Rates && a.EffectiveFrom.Equal(b.EffectiveFrom) && ((a.EffectiveUntil == nil && b.EffectiveUntil == nil) || (a.EffectiveUntil != nil && b.EffectiveUntil != nil && a.EffectiveUntil.Equal(*b.EffectiveUntil)))
+	return a.ChannelID == b.ChannelID && a.Operation == b.Operation && a.Model == b.Model && a.Rates == b.Rates && a.EffectiveFrom.Equal(b.EffectiveFrom) && ((a.EffectiveUntil == nil && b.EffectiveUntil == nil) || (a.EffectiveUntil != nil && b.EffectiveUntil != nil && a.EffectiveUntil.Equal(*b.EffectiveUntil)))
 }
 func validText(v string, n int) bool { return v != "" && len(v) <= n && strings.TrimSpace(v) == v }
 func validID(v, prefix string) bool {

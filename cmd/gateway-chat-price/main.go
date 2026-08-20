@@ -20,6 +20,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	flags := flag.NewFlagSet("gateway-chat-price", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	channel := flags.String("channel-id", "", "Provider channel ID")
+	operation := flags.String("operation", "chat.completions", "OpenAI operation: chat.completions or responses.create")
 	model := flags.String("model", "", "logical OpenAI Chat model")
 	publication := flags.String("publication-key", "", "idempotent publication key")
 	effective := flags.String("effective-from", "", "RFC3339 effective time")
@@ -73,7 +74,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		_, _ = fmt.Fprintln(stderr, "chat pricing configuration invalid")
 		return 1
 	}
-	price, err := service.Publish(ctx, chatpricing.Price{ChannelID: *channel, Model: *model, EffectiveFrom: at, Rates: chatpricing.Rates{InputCost: ic, InputSale: is, CachedInputCost: cc, CachedInputSale: cs, OutputCost: oc, OutputSale: osale}}, *publication)
+	price, err := service.Publish(ctx, chatpricing.Price{ChannelID: *channel, Operation: *operation, Model: *model, EffectiveFrom: at, Rates: chatpricing.Rates{InputCost: ic, InputSale: is, CachedInputCost: cc, CachedInputSale: cs, OutputCost: oc, OutputSale: osale}}, *publication)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "chat price publication failed")
 		return 1

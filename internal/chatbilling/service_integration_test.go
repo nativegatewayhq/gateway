@@ -93,10 +93,39 @@ func TestReserveUsageSettlementAndReplayAreExactlyOnce(t *testing.T) {
 		t.Fatalf("wallet=%d/%d err=%v", available, reserved, err)
 	}
 	var captures, evidence int
-	_ = pool.QueryRow(ctx, `SELECT count(*) FROM wallet_operations WHERE operation_key=$1`, "chat-capture:"+charge.ID).Scan(&captures)
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM wallet_operations WHERE operation_key=$1`, "chat.completions:capture:"+charge.ID).Scan(&captures)
 	_ = pool.QueryRow(ctx, `SELECT count(*) FROM chat_usage_evidence WHERE charge_id=$1`, charge.ID).Scan(&evidence)
 	if captures != 1 || evidence != 1 {
 		t.Fatalf("captures=%d evidence=%d", captures, evidence)
+	}
+}
+
+func TestResponsesOperationPriceSettlementAndEvidenceAreIsolated(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	_, err := prices.Publish(ctx, chatpricing.Price{Operation: "responses.create", ChannelID: "channel_00000000000000000000000000000001", Model: "gpt-4.1", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 2_000_000, InputSale: 3_000_000, CachedInputCost: 1_000_000, CachedInputSale: 2_000_000, OutputCost: 4_000_000, OutputSale: 5_000_000}}, "responses-test-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := BeginRequest{Operation: "responses.create", RequestID: "responses-request", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "gpt-4.1", ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "responses-idempotency", Fingerprint: [32]byte{3}}
+	charge, err := service.Begin(ctx, request)
+	if err != nil || charge.Operation != "responses.create" || charge.ReservedSale != 550 || charge.EstimatedCost != 400 {
+		t.Fatalf("charge=%+v err=%v", charge, err)
+	}
+	snapshot := billing.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"usage":{"input_tokens":10,"output_tokens":5}}`)}
+	settled, err := service.CompleteUsage(ctx, charge.ID, chatpricing.Usage{PromptTokens: 10, CachedInputTokens: 4, CompletionTokens: 5}, snapshot)
+	if err != nil || settled.CapturedSale != 51 || settled.ActualCost == nil || *settled.ActualCost != 36 {
+		t.Fatalf("settled=%+v err=%v", settled, err)
+	}
+	var schema, operation string
+	var captures int
+	if err = pool.QueryRow(ctx, `SELECT c.operation,e.schema_version FROM chat_request_charges c JOIN chat_usage_evidence e ON e.charge_id=c.id WHERE c.id=$1`, charge.ID).Scan(&operation, &schema); err != nil {
+		t.Fatal(err)
+	}
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM wallet_operations WHERE operation_key=$1`, "responses.create:capture:"+charge.ID).Scan(&captures)
+	if operation != "responses.create" || schema != "openai-responses-usage-v1" || captures != 1 {
+		t.Fatalf("operation=%s schema=%s captures=%d", operation, schema, captures)
 	}
 }
 

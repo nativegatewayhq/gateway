@@ -60,7 +60,8 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT` | `2m` | Non-streaming OpenAI Chat request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_STREAM_IDLE_TIMEOUT` | `30s` | Maximum idle interval between upstream streaming reads; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES` | `8388608` | Maximum Chat request and response body; maximum 32 MiB |
-| `GATEWAY_OPENAI_RESPONSES_MODELS` | unset | Comma-separated exact OpenAI Responses model IDs; BYOK-only |
+| `GATEWAY_OPENAI_RESPONSES_MODELS` | unset | Comma-separated exact OpenAI Responses model IDs |
+| `GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS` | unset | Required in billing mode: comma-separated `model:maximum_input_tokens:maximum_output_tokens` entries |
 | `GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT` | `2m` | Non-streaming Responses request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES` | `8388608` | Maximum Responses request and response body; maximum 32 MiB |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
@@ -183,11 +184,15 @@ Set `GATEWAY_OPENAI_RESPONSES_MODELS` to enable native non-streaming `POST /v1/r
 ```python
 from openai import OpenAI
 client = OpenAI(api_key="SERVICE_API_KEY", base_url="https://gateway.example/v1")
-response = client.responses.create(model="gpt-4.1", input="hello")
+response = client.responses.create(model="gpt-4.1", input="hello", max_output_tokens=1024)
 print(response.output_text)
 ```
 
-Responses is BYOK-only in this foundation. `GATEWAY_BILLING_MODE=required` with any Responses model fails configuration validation so an unsettled request cannot dispatch. Streaming, response retrieval/deletion/cancel, background mode, stored conversation lifecycle, and Responses usage settlement are deferred.
+BYOK mode preserves native pass-through behavior. In billing-required mode, every enabled model needs a `GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS` entry and every request must provide a positive `max_output_tokens` no greater than its model limit. Publish an operation-isolated immutable price with `gateway-chat-price -operation responses.create`; input, cached input, and output rates use `USD_TICKS` per million tokens.
+
+The Gateway reserves the request byte upper bound plus the output limit before Provider dispatch, then captures strict native `usage.input_tokens`, `input_tokens_details.cached_tokens`, and `output_tokens`. Reasoning tokens must be a valid subset of output tokens and are not charged twice. Confirmed non-2xx responses release the reservation. Timeout, response loss, invalid or missing usage, and settlement failure keep it for durable reconciliation. `Idempotency-Key` replays the bounded native terminal response without another Provider call or Ledger mutation.
+
+Streaming, response retrieval/deletion/cancel, background mode, stored conversation lifecycle, and built-in-tool-specific pricing remain deferred.
 
 ```python
 from openai import OpenAI
