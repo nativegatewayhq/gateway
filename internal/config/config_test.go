@@ -80,6 +80,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_RATE_LIMIT_MODE":                      "required",
 		"GATEWAY_REDIS_URL":                            "rediss://user:secret@redis.example:6380/1",
 		"GATEWAY_RATE_LIMIT_TIMEOUT":                   "250ms",
+		"GATEWAY_TRUSTED_PROXY_CIDRS":                  "10.0.0.8/8, 2001:db8::1/32",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -117,6 +118,41 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.RateLimitMode != RateLimitRequired || cfg.RedisURL != values["GATEWAY_REDIS_URL"] || cfg.RateLimitTimeout != 250*time.Millisecond {
 		t.Errorf("rate limit overrides=%+v", cfg)
+	}
+	if len(cfg.TrustedProxyPrefixes) != 2 || cfg.TrustedProxyPrefixes[0].String() != "10.0.0.0/8" || cfg.TrustedProxyPrefixes[1].String() != "2001:db8::/32" {
+		t.Errorf("trusted proxies=%v", cfg.TrustedProxyPrefixes)
+	}
+}
+
+func TestLoadRejectsInvalidTrustedProxyWithoutEcho(t *testing.T) {
+	value := "secret-invalid-prefix"
+	_, err := Load(func(key string) (string, bool) {
+		if key == "GATEWAY_DATABASE_URL" {
+			return "postgres://gateway:test@localhost/gateway", true
+		}
+		if key == "GATEWAY_TRUSTED_PROXY_CIDRS" {
+			return value, true
+		}
+		return "", false
+	})
+	if err == nil || strings.Contains(err.Error(), value) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestLoadRejectsOverlappingTrustedProxies(t *testing.T) {
+	_, err := Load(func(key string) (string, bool) {
+		switch key {
+		case "GATEWAY_DATABASE_URL":
+			return "postgres://gateway:test@localhost/gateway", true
+		case "GATEWAY_TRUSTED_PROXY_CIDRS":
+			return "10.0.0.0/8,10.1.0.0/16", true
+		default:
+			return "", false
+		}
+	})
+	if err == nil {
+		t.Fatal("expected overlapping proxy prefixes to fail")
 	}
 }
 

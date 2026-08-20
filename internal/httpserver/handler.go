@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 )
 
@@ -22,6 +23,12 @@ type Routes struct {
 
 // NewHandler builds the Gateway-owned and accepted provider-native routes.
 func NewHandler(logger *slog.Logger, ready ReadyFunc, routeSets ...Routes) http.Handler {
+	resolver, _ := clientip.New(nil)
+	return NewHandlerWithClientIP(logger, ready, resolver, routeSets...)
+}
+
+// NewHandlerWithClientIP resolves the client address before protocol authentication.
+func NewHandlerWithClientIP(logger *slog.Logger, ready ReadyFunc, resolver *clientip.Resolver, routeSets ...Routes) http.Handler {
 	mux := http.NewServeMux()
 	if len(routeSets) > 0 && routeSets[0].Gemini != nil {
 		mux.Handle("/v1beta/models/", routeSets[0].Gemini)
@@ -51,6 +58,7 @@ func NewHandler(logger *slog.Logger, ready ReadyFunc, routeSets ...Routes) http.
 
 	handler := recovery(logger, mux)
 	handler = accessLog(logger, handler)
+	handler = resolver.Middleware(handler)
 	handler = requestid.Middleware(handler)
 	return handler
 }

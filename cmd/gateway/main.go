@@ -11,9 +11,11 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/app"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
+	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/observability"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
@@ -57,6 +59,12 @@ func run(stdout, stderr io.Writer) int {
 		return 1
 	}
 	var apiKeyAuthenticator gemini.Authenticator = apikey.NewService(apikey.NewPostgresStore(pool))
+	networkGuard, err := networkauth.NewGuardedAuthenticator(apiKeyAuthenticator)
+	if err != nil {
+		logger.Error("gateway network policy initialization failed")
+		return 1
+	}
+	apiKeyAuthenticator = networkGuard
 	ready := pool.Ping
 	var redisLimiter *ratelimit.RedisLimiter
 	if cfg.RateLimitMode == config.RateLimitRequired {
@@ -124,6 +132,11 @@ func run(stdout, stderr io.Writer) int {
 		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailability(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry)
 	}
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
+	clientIPResolver, resolverErr := clientip.New(cfg.TrustedProxyPrefixes)
+	if resolverErr != nil {
+		logger.Error("gateway client IP resolver initialization failed")
+		return 1
+	}
 
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
@@ -144,6 +157,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIImages:        openAIImagesHandler,
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
+		ClientIPResolver:    clientIPResolver,
 	})
 	cancelWorker()
 	<-workerDone

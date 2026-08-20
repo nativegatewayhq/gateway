@@ -74,6 +74,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_RATE_LIMIT_MODE` | `disabled` | `disabled` ignores stored policies; `required` enforces them and fails closed when Redis is unavailable |
 | `GATEWAY_REDIS_URL` | unset | Secret Redis URL required by rate-limit `required` mode |
 | `GATEWAY_RATE_LIMIT_TIMEOUT` | `100ms` | Redis command timeout; maximum 1 second |
+| `GATEWAY_TRUSTED_PROXY_CIDRS` | unset | Comma-separated reverse-proxy CIDRs allowed to supply `Forwarded` or `X-Forwarded-For` |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
@@ -101,6 +102,21 @@ export GATEWAY_REDIS_URL='redis://127.0.0.1:56379/0'
 The token bucket is keyed only by the non-secret API Key ID and is shared across Gateway instances. Authentication failures do not consume a token. Authenticated generation, edit, Gemini, model-list and idempotent replay requests each consume one token before body parsing, price lookup, Wallet reservation or Provider dispatch. Rejected requests return native `429` errors plus `Retry-After` and `X-RateLimit-*` headers and never trigger routing fallback. Redis timeout or failure in required mode returns native `503`; `/health/live` stays live while `/health/ready` reports unavailable.
 
 `--allow-model` is optional and repeatable. Omitting it preserves backward-compatible access to all registered models; production Keys should use an explicit least-privilege allowlist. Supplying it changes the Key to an exact logical allowlist using `protocol:operation:model`; supported image operations are `openai:image.generate`, `openai:image.edit`, and `gemini:image.generate`. Wildcards and Provider-native model names are not expanded. A denied request consumes its rate-limit token but returns native `403` before routing, idempotency replay, pricing, Wallet reservation or Provider dispatch. `/v1/models` returns only the intersection of the Key permissions, model capabilities and configured Provider credentials. Removing a permission also prevents that Key from replaying a previously stored response for the removed model.
+
+## API Key network restrictions
+
+Add one or more canonical IPv4 or IPv6 networks while provisioning a Key:
+
+```bash
+go run ./cmd/gateway-key \
+  -name production \
+  -allow-cidr 203.0.113.0/24 \
+  -allow-cidr 2001:db8:1234::/48
+```
+
+Omitting `--allow-cidr` allows all source networks for backward compatibility. A restricted Key is checked after credential authentication and before rate limiting, body parsing, replay, billing, or provider dispatch. Denials return OpenAI `403 permission_error/network_not_allowed` or Gemini `403 PERMISSION_DENIED` and consume no rate-limit token.
+
+By default the Gateway uses the direct TCP peer and ignores all forwarding headers. Behind an ingress, configure only the ingress egress networks, for example `GATEWAY_TRUSTED_PROXY_CIDRS=10.20.0.0/16`. Requests from those trusted peers must contain exactly one of RFC 7239 `Forwarded` or `X-Forwarded-For`; the Gateway strips trusted hops right-to-left. Missing, malformed, or ambiguous chains fail closed for restricted Keys while health endpoints and unrestricted Keys remain available. Never set this value to arbitrary client networks or `0.0.0.0/0`.
 
 ## Provider credentials
 

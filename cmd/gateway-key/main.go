@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, os.Getenv, rand.Reader)) }
 
 type permissionFlags []apikey.ModelPermission
+type prefixFlags []netip.Prefix
 
 func (values *permissionFlags) String() string { return fmt.Sprintf("%d permissions", len(*values)) }
 func (values *permissionFlags) Set(value string) error {
@@ -27,6 +29,16 @@ func (values *permissionFlags) Set(value string) error {
 		return fmt.Errorf("allow-model must be protocol:operation:model")
 	}
 	*values = append(*values, apikey.ModelPermission{Protocol: parts[0], Operation: parts[1], Model: parts[2]})
+	return nil
+}
+
+func (values *prefixFlags) String() string { return fmt.Sprintf("%d prefixes", len(*values)) }
+func (values *prefixFlags) Set(value string) error {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+	if err != nil {
+		return fmt.Errorf("allow-cidr must be a valid CIDR prefix")
+	}
+	*values = append(*values, prefix)
 	return nil
 }
 
@@ -39,7 +51,9 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 	rpm := flags.Int64("requests-per-minute", 0, "optional per-key requests per minute")
 	burst := flags.Int64("burst", 0, "optional token bucket burst")
 	var permissions permissionFlags
+	var prefixes prefixFlags
 	flags.Var(&permissions, "allow-model", "repeatable protocol:operation:logical-model permission")
+	flags.Var(&prefixes, "allow-cidr", "repeatable client network CIDR permission")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -57,7 +71,7 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 		}
 		expiresAt = &parsed
 	}
-	record, raw, err := apikey.GenerateForProjectWithPolicies(entropy, *name, *projectID, expiresAt, apikey.RateLimitPolicy{RequestsPerMinute: *rpm, Burst: *burst}, permissions)
+	record, raw, err := apikey.GenerateForProjectWithAccess(entropy, *name, *projectID, expiresAt, apikey.RateLimitPolicy{RequestsPerMinute: *rpm, Burst: *burst}, permissions, prefixes)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
@@ -87,6 +101,11 @@ func run(arguments []string, stdout, stderr io.Writer, getenv func(string) strin
 		_, _ = fmt.Fprintf(stderr, "model access: allowlist (%d permissions)\n", len(record.ModelPermissions))
 	} else {
 		_, _ = fmt.Fprintln(stderr, "model access: all")
+	}
+	if record.NetworkAccessMode == apikey.NetworkAccessAllowlist {
+		_, _ = fmt.Fprintf(stderr, "network access: allowlist (%d prefixes)\n", len(record.NetworkPrefixes))
+	} else {
+		_, _ = fmt.Fprintln(stderr, "network access: all")
 	}
 	_, _ = fmt.Fprintln(stdout, raw)
 	return 0
