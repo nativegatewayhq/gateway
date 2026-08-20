@@ -263,11 +263,15 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_REDIS_URL: must be a valid redis or rediss URL")
 		}
 	}
+	if cfg.ImageStorage.Mode == imagestorage.Managed && cfg.BillingMode == BillingRequired && cfg.ReplayBodyBytes < cfg.ImageStorage.MaximumTotalBytes*4/3+1<<20 {
+		return Config{}, fmt.Errorf("GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES: must cover the managed image response limit")
+	}
 
 	return cfg, nil
 }
 
 func loadImageStorage(cfg *Config, lookup LookupEnv) error {
+	cfg.ImageStorage.FetchOrigins = map[string][]string{}
 	stringsSettings := []struct {
 		key    string
 		target *string
@@ -325,6 +329,17 @@ func loadImageStorage(cfg *Config, lookup LookupEnv) error {
 				return fmt.Errorf("%s: must be a valid bounded duration", setting.key)
 			}
 			*setting.target = parsed
+		}
+	}
+	for _, provider := range []string{"openai", "xai", "google"} {
+		key := "GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_" + strings.ToUpper(provider)
+		if value, ok := lookup(key); ok {
+			parts := strings.Split(value, ",")
+			origins := make([]string, 0, len(parts))
+			for _, part := range parts {
+				origins = append(origins, strings.TrimSpace(part))
+			}
+			cfg.ImageStorage.FetchOrigins[provider] = origins
 		}
 	}
 	if err := cfg.ImageStorage.Validate(); err != nil {

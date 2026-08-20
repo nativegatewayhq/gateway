@@ -15,6 +15,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/database"
+	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/observability"
@@ -81,6 +82,25 @@ func run(stdout, stderr io.Writer) int {
 	}
 	apiKeyAuthenticator = networkGuard
 	readinessChecks := []func(context.Context) error{pool.Ping}
+	var imageResults *imagestorage.Manager
+	if cfg.ImageStorage.Mode == imagestorage.Managed {
+		collector, storageErr := imagestorage.NewCollector(cfg.ImageStorage)
+		if storageErr != nil {
+			logger.Error("gateway image storage initialization failed")
+			return 1
+		}
+		objects, storageErr := imagestorage.NewS3(cfg.ImageStorage)
+		if storageErr != nil {
+			logger.Error("gateway image storage initialization failed")
+			return 1
+		}
+		imageResults, storageErr = imagestorage.NewManager(cfg.ImageStorage, collector, objects, imagestorage.NewAssetStore(pool))
+		if storageErr != nil {
+			logger.Error("gateway image storage initialization failed")
+			return 1
+		}
+		readinessChecks = append(readinessChecks, objects.Ready)
+	}
 	var redisLimiter *ratelimit.RedisLimiter
 	if cfg.RateLimitMode == config.RateLimitRequired {
 		redisLimiter, err = ratelimit.NewRedis(cfg.RedisURL, cfg.RateLimitTimeout)
@@ -159,6 +179,11 @@ func run(stdout, stderr io.Writer) int {
 		geminiHandler = gemini.NewBillableHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
 		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
 		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry, healthGate)
+	}
+	if imageResults != nil {
+		geminiHandler.SetResultManager(imageResults)
+		openAIImagesHandler.SetResultManager(imageResults)
+		openAIImageEditsHandler.SetResultManager(imageResults)
 	}
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 	clientIPResolver, resolverErr := clientip.New(cfg.TrustedProxyPrefixes)

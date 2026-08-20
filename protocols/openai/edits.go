@@ -14,6 +14,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
+	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
@@ -55,6 +56,10 @@ func NewBillableEditHandlerWithAvailabilityAndHealth(logger *slog.Logger, authen
 		handler.common.health = health
 	}
 	return handler
+}
+
+func (handler *EditHandler) SetResultManager(manager ResultManager) {
+	handler.common.SetResultManager(manager)
 }
 
 func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -343,12 +348,35 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 			handler.common.reconciliationError(writer, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.ResponseUnavailable, handler.common.responseUnavailableSnapshot()))
 			return
 		}
-		completed, completeErr := handler.common.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody})
+		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}
+		if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.common.results != nil {
+			managedBody, storageErr := handler.common.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "openai", Provider: string(route.Provider), ChannelID: route.ChannelID, RequestID: requestid.FromContext(request.Context()), ChargeID: charge.ID, Body: responseBody})
+			if storageErr != nil {
+				snapshot = handler.common.storageErrorSnapshot()
+			} else {
+				snapshot.Body = managedBody
+			}
+		}
+		completed, completeErr := handler.common.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, snapshot)
 		if completeErr != nil {
-			handler.common.reconciliationError(writer, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.SettlementFailed, billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}))
+			handler.common.reconciliationError(writer, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.SettlementFailed, snapshot))
 			return
 		}
 		handler.common.writeSnapshot(writer, completed.Response, false)
+		return
+	}
+	if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.common.results != nil {
+		responseBody, readErr := readBounded(response.Body, handler.common.results.MaximumResponseBytes())
+		if readErr != nil {
+			handler.common.writeSnapshot(writer, handler.common.storageErrorSnapshot(), false)
+			return
+		}
+		managedBody, storageErr := handler.common.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "openai", Provider: string(route.Provider), ChannelID: route.ChannelID, RequestID: requestid.FromContext(request.Context()), Body: responseBody})
+		if storageErr != nil {
+			handler.common.writeSnapshot(writer, handler.common.storageErrorSnapshot(), false)
+			return
+		}
+		handler.common.writeSnapshot(writer, billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: managedBody}, false)
 		return
 	}
 	copyResponseHeaders(writer.Header(), response.Header)

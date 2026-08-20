@@ -20,6 +20,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
+	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
@@ -60,6 +61,11 @@ type Billing interface {
 	MaximumResponseBytes() int64
 }
 
+type ResultManager interface {
+	Transform(context.Context, imagestorage.TransformInput) ([]byte, error)
+	MaximumResponseBytes() int64
+}
+
 type Handler struct {
 	logger        *slog.Logger
 	authenticator Authenticator
@@ -70,7 +76,10 @@ type Handler struct {
 	availability  ProviderAvailability
 	weighted      imageoperation.WeightedSampler
 	health        providerhealth.Gate
+	results       ResultManager
 }
+
+func (handler *Handler) SetResultManager(manager ResultManager) { handler.results = manager }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, executor Executor, maxBodyBytes int64) *Handler {
 	return NewHandlerWithHealth(logger, authenticator, executor, maxBodyBytes, providerhealth.NoopGate{})
@@ -300,12 +309,34 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeGeminiResponseHeaders(response.Header), Body: responseBody}
+		if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
+			managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "gemini", Provider: "google", ChannelID: channelID, RequestID: requestid.FromContext(request.Context()), ChargeID: charge.ID, Body: responseBody})
+			if storageErr != nil {
+				snapshot = handler.storageErrorSnapshot()
+			} else {
+				snapshot.Body = managedBody
+			}
+		}
 		completed, completeErr := handler.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, snapshot)
 		if completeErr != nil {
 			handler.reconciliationError(tracked, request.Context(), charge.ID, geminiKnownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.SettlementFailed, snapshot))
 			return
 		}
 		handler.writeSnapshot(tracked, completed.Response, false)
+		return
+	}
+	if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
+		responseBody, readErr := readBounded(response.Body, handler.results.MaximumResponseBytes())
+		if readErr != nil {
+			handler.writeSnapshot(tracked, handler.storageErrorSnapshot(), false)
+			return
+		}
+		managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "gemini", Provider: "google", ChannelID: channelID, RequestID: requestid.FromContext(request.Context()), Body: responseBody})
+		if storageErr != nil {
+			handler.writeSnapshot(tracked, handler.storageErrorSnapshot(), false)
+			return
+		}
+		handler.writeSnapshot(tracked, billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeGeminiResponseHeaders(response.Header), Body: managedBody}, false)
 		return
 	}
 	copyResponseHeaders(tracked.Header(), response.Header)
@@ -317,6 +348,11 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"category", "response_copy_failed",
 		)
 	}
+}
+
+func (handler *Handler) storageErrorSnapshot() billing.ResponseSnapshot {
+	body := []byte(`{"error":{"code":502,"message":"managed image result unavailable","status":"UNAVAILABLE"}}`)
+	return billing.ResponseSnapshot{Status: http.StatusBadGateway, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
 }
 
 func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, model string) bool {

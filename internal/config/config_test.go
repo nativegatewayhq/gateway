@@ -76,7 +76,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS":      "4",
 		"GATEWAY_BILLING_MODE":                          "required",
 		"GATEWAY_MINIMUM_MARGIN_BPS":                    "1250",
-		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":        "16777216",
+		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":        "134217728",
 		"GATEWAY_RECONCILIATION_INTERVAL":               "2s",
 		"GATEWAY_RECONCILIATION_LEASE":                  "20s",
 		"GATEWAY_RECONCILIATION_BASE_BACKOFF":           "3s",
@@ -108,6 +108,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_IMAGE_STORAGE_MAX_TOTAL_BYTES":         "67108864",
 		"GATEWAY_IMAGE_STORAGE_FETCH_TIMEOUT":           "20s",
 		"GATEWAY_IMAGE_STORAGE_UPLOAD_TIMEOUT":          "45s",
+		"GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_OPENAI":    "https://images.openai.com,https://cdn.openai.com",
 		"GATEWAY_TRUSTED_PROXY_CIDRS":                   "10.0.0.8/8, 2001:db8::1/32",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
@@ -138,7 +139,7 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.BillingMode != BillingRequired || cfg.MinimumMarginBPS != 1250 {
 		t.Errorf("Billing config = %q, %d", cfg.BillingMode, cfg.MinimumMarginBPS)
 	}
-	if cfg.ReplayBodyBytes != 16777216 {
+	if cfg.ReplayBodyBytes != 134217728 {
 		t.Errorf("ReplayBodyBytes = %d", cfg.ReplayBodyBytes)
 	}
 	if cfg.ReconcileInterval != 2*time.Second || cfg.ReconcileLease != 20*time.Second || cfg.ReconcileBackoff != 3*time.Second || cfg.ReconcileMaxBackoff != 30*time.Minute || cfg.ReconcileBatchSize != 20 || cfg.ReconcileMaxAttempts != 7 {
@@ -152,6 +153,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ImageStorage.Mode != "managed" || cfg.ImageStorage.Bucket != "gateway-images" || cfg.ImageStorage.MaximumImages != 8 || cfg.ImageStorage.MaximumImageBytes != 16777216 || cfg.ImageStorage.FetchTimeout != 20*time.Second || cfg.ImageStorage.UploadTimeout != 45*time.Second {
 		t.Errorf("image storage overrides=%+v", cfg.ImageStorage)
+	}
+	if len(cfg.ImageStorage.FetchOrigins["openai"]) != 2 {
+		t.Errorf("fetch origins=%v", cfg.ImageStorage.FetchOrigins)
 	}
 	if len(cfg.TrustedProxyPrefixes) != 2 || cfg.TrustedProxyPrefixes[0].String() != "10.0.0.0/8" || cfg.TrustedProxyPrefixes[1].String() != "2001:db8::/32" {
 		t.Errorf("trusted proxies=%v", cfg.TrustedProxyPrefixes)

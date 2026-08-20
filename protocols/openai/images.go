@@ -19,6 +19,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
+	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
@@ -57,6 +58,11 @@ type Billing interface {
 	MaximumResponseBytes() int64
 }
 
+type ResultManager interface {
+	Transform(context.Context, imagestorage.TransformInput) ([]byte, error)
+	MaximumResponseBytes() int64
+}
+
 type Handler struct {
 	logger        *slog.Logger
 	authenticator Authenticator
@@ -67,7 +73,10 @@ type Handler struct {
 	availability  ProviderAvailability
 	weighted      imageoperation.WeightedSampler
 	health        providerhealth.Gate
+	results       ResultManager
 }
+
+func (handler *Handler) SetResultManager(manager ResultManager) { handler.results = manager }
 
 func NewBillableImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
 	return NewBillableImagesHandlerWithAvailability(logger, authenticator, models, executors, maxBodyBytes, chargeBilling, nil)
@@ -307,12 +316,35 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}
+		if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
+			managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "openai", Provider: string(route.Provider), ChannelID: route.ChannelID, RequestID: requestid.FromContext(request.Context()), ChargeID: charge.ID, Body: responseBody})
+			if storageErr != nil {
+				snapshot = handler.storageErrorSnapshot()
+			} else {
+				snapshot.Body = managedBody
+			}
+		}
 		completed, completeErr := handler.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, snapshot)
 		if completeErr != nil {
 			handler.reconciliationError(tracked, request.Context(), charge.ID, knownObservation(response.StatusCode >= 200 && response.StatusCode <= 299, billing.SettlementFailed, snapshot))
 			return
 		}
 		handler.writeSnapshot(tracked, completed.Response, false)
+		return
+	}
+	if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
+		responseBody, readErr := readBounded(response.Body, handler.results.MaximumResponseBytes())
+		if readErr != nil {
+			handler.writeSnapshot(tracked, handler.storageErrorSnapshot(), false)
+			return
+		}
+		managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "openai", Provider: string(route.Provider), ChannelID: route.ChannelID, RequestID: requestid.FromContext(request.Context()), Body: responseBody})
+		if storageErr != nil {
+			handler.writeSnapshot(tracked, handler.storageErrorSnapshot(), false)
+			return
+		}
+		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: managedBody}
+		handler.writeSnapshot(tracked, snapshot, false)
 		return
 	}
 	copyResponseHeaders(tracked.Header(), response.Header)
@@ -324,6 +356,11 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"category", "response_copy_failed",
 		)
 	}
+}
+
+func (handler *Handler) storageErrorSnapshot() billing.ResponseSnapshot {
+	body := []byte(`{"error":{"message":"managed image result unavailable","type":"server_error","code":"image_storage_unavailable"}}`)
+	return billing.ResponseSnapshot{Status: http.StatusBadGateway, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
 }
 
 func (handler *Handler) selectUnbilledCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision) (imageoperation.RoutingDecision, providerhealth.Permit, bool) {
