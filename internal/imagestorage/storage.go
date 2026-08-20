@@ -43,6 +43,7 @@ type Config struct {
 	FetchTimeout       time.Duration
 	UploadTimeout      time.Duration
 	TemporaryDirectory string
+	FetchOrigins       map[string][]string
 }
 
 func DefaultConfig() Config {
@@ -72,6 +73,17 @@ func (config Config) Validate() error {
 	}
 	if config.FetchTimeout <= 0 || config.FetchTimeout > 5*time.Minute || config.UploadTimeout <= 0 || config.UploadTimeout > 10*time.Minute {
 		return ErrInvalidConfig
+	}
+	for provider, origins := range config.FetchOrigins {
+		if !keyPartPattern.MatchString(provider) || len(origins) > 32 {
+			return ErrInvalidConfig
+		}
+		for _, origin := range origins {
+			parsed, err := url.Parse(origin)
+			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return ErrInvalidConfig
+			}
+		}
 	}
 	return nil
 }
