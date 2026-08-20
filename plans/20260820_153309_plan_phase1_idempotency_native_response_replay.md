@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-012
 title: Phase 1 Idempotency-Key and Native Response Replay
-status: in_progress
+status: completed
 created_at: 2026-08-20T15:33:09+09:00
-updated_at: 2026-08-20T15:33:09+09:00
+updated_at: 2026-08-20T15:54:26+09:00
 owners:
   - gateway
 initiative: phase-1-idempotency-response-replay
@@ -198,23 +198,32 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] organization-scoped Idempotency-Key와 fingerprint schema가 존재함
-- [ ] 동일 key/fingerprint 동시 요청이 Provider와 과금을 한 번만 수행함
-- [ ] 동일 key의 다른 request가 Provider 호출 전에 conflict로 거부됨
-- [ ] 성공/native 오류/Gateway terminal 오류가 원자적으로 snapshot됨
-- [ ] 완료 retry가 status/header/body를 Provider 호출 없이 replay함
-- [ ] replay가 active tenant 인증을 다시 요구함
-- [ ] response body 크기와 hash corruption이 fail closed됨
-- [ ] credential/cookie/비허용 header가 snapshot에 저장되지 않음
-- [ ] header 없는 SDK 요청의 기존 동작이 유지됨
-- [ ] JSON과 multipart body가 변경 없이 Provider에 전달됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Conformance 계약이 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] organization-scoped Idempotency-Key와 fingerprint schema가 존재함
+- [x] 동일 key/fingerprint 동시 요청이 Provider와 과금을 한 번만 수행함
+- [x] 동일 key의 다른 request가 Provider 호출 전에 conflict로 거부됨
+- [x] 성공/native 오류/Gateway terminal 오류가 원자적으로 snapshot됨
+- [x] 완료 retry가 status/header/body를 Provider 호출 없이 replay함
+- [x] replay가 active tenant 인증을 다시 요구함
+- [x] response body 크기와 hash corruption이 fail closed됨
+- [x] credential/cookie/비허용 header가 snapshot에 저장되지 않음
+- [x] header 없는 SDK 요청의 기존 동작이 유지됨
+- [x] JSON과 multipart body가 변경 없이 Provider에 전달됨
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Conformance 계약이 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 계획 commit: `7ca375a9e24e76489122dd3488dec37e4f39c809`
+- 구현 commit: `5008466d210a75ff5e5872fd8d33e3d0cdc8fda8`
+- Pull Request: `https://github.com/nativegatewayhq/gateway/pull/12`
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- `GOCACHE=/private/tmp/gateway-go-cache TEST_DATABASE_URL=postgres://gateway:***@127.0.0.1:55433/gateway?sslmode=disable make integration-test` 통과
+- PostgreSQL integration에서 organization scope, concurrent duplicate, fingerprint conflict, terminal snapshot/Wallet transaction rollback, 재시작 replay와 corrupted body hash 검증 통과
+- 성공 2xx, native 429와 executor 502 status/header/body를 Provider 재호출 없이 replay하고 active project 재인증을 검증함
+- JSON 및 streaming multipart fingerprint, visible ASCII header, response 크기 상한과 allowlisted header 검증 통과
+- GitHub Actions `check` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32341450059/job/96341223017`
+- GitHub Actions `validate` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32341449941/job/96341222403`
 
 ## Rollback 계획
 
