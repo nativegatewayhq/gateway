@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-016
 title: Phase 1 Provider Channel Candidates and Priority Routing
-status: in_progress
+status: completed
 created_at: 2026-08-20T16:36:02+09:00
-updated_at: 2026-08-20T16:36:02+09:00
+updated_at: 2026-08-20T16:49:52+09:00
 owners:
   - gateway
 initiative: phase-1-provider-routing
@@ -182,21 +182,30 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] logical model과 복수 channel candidate가 분리됨
-- [ ] fixed/priority policy가 deterministic 단일 decision을 생성함
-- [ ] protocol/capability/disabled candidate가 정확히 필터됨
-- [ ] OpenAI/Gemini handlers가 selected Provider/channel/provider model을 사용함
-- [ ] selected channel의 exact price로만 Reserve/settlement됨
-- [ ] `/v1/models`가 logical model을 중복·cross-protocol 노출하지 않음
-- [ ] request rewrite가 prompt/file/unknown field 의미를 보존함
-- [ ] timeout에서 fallback 없이 기존 reconciliation 불변 조건을 유지함
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Cloud handoff가 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] logical model과 복수 channel candidate가 분리됨
+- [x] fixed/priority policy가 deterministic 단일 decision을 생성함
+- [x] protocol/capability/disabled candidate가 정확히 필터됨
+- [x] OpenAI/Gemini handlers가 selected Provider/channel/provider model을 사용함
+- [x] selected channel의 exact price로만 Reserve/settlement됨
+- [x] `/v1/models`가 logical model을 중복·cross-protocol 노출하지 않음
+- [x] request rewrite가 prompt/file/unknown field 의미를 보존함
+- [x] timeout에서 fallback 없이 기존 reconciliation 불변 조건을 유지함
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Cloud handoff가 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 계획 commit: `6a9edc2`
+- 구현 commit: `0bb581c719736c76fa3b282102b6e48a32a0a8d6`
+- Pull Request: [#15](https://github.com/nativegatewayhq/gateway/pull/15)
+- CI: [check run 32345705084](https://github.com/nativegatewayhq/gateway/actions/runs/32345705084) 및 [Plan policy run 32345725849](https://github.com/nativegatewayhq/gateway/actions/runs/32345725849) 통과
+- 로컬 `make check` 통과
+- `TEST_DATABASE_URL=... make integration-test` 통과
+- 단위/race test에서 fixed, priority, disabled candidate, priority/candidate-ID tie-break, candidate/channel 중복, protocol 격리와 반환값 immutability를 검증함
+- JSON raw unknown value, multipart file/filename와 Gemini path provider-model rewrite를 검증함
+- PostgreSQL integration에서 logical OpenAI model이 priority xAI candidate/channel을 선택하고 해당 channel exact price로 단일 Capture되는 것을 검증함
+- terminal idempotency replay가 routing channel 변경을 무시하고 기존 charge/snapshot을 반환하며 legacy channel-bound fingerprint도 허용함
 
 ## Rollback 계획
 
