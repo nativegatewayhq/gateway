@@ -10,6 +10,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 )
 
 type ProviderAvailability interface {
@@ -23,6 +24,11 @@ type ChannelProviderAvailability interface {
 type ModelsHandler struct {
 	common       *Handler
 	availability ProviderAvailability
+	chat         interface{ List() []chatoperation.Model }
+}
+
+func NewModelsHandlerWithChat(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, availability ProviderAvailability) *ModelsHandler {
+	return &ModelsHandler{common: NewImagesHandler(logger, authenticator, models, nil, 1), chat: chat, availability: availability}
 }
 
 func NewModelsHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, availability ProviderAvailability) *ModelsHandler {
@@ -92,6 +98,27 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 			}
 			if available {
 				data = append(data, modelObject{model.Model, "model", model.Created, model.Owner})
+			}
+		}
+	}
+	seen := make(map[string]bool, len(data))
+	for _, item := range data {
+		seen[item.ID] = true
+	}
+	if handler.chat != nil {
+		for _, model := range handler.chat.List() {
+			if seen[model.ID] || !principal.AuthorizeModel("openai", chatoperation.Completions, model.ID) {
+				continue
+			}
+			available := false
+			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
+				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
+			} else {
+				available = configured[model.Provider]
+			}
+			if available {
+				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})
+				seen[model.ID] = true
 			}
 		}
 	}

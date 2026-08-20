@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-036
 title: Phase 4 OpenAI Chat Completions Non-streaming Foundation
-status: accepted
+status: in_progress
 created_at: 2026-08-21T01:11:41+09:00
-updated_at: 2026-08-21T01:11:41+09:00
+updated_at: 2026-08-21T02:05:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-chat-completions-foundation
@@ -176,7 +176,10 @@ make integration-test
 
 ## 검증 증거
 
-아직 구현 전.
+- 2026-08-21: `GOCACHE=/private/tmp/nativegateway-go-cache-036 make check` 통과 (`gofmt`, `go vet`, 전체 race test, 5개 binary build).
+- 2026-08-21: PostgreSQL에서 `go test -race -count=1 -tags=integration ./protocols/openai ./providers/openai ./internal/apikey ./internal/config` 통과. service key 인증, Provider credential 교체와 native body 보존을 검증했다.
+- 2026-08-21: 공식 OpenAI Python/JavaScript SDK를 사용한 `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAISDKsUseOnlyBaseURLAndKey` 통과. Base URL과 Key만 변경한 비스트리밍 호출을 검증했다.
+- 전체 `make integration-test`의 Chat 및 기존 대부분 패키지는 통과했으나 로컬 Docker PostgreSQL 시각이 호스트보다 앞서 기존 reconciliation/fal/gemini 즉시-claim 테스트가 간헐 실패했다. 최종 GitHub CI의 동기화된 service clock 결과를 release gate로 사용한다.
 
 ## Rollback 계획
 

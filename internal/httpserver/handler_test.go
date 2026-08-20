@@ -88,6 +88,18 @@ func TestOpenAIModelsRouteIsMounted(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatRouteIsExact(t *testing.T) {
+	chat := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	handler := NewHandler(discardLogger(), nil, Routes{OpenAIChat: chat})
+	for path, want := range map[string]int{"/v1/chat/completions": http.StatusCreated, "/v1/chat/other": http.StatusNotFound} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != want {
+			t.Fatalf("%s=%d", path, response.Code)
+		}
+	}
+}
+
 func TestReplicatePredictionRoutesAreMounted(t *testing.T) {
 	t.Parallel()
 	predictions := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusAccepted) })

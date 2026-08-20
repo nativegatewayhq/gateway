@@ -24,3 +24,11 @@ func TestFalWebhookMetadataUsesBoundedRouteWithoutCapability(t *testing.T) {
 		t.Fatalf("route leaked capability: %q", route)
 	}
 }
+
+func TestOpenAIChatMetadataIsBounded(t *testing.T) {
+	request := httptest.NewRequest("POST", "https://gateway.example/v1/chat/completions", nil)
+	protocol, operation, route := requestMetadata(request)
+	if protocol != "openai" || operation != "chat.completions" || boundedOperation(operation) != operation || boundedRoute(route) != route {
+		t.Fatalf("metadata=%s/%s/%s", protocol, operation, route)
+	}
+}
