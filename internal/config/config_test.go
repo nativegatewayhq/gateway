@@ -10,7 +10,12 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(func(string) (string, bool) { return "", false })
+	cfg, err := Load(func(key string) (string, bool) {
+		if key == "GATEWAY_DATABASE_URL" {
+			return "postgres://gateway:test@localhost/gateway", true
+		}
+		return "", false
+	})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -32,6 +37,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_HTTP_ADDR":        "127.0.0.1:9090",
 		"GATEWAY_LOG_LEVEL":        "debug",
 		"GATEWAY_SHUTDOWN_TIMEOUT": "3s",
+		"GATEWAY_DATABASE_URL":     "postgres://gateway:test@localhost/gateway",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -74,6 +80,9 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 				if key == tt.key {
 					return tt.value, true
 				}
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://gateway:test@localhost/gateway", true
+				}
 				return "", false
 			})
 			if err == nil {
@@ -83,5 +92,13 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 				t.Fatalf("error leaked invalid value %q: %v", tt.marker, err)
 			}
 		})
+	}
+}
+
+func TestLoadRequiresDatabaseURLWithoutLeakingIt(t *testing.T) {
+	t.Parallel()
+	_, err := Load(func(string) (string, bool) { return "", false })
+	if err == nil || !strings.Contains(err.Error(), "GATEWAY_DATABASE_URL") {
+		t.Fatalf("Load() error = %v", err)
 	}
 }

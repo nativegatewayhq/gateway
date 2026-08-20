@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-002
 title: Phase 0 Service API Key Authentication
-status: accepted
+status: in_progress
 created_at: 2026-08-20T12:47:31+09:00
-updated_at: 2026-08-20T12:53:00+09:00
+updated_at: 2026-08-20T12:54:00+09:00
 owners:
   - gateway
 initiative: phase-0-service-api-key-auth

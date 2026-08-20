@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build integration && !windows
 
 package main
 
@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/nativegatewayhq/gateway/internal/database"
+	"github.com/nativegatewayhq/gateway/internal/httpserver"
+	"github.com/nativegatewayhq/gateway/internal/observability"
 )
 
 func TestRunRejectsInvalidConfigWithoutEchoingValue(t *testing.T) {
@@ -88,6 +93,29 @@ func TestGatewayProcessFailsFastWhenPortIsInUse(t *testing.T) {
 	}
 }
 
+func TestDatabaseConnectionLossMakesReadinessUnavailable(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	pool, err := database.Open(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+
+	handler := httpserver.NewHandler(observability.NewLogger(io.Discard, 0), pool.Ping)
+	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503", response.Code)
+	}
+	if strings.Contains(response.Body.String(), url) {
+		t.Fatalf("readiness response leaked database URL: %s", response.Body.String())
+	}
+}
+
 func buildGateway(t *testing.T) string {
 	t.Helper()
 
@@ -125,6 +153,7 @@ func gatewayEnvironment(address string) []string {
 		"GATEWAY_HTTP_ADDR="+address,
 		"GATEWAY_LOG_LEVEL=info",
 		"GATEWAY_SHUTDOWN_TIMEOUT=2s",
+		"GATEWAY_DATABASE_URL="+os.Getenv("TEST_DATABASE_URL"),
 	)
 }
 

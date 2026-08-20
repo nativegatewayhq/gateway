@@ -25,6 +25,7 @@ type Config struct {
 	HTTPAddr        string
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
+	DatabaseURL     string
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -53,9 +54,15 @@ func Load(lookup LookupEnv) (Config, error) {
 		}
 		cfg.ShutdownTimeout = duration
 	}
+	if value, ok := lookup("GATEWAY_DATABASE_URL"); ok {
+		cfg.DatabaseURL = strings.TrimSpace(value)
+	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {
 		return Config{}, fmt.Errorf("GATEWAY_HTTP_ADDR: %w", err)
+	}
+	if cfg.DatabaseURL == "" {
+		return Config{}, fmt.Errorf("GATEWAY_DATABASE_URL: must not be empty")
 	}
 
 	return cfg, nil

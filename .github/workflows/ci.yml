@@ -11,6 +11,22 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: gateway_test
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://gateway:gateway-test@127.0.0.1:5432/gateway_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
@@ -18,3 +34,4 @@ jobs:
           go-version-file: go.mod
           cache: false
       - run: make check
+      - run: make integration-test

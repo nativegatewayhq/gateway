@@ -10,6 +10,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/app"
 	"github.com/nativegatewayhq/gateway/internal/config"
+	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/observability"
 )
 
@@ -27,8 +28,18 @@ func run(stdout, stderr io.Writer) int {
 	logger := observability.NewLogger(stdout, cfg.LogLevel)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	pool, err := database.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("gateway database unavailable")
+		return 1
+	}
+	defer pool.Close()
+	if err := database.Migrate(ctx, pool); err != nil {
+		logger.Error("gateway database migration failed")
+		return 1
+	}
 
-	if err := app.Run(ctx, cfg, logger); err != nil {
+	if err := app.Run(ctx, cfg, logger, pool.Ping); err != nil {
 		logger.Error("gateway stopped with error", "error", err.Error())
 		return 1
 	}
