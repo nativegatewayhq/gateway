@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-025
 title: Phase 2 Weighted Provider Routing
-status: in_progress
+status: completed
 created_at: 2026-08-20T19:59:29+09:00
-updated_at: 2026-08-20T19:59:29+09:00
+updated_at: 2026-08-20T20:14:57+09:00
 owners:
   - gateway
 initiative: phase-2-weighted-routing
@@ -183,25 +183,31 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] weighted route가 positive integer weight 비율로 eligible candidate를 선택함
-- [ ] modulo bias, weight overflow와 predictable PRNG가 없음
-- [ ] candidate ordering과 injected entropy 결과가 deterministic함
-- [ ] executor/credential unavailable candidate가 draw 전에 제외됨
-- [ ] price/margin/spend-cap candidate failure 후 남은 weight가 재정규화됨
-- [ ] candidate는 요청당 최대 한 번만 시도됨
-- [ ] global/customer 오류와 post-dispatch 실패는 재추첨하지 않음
-- [ ] terminal replay가 entropy와 route/price를 소비하지 않음
-- [ ] charge가 weighted policy와 attempt rank를 보존함
-- [ ] OpenAI 생성·편집과 Gemini가 동일 sampler 계약을 사용함
-- [ ] response/log에 weight/draw/가격/credential/request content가 노출되지 않음
-- [ ] fixed/priority/lowest-cost와 native SDK wire behavior가 회귀하지 않음
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] weighted route가 positive integer weight 비율로 eligible candidate를 선택함
+- [x] modulo bias, weight overflow와 predictable PRNG가 없음
+- [x] candidate ordering과 injected entropy 결과가 deterministic함
+- [x] executor/credential unavailable candidate가 draw 전에 제외됨
+- [x] price/margin/spend-cap candidate failure 후 남은 weight가 재정규화됨
+- [x] candidate는 요청당 최대 한 번만 시도됨
+- [x] global/customer 오류와 post-dispatch 실패는 재추첨하지 않음
+- [x] terminal replay가 entropy와 route/price를 소비하지 않음
+- [x] charge가 weighted policy와 attempt rank를 보존함
+- [x] OpenAI 생성·편집과 Gemini가 동일 sampler 계약을 사용함
+- [x] response/log에 weight/draw/가격/credential/request content가 노출되지 않음
+- [x] fixed/priority/lowest-cost와 native SDK wire behavior가 회귀하지 않음
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `51b0e32ddaec91749a0942748975b23818ba0dd6`
+- PR: https://github.com/nativegatewayhq/gateway/pull/24
+- local check: `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과
+- local integration: PostgreSQL 17/Redis 8에서 `make integration-test` 통과
+- GitHub Actions check: https://github.com/nativegatewayhq/gateway/actions/runs/32362729459/job/96405597130
+- GitHub Actions plan validation: https://github.com/nativegatewayhq/gateway/actions/runs/32362755059/job/96405672590
+- 검증 범위: registry weight/candidate/total 상한, canonical interval과 modulo-bias rejection, deterministic 분포, shared entropy race, executor/credential prefilter, price/margin/spend-cap 재정규화, global/post-dispatch non-redraw, terminal replay 무추첨, OpenAI JSON/multipart edit와 Gemini parity, weighted charge evidence와 immutability
 
 ## 후속 작업
 
