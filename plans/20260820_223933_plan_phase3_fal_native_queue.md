@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-031
 title: Phase 3 fal Native Queue
-status: in_progress
+status: completed
 created_at: 2026-08-20T22:39:33+09:00
-updated_at: 2026-08-20T22:39:33+09:00
+updated_at: 2026-08-20T23:06:18+09:00
 owners:
   - gateway
 initiative: phase-3-fal-native-queue
@@ -204,24 +204,34 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] fal submit/status/result/cancel native routes와 error envelope가 구현됨
-- [ ] service Key와 configured endpoint만으로 공식 JavaScript/Python client 계약이 검증됨
-- [ ] exact model path, permission, price, channel과 credential만 submit됨
-- [ ] Gateway Job ID만 public response와 URL에 노출됨
-- [ ] status/result GET은 durable snapshot만 읽고 Provider나 Billing을 호출하지 않음
-- [ ] `COMPLETED` result 저장과 Capture가 정확히 한 번 수렴함
-- [ ] known failed/canceled Release와 unknown reservation 유지가 검증됨
-- [ ] cancel/poll/result race와 재시작 stale lease recovery가 수렴함
-- [ ] Replicate와 fal이 동일 runtime worker에서 안전하게 공존함
-- [ ] wildcard route, redirect, raw error, credential과 payload 보안 경계가 검증됨
-- [ ] Provider submit 이후 fallback이 없음
-- [ ] 기존 프로토콜과 전체 race/integration 테스트가 회귀하지 않음
-- [ ] README, SDK 예제와 Cloud/Conformance handoff가 갱신됨
-- [ ] commit, PR과 최종 CI 증거가 기록됨
+- [x] fal submit/status/result/cancel native routes와 error envelope가 구현됨
+- [x] service Key와 configured endpoint만으로 공식 JavaScript/Python client 계약이 검증됨
+- [x] exact model path, permission, price, channel과 credential만 submit됨
+- [x] Gateway Job ID만 public response와 URL에 노출됨
+- [x] status/result GET은 durable snapshot만 읽고 Provider나 Billing을 호출하지 않음
+- [x] `COMPLETED` result 저장과 Capture가 정확히 한 번 수렴함
+- [x] known failed/canceled Release와 unknown reservation 유지가 검증됨
+- [x] cancel/poll/result race와 재시작 stale lease recovery가 수렴함
+- [x] Replicate와 fal이 동일 runtime worker에서 안전하게 공존함
+- [x] wildcard route, redirect, raw error, credential과 payload 보안 경계가 검증됨
+- [x] Provider submit 이후 fallback이 없음
+- [x] 기존 프로토콜과 전체 race/integration 테스트가 회귀하지 않음
+- [x] README, SDK 예제와 Cloud/Conformance handoff가 갱신됨
+- [x] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commits: `952d317` (fal protocol, adapter, schema, runtime, billing과 SDK examples), `ddcd25c` (Replicate/fal shared worker isolation).
+- 공개 계약: model-scoped submit/status/result/cancel, `Authorization: Key`, official JavaScript `proxyUrl` wire와 Python `FAL_QUEUE_RUN_HOST` direct host contract 검증.
+- 공식 SDK source pins: `fal-ai/fal-js@381105e138b85502b528fb8f6c16d909e30e462a`, `fal-ai/fal@c0f4efd31b1356fd3b8aa829d25cc08e9e191ccb`.
+- end-to-end: mock fal upstream과 실제 PostgreSQL에서 submit→durable worker status→result fetch→Capture, idempotent replay와 public GET polling 무dispatch 검증.
+- 과금: fal default price dimensions, succeeded Capture, generic Job의 known failure/cancel Release 및 unknown reservation 유지 검증. Replicate의 무-key fingerprint/default price dimension 회귀도 수정함.
+- credential: migration `000024` fresh/current 적용, fal encrypted control-plane credential stage/activate/resolve와 exact `Key` outbound scope 검증.
+- 동시성: generic terminal CAS/cancel/stale lease suite와 동일 worker의 Replicate/fal provider/model isolation 검증.
+- 보안: encoded slash/dot segment/model mismatch, arbitrary `x-fal-target-url`, webhook/query, redirects, body bounds와 Provider ID/control URL 비노출 검증.
+- 로컬 검증: `make check` 통과.
+- 통합 검증: Compose PostgreSQL/Redis에서 fal protocol/provider와 전체 기존 패키지를 포함한 `make integration-test` 통과.
+- PR: https://github.com/nativegatewayhq/gateway/pull/30
 
 ## Rollback 계획
 

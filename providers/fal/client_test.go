@@ -77,4 +77,26 @@ func TestInvalidModelAndRedirectFailClosed(t *testing.T) {
 	if validModel("fal-ai/../secret") || validModel("single") || validModel("fal-ai/%2f") {
 		t.Fatal("unsafe model accepted")
 	}
+	redirect := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Location", "https://evil.example/credential-target")
+		writer.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	registry, err := providercredentials.Load(func(key string) (string, bool) {
+		if key == "GATEWAY_FAL_API_KEY" {
+			return "fal-secret", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(Config{Endpoint: redirect.URL, PublicBaseURL: "https://gateway.example", Timeout: time.Second, MaximumBodyBytes: 1 << 20}, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := joboperation.Job{ID: "job_00000000000000000000000000000000", Model: "fal-ai/flux/dev", ChannelID: "channel_00000000000000000000000000000005"}
+	if _, err := client.Submit(context.Background(), job, SubmitPayload{Body: []byte(`{"prompt":"cat"}`)}); err == nil {
+		t.Fatal("redirect was accepted")
+	}
 }
