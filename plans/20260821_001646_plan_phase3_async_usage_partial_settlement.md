@@ -3,7 +3,7 @@ id: gateway-20260821-034
 title: Phase 3 Async Usage and Partial-output Settlement
 status: in_progress
 created_at: 2026-08-21T00:16:46+09:00
-updated_at: 2026-08-21T00:16:46+09:00
+updated_at: 2026-08-21T00:46:05+09:00
 owners:
   - gateway
 initiative: phase-3-async-usage-partial-settlement
@@ -190,22 +190,32 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] supported multi-output request가 maximum quantity 기준으로 Reserve됨
-- [ ] Replicate/fal terminal result에서 verified actual output quantity가 추출됨
-- [ ] partial success가 actual quantity만 Capture하고 예약 차액을 Release함
-- [ ] full success와 known zero-output failure/cancel의 기존 정산이 유지됨
-- [ ] unknown/excessive/conflicting usage가 자동 Capture/Release되지 않음
-- [ ] duplicate webhook/poll과 worker crash가 usage 또는 Ledger entry를 늘리지 않음
-- [ ] price 변경이 진행 중인 Job의 고정 단가와 quantity를 바꾸지 않음
-- [ ] legacy quantity `1` Job과 기존 native SDK wire가 회귀하지 않음
-- [ ] usage evidence와 telemetry에 payload/URL/credential/tenant secret이 노출되지 않음
-- [ ] migration fresh/current, race와 전체 integration test가 통과함
-- [ ] README와 Cloud/Conformance handoff가 갱신됨
+- [x] supported multi-output request가 maximum quantity 기준으로 Reserve됨
+- [x] Replicate/fal terminal result에서 verified actual output quantity가 추출됨
+- [x] partial success가 actual quantity만 Capture하고 예약 차액을 Release함
+- [x] full success와 known zero-output failure/cancel의 기존 정산이 유지됨
+- [x] unknown/excessive/conflicting usage가 자동 Capture/Release되지 않음
+- [x] duplicate webhook/poll과 worker crash가 usage 또는 Ledger entry를 늘리지 않음
+- [x] price 변경이 진행 중인 Job의 고정 단가와 quantity를 바꾸지 않음
+- [x] legacy quantity `1` Job과 기존 native SDK wire가 회귀하지 않음
+- [x] usage evidence와 telemetry에 payload/URL/credential/tenant secret이 노출되지 않음
+- [x] migration fresh/current, race와 전체 integration test가 통과함
+- [x] README와 Cloud/Conformance handoff가 갱신됨
 - [ ] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `4745be6` (usage capability, native request/result extractors, append-only evidence, quantity settlement, telemetry, migrations와 운영 문서).
+- admission: Replicate `input.num_outputs`와 fal `num_images`를 model usage capability의 default/max/request-extractor 계약으로 검증하고 maximum quantity를 기존 immutable price snapshot으로 Reserve함.
+- actual evidence: Replicate string/URL object와 fal image/images object의 HTTPS 또는 inline image만 bounded count하고 Provider source, result extractor version과 terminal observation SHA-256을 append-only row로 기록함.
+- 부분 정산: quantity `3` Reserve(300) 후 actual `2`의 cost/sale `120/200`만 Capture하고 나머지 `100`을 동일 Wallet transaction에서 Release함. quantity-versioned wallet operation과 재실행 시 단일 Capture entry를 검증함.
+- fail-closed: success 0, estimate 3보다 큰 actual 11 및 failed payload의 usable output은 terminal response/evidence를 보존하되 `MANUAL_REVIEW`로 두고 Wallet `700/300`, Capture/Release 0을 검증함.
+- 동시성: signed webhook과 leased polling을 race 10회 실행해 terminal event와 usage evidence가 각각 하나로 수렴함을 검증했고, row-lock 이후 evidence를 별도 statement snapshot으로 hydrate함.
+- migration: `000027` estimate/evidence, `000028` result extractor version, `000029` bounded observed excess를 fresh/current schema와 immutable trigger에서 검증함.
+- 호환성: usage capability가 없는 기존 model/Job은 legacy contract를 유지하고 OpenAI/Gemini 및 기존 Replicate/fal protocol·webhook suite가 회귀하지 않음.
+- 로컬 검증: `make check` 통과.
+- 통합 검증: Compose PostgreSQL/Redis에서 전체 migration, Wallet/Ledger, race, Provider/protocol 회귀를 포함한 `make integration-test` 통과.
+- PR 및 최종 GitHub Actions 증거는 본 구현 PR 통과 후 기록함.
 
 ## Rollback 계획
 
