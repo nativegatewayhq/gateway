@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-017
 title: Phase 1 Pre-dispatch Candidate Fallback
-status: in_progress
+status: completed
 created_at: 2026-08-20T16:52:40+09:00
-updated_at: 2026-08-20T16:52:40+09:00
+updated_at: 2026-08-20T17:09:30+09:00
 owners:
   - gateway
 initiative: phase-1-provider-routing
@@ -169,22 +169,27 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] fixed/priority ordered candidates가 deterministic함
-- [ ] executor/credential unavailable candidate가 Reserve/Provider 전에 skip됨
-- [ ] price/margin unavailable candidate만 안전하게 다음 후보로 넘어감
-- [ ] insufficient funds/tenant/unknown DB 오류는 fallback하지 않음
-- [ ] Begin 성공 이후에는 어떤 Provider 결과에도 fallback하지 않음
-- [ ] 최종 candidate channel/price/provider model이 charge와 outbound에 일치함
-- [ ] all-unavailable에서 Wallet/Ledger/charge/upstream effect가 없음
-- [ ] terminal idempotency replay가 현재 candidate availability와 무관함
-- [ ] native protocol response와 기존 reconciliation 불변 조건이 유지됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Cloud handoff가 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] fixed/priority ordered candidates가 deterministic함
+- [x] executor/credential unavailable candidate가 Reserve/Provider 전에 skip됨
+- [x] price/margin unavailable candidate만 안전하게 다음 후보로 넘어감
+- [x] insufficient funds/tenant/unknown DB 오류는 fallback하지 않음
+- [x] Begin 성공 이후에는 어떤 Provider 결과에도 fallback하지 않음
+- [x] 최종 candidate channel/price/provider model이 charge와 outbound에 일치함
+- [x] all-unavailable에서 Wallet/Ledger/charge/upstream effect가 없음
+- [x] terminal idempotency replay가 현재 candidate availability와 무관함
+- [x] native protocol response와 기존 reconciliation 불변 조건이 유지됨
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Cloud handoff가 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현: `d00b241` (`feat: add safe pre-dispatch candidate fallback`)
+- Pull Request: https://github.com/nativegatewayhq/gateway/pull/16
+- 로컬 검증: `make check` 통과
+- PostgreSQL 통합 검증: `make integration-test` 통과
+- GitHub Actions: `check` 및 `validate` 통과
+- Cloud handoff: managed deployment는 priority candidate별 Provider credential과 protocol/operation/logical model/channel exact price를 함께 publish해야 하며, 누락 candidate는 pre-dispatch에서 제외된다.
 
 ## Rollback 계획
 
