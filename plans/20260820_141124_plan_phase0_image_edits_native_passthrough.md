@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-006
 title: Phase 0 Image Edits Native Pass-through
-status: in_progress
+status: completed
 created_at: 2026-08-20T14:11:24+09:00
-updated_at: 2026-08-20T14:11:24+09:00
+updated_at: 2026-08-20T14:19:48+09:00
 owners:
   - gateway
 initiative: phase-0-image-edits-native-e2e
@@ -206,23 +206,37 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] OpenAI multipart와 xAI JSON edit 요청이 exact model로 분리됨
-- [ ] OpenAI SDK multipart 요청이 Key와 Base URL 변경만으로 Gateway contract에 도달함
-- [ ] multipart와 JSON body가 Provider native 형식으로 보존됨
-- [ ] 임시 파일이 bounded·0600이며 모든 종료 경로에서 삭제됨
-- [ ] spool 동시성 제한과 body limit이 Provider 호출 전에 적용됨
-- [ ] Provider credential이 fixed origin 하나에만 전달됨
-- [ ] redirect, retry와 fallback이 수행되지 않음
-- [ ] native success/error response와 확장 필드가 보존됨
-- [ ] timeout과 cancellation을 확정 실패로 재시도하지 않음
-- [ ] credential, prompt, filename, body, URL과 temp path가 로그에 없음
-- [ ] 기존 API 회귀 없이 전체 race/integration/CI 통과
-- [ ] README와 Conformance 계약에 SDK 호환 경계가 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] OpenAI multipart와 xAI JSON edit 요청이 exact model로 분리됨
+- [x] OpenAI SDK multipart 요청이 Key와 Base URL 변경만으로 Gateway contract에 도달함
+- [x] multipart와 JSON body가 Provider native 형식으로 보존됨
+- [x] 임시 파일이 bounded·0600이며 모든 종료 경로에서 삭제됨
+- [x] spool 동시성 제한과 body limit이 Provider 호출 전에 적용됨
+- [x] Provider credential이 fixed origin 하나에만 전달됨
+- [x] redirect, retry와 fallback이 수행되지 않음
+- [x] native success/error response와 확장 필드가 보존됨
+- [x] timeout과 cancellation을 확정 실패로 재시도하지 않음
+- [x] credential, prompt, filename, body, URL과 temp path가 로그에 없음
+- [x] 기존 API 회귀 없이 전체 race/integration/CI 통과
+- [x] README와 Conformance 계약에 SDK 호환 경계가 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 로컬 검증:
+  - `make check`: formatter, vet, 전체 race test와 binary build 통과
+  - `make integration-test`: PostgreSQL service Key를 사용하는 OpenAI multipart 및 xAI JSON edit 경로 통과
+  - `git diff --check`: 통과
+  - `go test -cover ./protocols/openai ./providers/openaiimages`: protocol 77.4%, transport 81.5%
+- 보안 및 장애 검증:
+  - multipart 원본 byte·boundary 보존, bounded spool, mode `0600`, Provider 실패 후 삭제
+  - spool capacity와 fixed/chunked body 제한을 upstream 호출 전에 적용
+  - exact model/media routing, fixed origin, scoped Bearer, redirect 차단과 edit path allowlist
+  - xAI JSON URL·확장 usage와 Provider native success/error body 무변환 전달
+- 구현 commit: [`27d98aa`](https://github.com/nativegatewayhq/gateway/commit/27d98aa)
+- pull request: [#6](https://github.com/nativegatewayhq/gateway/pull/6)
+- CI:
+  - [`check`](https://github.com/nativegatewayhq/gateway/actions/runs/32335114852/job/96323058341): 통과
+  - [`validate`](https://github.com/nativegatewayhq/gateway/actions/runs/32335114859/job/96323058606): 통과
 
 ## Rollback 계획
 
