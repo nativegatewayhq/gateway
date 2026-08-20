@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-039
 title: Phase 4 OpenAI Responses Native Non-streaming Foundation
-status: accepted
+status: completed
 created_at: 2026-08-21T06:40:00+09:00
-updated_at: 2026-08-21T07:15:00+09:00
+updated_at: 2026-08-22T10:30:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-foundation
@@ -180,6 +180,7 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponses
 
 ## 검증 증거
 
+- 구현 및 머지: `52e703f` (`feat: add OpenAI Responses foundation`, PR #46)
 - `make check`
 - `TEST_DATABASE_URL=... TEST_REDIS_URL=... make integration-test`
 - `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponsesSDKs`
