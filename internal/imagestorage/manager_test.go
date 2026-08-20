@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 type objectStoreFake struct {
@@ -34,15 +35,35 @@ func (fake *assetRepositoryFake) Begin(_ context.Context, asset Asset) (Asset, e
 	fake.assets[asset.ID] = asset
 	return asset, nil
 }
-func (fake *assetRepositoryFake) MarkAvailable(_ context.Context, id string) (Asset, error) {
+func (fake *assetRepositoryFake) Claim(_ context.Context, id, owner string, lease time.Duration) (Asset, bool, error) {
 	asset := fake.assets[id]
+	if asset.State != Pending || asset.LeaseOwner != "" {
+		return asset, false, nil
+	}
+	until := time.Now().Add(lease)
+	asset.LeaseOwner, asset.LeaseUntil = owner, &until
+	fake.assets[id] = asset
+	return asset, true, nil
+}
+func (fake *assetRepositoryFake) Get(_ context.Context, id string) (Asset, error) {
+	return fake.assets[id], nil
+}
+func (fake *assetRepositoryFake) MarkAvailable(_ context.Context, id, owner string) (Asset, error) {
+	asset := fake.assets[id]
+	if asset.LeaseOwner != owner {
+		return Asset{}, ErrInvalidObject
+	}
 	asset.State = Available
+	asset.LeaseOwner, asset.LeaseUntil = "", nil
 	fake.assets[id] = asset
 	return asset, nil
 }
-func (fake *assetRepositoryFake) MarkFailed(_ context.Context, id, category string) (Asset, error) {
+func (fake *assetRepositoryFake) Release(_ context.Context, id, owner, category string) (Asset, error) {
 	asset := fake.assets[id]
-	asset.State, asset.FailureCategory = Failed, category
+	if asset.LeaseOwner != owner {
+		return Asset{}, ErrInvalidObject
+	}
+	asset.FailureCategory, asset.LeaseOwner, asset.LeaseUntil = category, "", nil
 	fake.assets[id] = asset
 	return asset, nil
 }

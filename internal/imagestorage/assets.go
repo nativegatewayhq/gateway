@@ -30,13 +30,17 @@ type Asset struct {
 	SHA256                                                 [sha256.Size]byte
 	State                                                  AssetState
 	FailureCategory                                        string
+	LeaseOwner                                             string
+	LeaseUntil                                             *time.Time
 	CreatedAt, UpdatedAt                                   time.Time
 }
 
 type AssetRepository interface {
 	Begin(context.Context, Asset) (Asset, error)
-	MarkAvailable(context.Context, string) (Asset, error)
-	MarkFailed(context.Context, string, string) (Asset, error)
+	Claim(context.Context, string, string, time.Duration) (Asset, bool, error)
+	Get(context.Context, string) (Asset, error)
+	MarkAvailable(context.Context, string, string) (Asset, error)
+	Release(context.Context, string, string, string) (Asset, error)
 }
 
 type AssetStore struct{ pool *pgxpool.Pool }
@@ -70,30 +74,49 @@ func (store *AssetStore) Begin(ctx context.Context, asset Asset) (Asset, error) 
 	return stored, nil
 }
 
-func (store *AssetStore) MarkAvailable(ctx context.Context, id string) (Asset, error) {
-	return store.transition(ctx, id, Available, "")
+func (store *AssetStore) Claim(ctx context.Context, id, owner string, lease time.Duration) (Asset, bool, error) {
+	if store == nil || store.pool == nil || !strings.HasPrefix(id, "asset_") || owner == "" || len(owner) > 128 || lease <= 0 || lease > 10*time.Minute {
+		return Asset{}, false, ErrInvalidObject
+	}
+	command, err := store.pool.Exec(ctx, `UPDATE image_assets SET lease_owner=$2,lease_until=now()+$3::interval,failure_category=NULL,updated_at=now() WHERE id=$1 AND state='PENDING' AND (lease_until IS NULL OR lease_until <= now())`, id, owner, lease.String())
+	if err != nil {
+		return Asset{}, false, ErrUnavailable
+	}
+	asset, err := store.loadID(ctx, id)
+	return asset, command.RowsAffected() == 1, err
 }
 
-func (store *AssetStore) MarkFailed(ctx context.Context, id, category string) (Asset, error) {
-	valid := map[string]bool{"fetch_rejected": true, "fetch_failed": true, "invalid_content": true, "upload_failed": true, "persistence_failed": true}
-	if !valid[category] {
-		return Asset{}, ErrInvalidObject
-	}
-	return store.transition(ctx, id, Failed, category)
+func (store *AssetStore) Get(ctx context.Context, id string) (Asset, error) {
+	return store.loadID(ctx, id)
 }
 
-func (store *AssetStore) transition(ctx context.Context, id string, state AssetState, category string) (Asset, error) {
-	if store == nil || store.pool == nil || !strings.HasPrefix(id, "asset_") {
-		return Asset{}, ErrUnavailable
-	}
-	command, err := store.pool.Exec(ctx, `UPDATE image_assets SET state=$2,failure_category=NULLIF($3,''),available_at=CASE WHEN $2='AVAILABLE' THEN now() ELSE NULL END,updated_at=now() WHERE id=$1 AND state='PENDING'`, id, state, category)
+func (store *AssetStore) MarkAvailable(ctx context.Context, id, owner string) (Asset, error) {
+	command, err := store.pool.Exec(ctx, `UPDATE image_assets SET state='AVAILABLE',failure_category=NULL,available_at=now(),lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND state='PENDING' AND lease_owner=$2 AND lease_until > now()`, id, owner)
 	if err != nil {
 		return Asset{}, ErrUnavailable
 	}
 	if command.RowsAffected() == 0 {
-		var existing Asset
-		existing, err = store.loadID(ctx, id)
-		if err != nil || existing.State != state || existing.FailureCategory != category {
+		existing, loadErr := store.loadID(ctx, id)
+		if loadErr != nil || existing.State != Available {
+			return Asset{}, ErrInvalidObject
+		}
+		return existing, nil
+	}
+	return store.loadID(ctx, id)
+}
+
+func (store *AssetStore) Release(ctx context.Context, id, owner, category string) (Asset, error) {
+	valid := map[string]bool{"fetch_rejected": true, "fetch_failed": true, "invalid_content": true, "upload_failed": true, "persistence_failed": true}
+	if store == nil || store.pool == nil || !valid[category] || owner == "" {
+		return Asset{}, ErrInvalidObject
+	}
+	command, err := store.pool.Exec(ctx, `UPDATE image_assets SET failure_category=$3,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND state='PENDING' AND lease_owner=$2`, id, owner, category)
+	if err != nil {
+		return Asset{}, ErrUnavailable
+	}
+	if command.RowsAffected() == 0 {
+		existing, loadErr := store.loadID(ctx, id)
+		if loadErr != nil || existing.State != Pending || existing.LeaseOwner != "" {
 			return Asset{}, ErrInvalidObject
 		}
 		return existing, nil
@@ -109,12 +132,12 @@ func (store *AssetStore) loadID(ctx context.Context, id string) (Asset, error) {
 	return scanAsset(store.pool.QueryRow(ctx, assetSelect+` WHERE id=$1`, id))
 }
 
-const assetSelect = `SELECT id,COALESCE(charge_id,''),request_id,protocol,provider,channel_id,result_index,object_key,content_type,byte_length,sha256,state,COALESCE(failure_category,''),created_at,updated_at FROM image_assets`
+const assetSelect = `SELECT id,COALESCE(charge_id,''),request_id,protocol,provider,channel_id,result_index,object_key,content_type,byte_length,sha256,state,COALESCE(failure_category,''),COALESCE(lease_owner,''),lease_until,created_at,updated_at FROM image_assets`
 
 func scanAsset(row pgx.Row) (Asset, error) {
 	var asset Asset
 	var digest []byte
-	if err := row.Scan(&asset.ID, &asset.ChargeID, &asset.RequestID, &asset.Protocol, &asset.Provider, &asset.ChannelID, &asset.ResultIndex, &asset.ObjectKey, &asset.ContentType, &asset.ByteLength, &digest, &asset.State, &asset.FailureCategory, &asset.CreatedAt, &asset.UpdatedAt); err != nil {
+	if err := row.Scan(&asset.ID, &asset.ChargeID, &asset.RequestID, &asset.Protocol, &asset.Provider, &asset.ChannelID, &asset.ResultIndex, &asset.ObjectKey, &asset.ContentType, &asset.ByteLength, &digest, &asset.State, &asset.FailureCategory, &asset.LeaseOwner, &asset.LeaseUntil, &asset.CreatedAt, &asset.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Asset{}, ErrInvalidObject
 		}

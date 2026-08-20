@@ -2,11 +2,14 @@ package imagestorage
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 type TransformInput struct {
@@ -211,15 +214,39 @@ func (manager *Manager) persist(ctx context.Context, input TransformInput, index
 	if asset.State != Pending {
 		return "", ErrUnavailable
 	}
+	ownerBytes := make([]byte, 16)
+	if _, err := rand.Read(ownerBytes); err != nil {
+		return "", ErrUnavailable
+	}
+	owner := hex.EncodeToString(ownerBytes)
+	lease := manager.config.UploadTimeout + 5*time.Second
+	for {
+		claimedAsset, claimed, claimErr := manager.assets.Claim(ctx, id, owner, lease)
+		if claimErr != nil {
+			return "", claimErr
+		}
+		if claimed {
+			break
+		}
+		if claimedAsset.State == Available {
+			return publicURL(manager.config.CDNBaseURL, claimedAsset.ObjectKey)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ErrUnavailable
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
 	if _, err := collected.File.Seek(0, io.SeekStart); err != nil {
+		_, _ = manager.assets.Release(context.WithoutCancel(ctx), id, owner, "persistence_failed")
 		return "", ErrUnavailable
 	}
 	stored, err := manager.objects.Put(ctx, Object{Key: key, ContentType: collected.ContentType, Size: collected.Size, SHA256: collected.SHA256}, collected.File)
 	if err != nil {
-		_, _ = manager.assets.MarkFailed(context.WithoutCancel(ctx), id, "upload_failed")
+		_, _ = manager.assets.Release(context.WithoutCancel(ctx), id, owner, "upload_failed")
 		return "", ErrUnavailable
 	}
-	if _, err := manager.assets.MarkAvailable(context.WithoutCancel(ctx), id); err != nil {
+	if _, err := manager.assets.MarkAvailable(context.WithoutCancel(ctx), id, owner); err != nil {
 		return "", fmt.Errorf("asset persistence: %w", ErrUnavailable)
 	}
 	return stored.URL, nil

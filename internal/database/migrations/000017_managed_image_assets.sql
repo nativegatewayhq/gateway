@@ -12,6 +12,8 @@ CREATE TABLE image_assets (
     sha256 bytea NOT NULL CHECK (octet_length(sha256) = 32),
     state text NOT NULL CHECK (state IN ('PENDING','AVAILABLE','FAILED','ORPHANED')),
     failure_category text CHECK (failure_category IS NULL OR failure_category IN ('fetch_rejected','fetch_failed','invalid_content','upload_failed','persistence_failed')),
+    lease_owner text CHECK (lease_owner IS NULL OR length(lease_owner) BETWEEN 1 AND 128),
+    lease_until timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     available_at timestamptz,
@@ -19,7 +21,8 @@ CREATE TABLE image_assets (
     UNIQUE (object_key),
     CHECK ((state = 'AVAILABLE' AND available_at IS NOT NULL AND failure_category IS NULL)
         OR (state = 'FAILED' AND available_at IS NULL AND failure_category IS NOT NULL)
-        OR (state IN ('PENDING','ORPHANED') AND available_at IS NULL))
+        OR (state IN ('PENDING','ORPHANED') AND available_at IS NULL)),
+    CHECK ((lease_owner IS NULL AND lease_until IS NULL) OR (state = 'PENDING' AND lease_owner IS NOT NULL AND lease_until IS NOT NULL))
 );
 CREATE INDEX image_assets_charge_idx ON image_assets(charge_id, result_index) WHERE charge_id IS NOT NULL;
 CREATE INDEX image_assets_pending_idx ON image_assets(updated_at, id) WHERE state = 'PENDING';
