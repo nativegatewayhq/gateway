@@ -37,6 +37,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ImagesTimeout != 2*time.Minute || cfg.ImagesBodyBytes != 1024*1024 {
 		t.Errorf("Images config = %v, %d", cfg.ImagesTimeout, cfg.ImagesBodyBytes)
 	}
+	if cfg.ImageEditsBodyBytes != 64*1024*1024 || cfg.ImageEditSpoolLimit != 8 {
+		t.Errorf("Image edits config = %d, %d", cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -51,6 +54,8 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES":        "1048576",
 		"GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT":        "80s",
 		"GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES": "524288",
+		"GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES":   "33554432",
+		"GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS":     "4",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -73,6 +78,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ImagesTimeout != 80*time.Second || cfg.ImagesBodyBytes != 524288 {
 		t.Errorf("Images config = %v, %d", cfg.ImagesTimeout, cfg.ImagesBodyBytes)
+	}
+	if cfg.ImageEditsBodyBytes != 33554432 || cfg.ImageEditSpoolLimit != 4 {
+		t.Errorf("Image edits config = %d, %d", cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
 	}
 }
 
@@ -99,6 +107,10 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "excessive images timeout", key: "GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT", value: "11m", marker: ""},
 		{name: "invalid images body limit", key: "GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES", value: "secret-size", marker: "secret-size"},
 		{name: "excessive images body limit", key: "GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES", value: "1048577", marker: ""},
+		{name: "invalid edit body limit", key: "GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES", value: "secret-size", marker: "secret-size"},
+		{name: "excessive edit body limit", key: "GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES", value: "268435457", marker: ""},
+		{name: "invalid spool limit", key: "GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS", value: "secret-limit", marker: "secret-limit"},
+		{name: "excessive spool limit", key: "GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS", value: "129", marker: ""},
 	}
 
 	for _, tt := range tests {

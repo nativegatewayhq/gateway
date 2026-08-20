@@ -19,6 +19,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
+	"github.com/nativegatewayhq/gateway/providers/xai"
 )
 
 type integrationRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -86,5 +87,81 @@ func TestPostgresServiceKeyAuthenticatesOpenAIImagesRoute(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != 200 || response.Body.String() != nativeBody || upstreamCalls != 1 {
 		t.Fatalf("response=%d %q calls=%d", response.Code, response.Body.String(), upstreamCalls)
+	}
+}
+
+func TestPostgresServiceKeyAuthenticatesNativeImageEdits(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	ctx := context.Background()
+	pool, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	record, raw, err := apikey.Generate(rand.Reader, "image edits integration", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := apikey.NewPostgresStore(pool)
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Exec(ctx, `DELETE FROM service_api_keys WHERE id=$1`, record.ID)
+	credentials, _ := providercredentials.Load(func(key string) (string, bool) {
+		if key == "GATEWAY_OPENAI_API_KEY" {
+			return "openai-edit-secret", true
+		}
+		if key == "GATEWAY_XAI_API_KEY" {
+			return "xai-edit-secret", true
+		}
+		return "", false
+	})
+	models := imageoperation.DefaultRegistry()
+	tests := []struct {
+		name, model, contentType, body, host, credential string
+		provider                                         providercredentials.ProviderID
+	}{
+		{name: "xai json", model: "grok-imagine-image-quality", contentType: "application/json", body: `{"model":"grok-imagine-image-quality","prompt":"edit","image":{"url":"https://example.invalid/i"}}`, host: "api.x.ai", credential: "xai-edit-secret", provider: providercredentials.XAI},
+	}
+	multipartBody, multipartType := multipartEdit(t, "gpt-image-1")
+	tests = append(tests, struct {
+		name, model, contentType, body, host, credential string
+		provider                                         providercredentials.ProviderID
+	}{name: "openai multipart", model: "gpt-image-1", contentType: multipartType, body: string(multipartBody), host: "api.openai.com", credential: "openai-edit-secret", provider: providercredentials.OpenAI})
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			client := &http.Client{Transport: integrationRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if request.URL.Host != test.host || request.URL.Path != "/v1/images/edits" || request.Header.Get("Authorization") != "Bearer "+test.credential {
+					t.Fatalf("unsafe request: %s %v", request.URL.Redacted(), request.Header)
+				}
+				got, _ := io.ReadAll(request.Body)
+				if string(got) != test.body || strings.Contains(string(got), raw) {
+					t.Fatal("native body changed or service key leaked")
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
+			})}
+			var executor Executor
+			if test.provider == providercredentials.OpenAI {
+				executor = openaiProvider.NewWithClient(credentials, time.Second, client)
+			} else {
+				executor = xai.NewWithClient(credentials, time.Second, client)
+			}
+			handler := NewEditHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), models, map[providercredentials.ProviderID]Executor{test.provider: executor}, 1024*1024, 1)
+			request := httptest.NewRequest(http.MethodPost, "/v1/images/edits?key="+raw, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", test.contentType)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != 200 || calls != 1 {
+				t.Fatalf("response=%d %s calls=%d", response.Code, response.Body.String(), calls)
+			}
+		})
 	}
 }

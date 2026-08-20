@@ -59,6 +59,8 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES` | `33554432` | Positive Gemini body limit up to 32 MiB |
 | `GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT` | `2m` | OpenAI/xAI image request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES` | `1048576` | Positive OpenAI Images JSON body limit up to 1 MiB |
+| `GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES` | `67108864` | Image edit body limit; maximum 256 MiB |
+| `GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent multipart edit spool limit; maximum 128 |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
@@ -158,7 +160,16 @@ const response = await client.images.generate({
 });
 ```
 
-The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, retries, fallback, image edits, storage, and billing are excluded from this phase.
+The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, retries, fallback, storage, and billing are excluded from this phase.
+
+## Image editing
+
+The Gateway exposes `POST /v1/images/edits` with each provider's native wire format:
+
+- OpenAI models use `multipart/form-data`, including the official OpenAI SDK `images.edit()` request.
+- xAI models use `application/json` with `image` or `images` URL, data URI, or file references.
+
+xAI explicitly does not support the OpenAI SDK `images.edit()` multipart format. The Gateway preserves this boundary and does not convert multipart requests into xAI JSON. OpenAI multipart bodies are spooled to bounded mode-`0600` temporary files so file parts are not loaded entirely into memory; files are deleted before the request finishes.
 
 ## Create a service API key
 

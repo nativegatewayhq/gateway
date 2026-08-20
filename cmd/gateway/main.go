@@ -61,12 +61,18 @@ func run(stdout, stderr io.Writer) int {
 		providercredentials.OpenAI: openAIExecutor,
 		providercredentials.XAI:    xAIExecutor,
 	}, cfg.ImagesBodyBytes)
+	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
+		providercredentials.OpenAI: openAIExecutor,
+		providercredentials.XAI:    xAIExecutor,
+	}
+	openAIImageEditsHandler := openaiProtocol.NewEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
 
 	if err := app.Run(ctx, cfg, logger, app.Dependencies{
 		Ready:               pool.Ping,
 		ProviderCredentials: providerCredentialRegistry,
 		Gemini:              geminiHandler,
 		OpenAIImages:        openAIImagesHandler,
+		OpenAIImageEdits:    openAIImageEditsHandler,
 	}); err != nil {
 		logger.Error("gateway stopped with error", "error", err.Error())
 		return 1
