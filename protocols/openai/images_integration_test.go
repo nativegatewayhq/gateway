@@ -79,7 +79,7 @@ func TestPostgresServiceKeyAuthenticatesOpenAIImagesRoute(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(nativeBody))}, nil
 	})}
 	executor := openaiProvider.NewWithClient(registry, time.Second, client)
-	models, _ := imageoperation.NewRegistry(imageoperation.ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI})
+	models, _ := imageoperation.NewRegistry(imageoperation.ModelRoute{Model: "gpt-image-1", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}})
 	handler := NewImagesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), models, map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executor}, 1024)
 	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations?key="+raw, strings.NewReader(requestBody))
 	request.Header.Set("Content-Type", "application/json")
@@ -87,6 +87,14 @@ func TestPostgresServiceKeyAuthenticatesOpenAIImagesRoute(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != 200 || response.Body.String() != nativeBody || upstreamCalls != 1 {
 		t.Fatalf("response=%d %q calls=%d", response.Code, response.Body.String(), upstreamCalls)
+	}
+	modelsHandler := NewModelsHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), models, registry)
+	modelsRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	modelsRequest.Header.Set("Authorization", "Bearer "+raw)
+	modelsResponse := httptest.NewRecorder()
+	modelsHandler.ServeHTTP(modelsResponse, modelsRequest)
+	if modelsResponse.Code != 200 || !strings.Contains(modelsResponse.Body.String(), `"id":"gpt-image-1"`) {
+		t.Fatalf("models response=%d %s", modelsResponse.Code, modelsResponse.Body.String())
 	}
 }
 

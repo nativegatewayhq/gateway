@@ -121,6 +121,8 @@ The Gateway supports the OpenAI-compatible image generation route:
 POST /v1/images/generations
 ```
 
+The authenticated `GET /v1/models` endpoint returns configured OpenAI/xAI image models in the native OpenAI list schema. Models are sorted by ID and omitted when their Provider credential is not configured.
+
 The request's exact `model` value selects a provider. Phase 0 does not guess by prefix or fall back to another provider.
 
 | Model | Provider | Upstream credential |

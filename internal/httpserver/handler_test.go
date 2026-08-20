@@ -79,6 +79,15 @@ func TestOpenAIImageEditsRouteIsMounted(t *testing.T) {
 	}
 }
 
+func TestOpenAIModelsRouteIsMounted(t *testing.T) {
+	t.Parallel()
+	models := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusAccepted) })
+	handler := NewHandler(discardLogger(), nil, Routes{OpenAIModels: models})
+	if response := serveRequest(t, handler, http.MethodGet, "/v1/models", ""); response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
 func TestReadinessFailure(t *testing.T) {
 	t.Parallel()
 

@@ -20,6 +20,7 @@ type Dependencies struct {
 	Gemini              http.Handler
 	OpenAIImages        http.Handler
 	OpenAIImageEdits    http.Handler
+	OpenAIModels        http.Handler
 }
 
 // Error reports a lifecycle failure category without exposing listener or
@@ -52,13 +53,16 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, dependenci
 	if dependencies.OpenAIImageEdits == nil {
 		return runtimeError("openai image edits handler unavailable", nil)
 	}
+	if dependencies.OpenAIModels == nil {
+		return runtimeError("openai models handler unavailable", nil)
+	}
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		return runtimeError("listen failed", err)
 	}
 
 	server := &http.Server{
-		Handler:           httpserver.NewHandler(logger, dependencies.Ready, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits}),
+		Handler:           httpserver.NewHandler(logger, dependencies.Ready, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels}),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
