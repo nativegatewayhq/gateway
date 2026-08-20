@@ -77,6 +77,16 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_RATE_LIMIT_MODE` | `disabled` | `disabled` ignores stored policies; `required` enforces them and fails closed when Redis is unavailable |
 | `GATEWAY_REDIS_URL` | unset | Secret Redis URL required by rate-limit `required` mode |
 | `GATEWAY_RATE_LIMIT_TIMEOUT` | `100ms` | Redis command timeout; maximum 1 second |
+| `GATEWAY_PROVIDER_HEALTH_MODE` | `disabled` | `required` enables the distributed Provider channel circuit breaker and fails closed when Redis is unavailable |
+| `GATEWAY_PROVIDER_HEALTH_WINDOW` | `1m` | Rolling outcome window from 10 seconds to 1 hour |
+| `GATEWAY_PROVIDER_HEALTH_BUCKET` | `10s` | Fixed Redis score bucket from 1 second to 1 minute; must divide the window |
+| `GATEWAY_PROVIDER_HEALTH_MINIMUM_SAMPLES` | `10` | Dispatch outcomes required before a closed circuit may open |
+| `GATEWAY_PROVIDER_HEALTH_FAILURE_THRESHOLD_BPS` | `5000` | Failure ratio threshold in basis points, from 1 to 10000 |
+| `GATEWAY_PROVIDER_HEALTH_OPEN_DURATION` | `30s` | Initial circuit-open duration |
+| `GATEWAY_PROVIDER_HEALTH_MAXIMUM_OPEN_DURATION` | `5m` | Exponential reopen-duration ceiling |
+| `GATEWAY_PROVIDER_HEALTH_PROBE_LEASE` | `10s` | Distributed half-open single-probe lease; no longer than the initial open duration |
+| `GATEWAY_PROVIDER_HEALTH_COMMAND_TIMEOUT` | `100ms` | Health Redis command timeout; maximum 1 second |
+| `GATEWAY_PROVIDER_HEALTH_KEY_PREFIX` | `gateway:provider-health:v1` | Non-secret Redis key namespace using channel hash tags |
 | `GATEWAY_TRUSTED_PROXY_CIDRS` | unset | Comma-separated reverse-proxy CIDRs allowed to supply `Forwarded` or `X-Forwarded-For` |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
@@ -173,6 +183,14 @@ An image model route may instead use `weighted` with a positive integer weight o
 After a draw, an unavailable exact price, minimum-margin violation, or exhausted Provider channel spend cap removes that candidate. The remaining weights are re-normalized and another candidate is drawn; no candidate is attempted twice. Wallet, customer quota, database, idempotency, and entropy failures stop globally, and no redraw occurs after Billing reservation or Provider dispatch. Terminal idempotency replay returns the stored native response without consuming entropy or evaluating current route state.
 
 Weighted charges preserve the selected channel and price snapshot plus `routing_policy=weighted` and the bounded attempt rank. Client responses and logs never expose configured weights, random draws, prices, margins, credentials, request content, balances, or remaining limits. Route publishers must validate every candidate's credential, exact price, margin, and optional spend cap before rollout.
+
+## Provider channel health and circuit breaking
+
+Set `GATEWAY_PROVIDER_HEALTH_MODE=required` to share Provider channel health across Gateway instances through Redis. Only actual upstream dispatch contributes an outcome: 2xx is success; 429, 5xx, typed timeout, and connection loss are failures; other Provider 4xx and client cancellation are neutral. Gateway authentication, authorization, parsing, price, Wallet, quota, spend-cap, credential, and routing failures never affect Provider health.
+
+After the configured minimum sample count, a channel opens when its rolling failure ratio reaches the threshold. OPEN candidates are removed before pricing, weighted drawing, or Billing reservation. Once the open period expires, Redis atomically grants one HALF_OPEN probe lease across all instances. Probe success closes and resets the circuit; probe failure reopens it with exponential duration up to the configured maximum. A probe that cannot dispatch because of a pre-dispatch failure is released without recording a Provider failure.
+
+Health filtering applies to fixed, priority, lowest-cost, and weighted routes. It never causes a second Provider call after Billing reservation or dispatch, and terminal idempotency replay does not inspect or mutate health state. Required-mode Redis failure returns a native 503 before dispatch and makes `/health/ready` unavailable while `/health/live` remains healthy. Redis keys and bounded logs contain channel metadata and outcome categories only—never credentials, prompts, response bodies, raw errors, customer identifiers, prices, balances, or limits.
 
 ## Provider credentials
 

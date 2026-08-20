@@ -15,6 +15,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
@@ -28,10 +29,14 @@ type EditHandler struct {
 }
 
 func NewEditHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, maxConcurrentSpools int) *EditHandler {
+	return NewEditHandlerWithHealth(logger, authenticator, models, executors, maxBodyBytes, maxConcurrentSpools, providerhealth.NoopGate{})
+}
+
+func NewEditHandlerWithHealth(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, maxConcurrentSpools int, health providerhealth.Gate) *EditHandler {
 	if maxConcurrentSpools < 1 {
 		maxConcurrentSpools = 1
 	}
-	return &EditHandler{common: NewImagesHandler(logger, authenticator, models, executors, maxBodyBytes), spoolSlots: make(chan struct{}, maxConcurrentSpools), maxBodyBytes: maxBodyBytes}
+	return &EditHandler{common: NewImagesHandlerWithHealth(logger, authenticator, models, executors, maxBodyBytes, health), spoolSlots: make(chan struct{}, maxConcurrentSpools), maxBodyBytes: maxBodyBytes}
 }
 
 func NewBillableEditHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, maxConcurrentSpools int, chargeBilling Billing) *EditHandler {
@@ -39,9 +44,16 @@ func NewBillableEditHandler(logger *slog.Logger, authenticator Authenticator, mo
 }
 
 func NewBillableEditHandlerWithAvailability(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, maxConcurrentSpools int, chargeBilling Billing, availability ProviderAvailability) *EditHandler {
-	handler := NewEditHandler(logger, authenticator, models, executors, maxBodyBytes, maxConcurrentSpools)
+	return NewBillableEditHandlerWithAvailabilityAndHealth(logger, authenticator, models, executors, maxBodyBytes, maxConcurrentSpools, chargeBilling, availability, providerhealth.NoopGate{})
+}
+
+func NewBillableEditHandlerWithAvailabilityAndHealth(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, maxConcurrentSpools int, chargeBilling Billing, availability ProviderAvailability, health providerhealth.Gate) *EditHandler {
+	handler := NewEditHandlerWithHealth(logger, authenticator, models, executors, maxBodyBytes, maxConcurrentSpools, health)
 	handler.common.billing = chargeBilling
 	handler.common.availability = availability
+	if health != nil {
+		handler.common.health = health
+	}
 	return handler
 }
 
@@ -103,7 +115,14 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		}
 		route := candidates[0]
 		var charge *billing.Charge
-		if handler.common.billing != nil {
+		var healthPermit providerhealth.Permit
+		if handler.common.billing == nil {
+			selectedRoute, permit, selected := handler.common.selectUnbilledCandidate(tracked, request, candidates)
+			if !selected {
+				return
+			}
+			route, healthPermit = selectedRoute, permit
+		} else {
 			idempotencyKey, keyErr := idempotency.Extract(request.Header)
 			if keyErr != nil {
 				writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
@@ -118,20 +137,21 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 				}
 			}
 			base := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: candidates[0].ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprints: legacyFingerprints}
-			var selected bool
-			route, charge, fallbackDepth, selected = handler.common.selectBillableCandidate(tracked, request, candidates, base)
+			selection, selected := handler.common.selectBillableCandidate(tracked, request, candidates, base)
 			if !selected {
 				return
 			}
+			route, charge, fallbackDepth, healthPermit = selection.decision, selection.charge, selection.rank, selection.permit
 		}
 		provider, logModel = route.Provider, model
 		candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 		outboundBody, rewriteErr := imageoperation.RewriteJSONModel(body, route.ProviderModel)
 		if rewriteErr != nil {
+			handler.common.releaseHealthPermit(request, healthPermit)
 			writeError(tracked, 400, "invalid_request_error", "invalid_model", "request must contain one model")
 			return
 		}
-		handler.execute(tracked, request, route, charge, request.Header.Get("Content-Type"), int64(len(outboundBody)), bytes.NewReader(outboundBody))
+		handler.execute(tracked, request, route, charge, healthPermit, request.Header.Get("Content-Type"), int64(len(outboundBody)), bytes.NewReader(outboundBody))
 		return
 	}
 	boundary := parameters["boundary"]
@@ -186,7 +206,14 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	}
 	route := candidates[0]
 	var charge *billing.Charge
-	if handler.common.billing != nil {
+	var healthPermit providerhealth.Permit
+	if handler.common.billing == nil {
+		selectedRoute, permit, selected := handler.common.selectUnbilledCandidate(tracked, request, candidates)
+		if !selected {
+			return
+		}
+		route, healthPermit = selectedRoute, permit
+	} else {
 		idempotencyKey, keyErr := idempotency.Extract(request.Header)
 		if keyErr != nil {
 			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
@@ -212,20 +239,22 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 			}
 		}
 		base := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: candidates[0].ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprints: legacyFingerprints}
-		var selected bool
-		route, charge, fallbackDepth, selected = handler.common.selectBillableCandidate(tracked, request, candidates, base)
+		selection, selected := handler.common.selectBillableCandidate(tracked, request, candidates, base)
 		if !selected {
 			return
 		}
+		route, charge, fallbackDepth, healthPermit = selection.decision, selection.charge, selection.rank, selection.permit
 	}
 	provider, logModel = route.Provider, model
 	candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		handler.common.releaseHealthPermit(request, healthPermit)
 		writeError(tracked, 500, "server_error", "internal_error", "internal server error")
 		return
 	}
 	providerFile, err := os.CreateTemp(handler.tempDir, "gateway-image-edit-routed-*")
 	if err != nil {
+		handler.common.releaseHealthPermit(request, healthPermit)
 		writeError(tracked, 503, "server_error", "spool_unavailable", "edit capacity unavailable")
 		return
 	}
@@ -234,16 +263,18 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	defer providerFile.Close()
 	providerWritten, err := imageoperation.RewriteMultipartModel(file, boundary, route.ProviderModel, providerFile)
 	if err != nil || providerWritten > handler.maxBodyBytes {
+		handler.common.releaseHealthPermit(request, healthPermit)
 		writeError(tracked, 400, "invalid_request_error", "invalid_model", "request must contain one model")
 		return
 	}
 	if _, err := providerFile.Seek(0, io.SeekStart); err != nil {
+		handler.common.releaseHealthPermit(request, healthPermit)
 		writeError(tracked, 500, "server_error", "internal_error", "internal server error")
 		return
 	}
 	_ = file.Close()
 	_ = os.Remove(name)
-	handler.execute(tracked, request, route, charge, request.Header.Get("Content-Type"), providerWritten, providerFile)
+	handler.execute(tracked, request, route, charge, healthPermit, request.Header.Get("Content-Type"), providerWritten, providerFile)
 }
 
 func (handler *EditHandler) writeRouteError(writer http.ResponseWriter, err error) {
@@ -256,9 +287,17 @@ func (handler *EditHandler) writeRouteError(writer http.ResponseWriter, err erro
 	}
 }
 
-func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Request, route imageoperation.RoutingDecision, charge *billing.Charge, contentType string, length int64, body io.Reader) {
+func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Request, route imageoperation.RoutingDecision, charge *billing.Charge, healthPermit providerhealth.Permit, contentType string, length int64, body io.Reader) {
+	dispatched := false
 	defer func() {
 		if recover() != nil {
+			if healthPermit.ChannelID != "" {
+				if dispatched {
+					handler.common.observeHealth(request, route, healthPermit, nil, errProviderPanic)
+				} else {
+					handler.common.releaseHealthPermit(request, healthPermit)
+				}
+			}
 			if charge != nil {
 				handler.common.reconciliationError(writer, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: billing.ProviderPanic})
 			} else {
@@ -268,10 +307,13 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 	}()
 	executor := handler.common.executors[route.Provider]
 	if executor == nil {
+		handler.common.releaseHealthPermit(request, healthPermit)
 		writeError(writer, 503, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
+	dispatched = true
 	response, err := executor.Generate(request.Context(), openaiimages.Request{Operation: openaiimages.Edit, ChannelID: route.ChannelID, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
+	handler.common.observeHealth(request, route, healthPermit, response, err)
 	if err != nil {
 		if charge != nil {
 			snapshot := handler.common.executorErrorSnapshot(err)

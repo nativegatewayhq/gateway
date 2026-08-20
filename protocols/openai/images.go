@@ -23,6 +23,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
@@ -31,6 +32,7 @@ import (
 )
 
 var errBodyTooLarge = errors.New("request body too large")
+var errProviderPanic = errors.New("provider execution panic")
 
 type Authenticator interface {
 	Authenticate(context.Context, string) (apikey.Principal, error)
@@ -64,6 +66,7 @@ type Handler struct {
 	billing       Billing
 	availability  ProviderAvailability
 	weighted      imageoperation.WeightedSampler
+	health        providerhealth.Gate
 }
 
 func NewBillableImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
@@ -71,19 +74,33 @@ func NewBillableImagesHandler(logger *slog.Logger, authenticator Authenticator, 
 }
 
 func NewBillableImagesHandlerWithAvailability(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing, availability ProviderAvailability) *Handler {
+	return NewBillableImagesHandlerWithAvailabilityAndHealth(logger, authenticator, models, executors, maxBodyBytes, chargeBilling, availability, providerhealth.NoopGate{})
+}
+
+func NewBillableImagesHandlerWithAvailabilityAndHealth(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing, availability ProviderAvailability, health providerhealth.Gate) *Handler {
 	handler := NewImagesHandler(logger, authenticator, models, executors, maxBodyBytes)
 	handler.billing = chargeBilling
 	handler.availability = availability
+	if health != nil {
+		handler.health = health
+	}
 	return handler
 }
 
 func NewImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64) *Handler {
+	return NewImagesHandlerWithHealth(logger, authenticator, models, executors, maxBodyBytes, providerhealth.NoopGate{})
+}
+
+func NewImagesHandlerWithHealth(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, health providerhealth.Gate) *Handler {
 	cloned := make(map[providercredentials.ProviderID]Executor, len(executors))
 	for provider, executor := range executors {
 		cloned[provider] = executor
 	}
 	weighted, _ := imageoperation.NewWeightedSampler(rand.Reader)
-	return &Handler{logger: logger, authenticator: authenticator, models: models, executors: cloned, maxBodyBytes: maxBodyBytes, weighted: weighted}
+	if health == nil {
+		health = providerhealth.NoopGate{}
+	}
+	return &Handler{logger: logger, authenticator: authenticator, models: models, executors: cloned, maxBodyBytes: maxBodyBytes, weighted: weighted, health: health}
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -95,8 +112,18 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	candidateID, channelID, routingPolicy := "", "", ""
 	fallbackDepth := 0
 	var charge *billing.Charge
+	var healthPermit providerhealth.Permit
+	var route imageoperation.RoutingDecision
+	dispatched := false
 	defer func() {
 		if recover() != nil {
+			if healthPermit.ChannelID != "" {
+				if dispatched {
+					handler.observeHealth(request, route, healthPermit, nil, errProviderPanic)
+				} else {
+					handler.releaseHealthPermit(request, healthPermit)
+				}
+			}
 			if charge != nil {
 				handler.reconciliationError(tracked, request.Context(), charge.ID, billing.Observation{Outcome: billing.Unknown, Reason: billing.ProviderPanic})
 			} else if !tracked.wroteHeader {
@@ -172,9 +199,15 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if !handler.authorizeModel(tracked, request, principal, "openai", string(imageoperation.Generate), model) {
 		return
 	}
-	route := candidates[0]
+	route = candidates[0]
 	logModel = model
-	if handler.billing != nil {
+	if handler.billing == nil {
+		selectedRoute, permit, selected := handler.selectUnbilledCandidate(tracked, request, candidates)
+		if !selected {
+			return
+		}
+		route, healthPermit = selectedRoute, permit
+	} else {
 		selector, selectorErr := imageoperation.ParseOpenAIJSONPricingSelector(body)
 		if selectorErr != nil {
 			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_pricing_selector", "request contains unsupported billing options")
@@ -215,24 +248,27 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			handler.writeSnapshot(tracked, replayed.Response, true)
 			return
 		}
-		selectedRoute, startedCharge, selectedRank, selected := handler.selectNewBillableCandidate(tracked, request, candidates, base)
+		selection, selected := handler.selectNewBillableCandidate(tracked, request, candidates, base)
 		if !selected {
 			return
 		}
-		route, charge, fallbackDepth = selectedRoute, startedCharge, selectedRank
+		route, charge, fallbackDepth, healthPermit = selection.decision, selection.charge, selection.rank, selection.permit
 	}
 	provider = route.Provider
 	candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 	outboundBody, rewriteErr := imageoperation.RewriteJSONModel(body, route.ProviderModel)
 	if rewriteErr != nil {
+		handler.releaseHealthPermit(request, healthPermit)
 		writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_model", "request must contain one model")
 		return
 	}
 	executor := handler.executors[provider]
 	if executor == nil {
+		handler.releaseHealthPermit(request, healthPermit)
 		writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
+	dispatched = true
 	response, err := executor.Generate(request.Context(), openaiimages.Request{
 		ChannelID:   route.ChannelID,
 		ContentType: request.Header.Get("Content-Type"),
@@ -240,6 +276,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		UserAgent:   request.UserAgent(),
 		Body:        bytes.NewReader(outboundBody),
 	})
+	handler.observeHealth(request, route, healthPermit, response, err)
 	if err != nil {
 		if charge != nil {
 			snapshot := handler.executorErrorSnapshot(err)
@@ -289,6 +326,47 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
+func (handler *Handler) selectUnbilledCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision) (imageoperation.RoutingDecision, providerhealth.Permit, bool) {
+	healthy, err := handler.healthyCandidates(request, candidates)
+	if err != nil {
+		handler.writeHealthError(writer, err)
+		return imageoperation.RoutingDecision{}, providerhealth.Permit{}, false
+	}
+	for len(healthy) > 0 {
+		index := 0
+		if healthy[0].Policy == imageoperation.Weighted {
+			selected, pickErr := handler.weighted.Pick(healthy)
+			if pickErr != nil {
+				handler.writeHealthError(writer, pickErr)
+				return imageoperation.RoutingDecision{}, providerhealth.Permit{}, false
+			}
+			for candidateIndex := range healthy {
+				if healthy[candidateIndex].CandidateID == selected.CandidateID {
+					index = candidateIndex
+					break
+				}
+			}
+		}
+		candidate := healthy[index]
+		healthy = removeCandidate(healthy, candidate.CandidateID)
+		permit, claimErr := handler.health.ClaimProbe(request.Context(), candidate.ChannelID, requestid.FromContext(request.Context()))
+		if claimErr == nil {
+			return candidate, permit, true
+		}
+		if errors.Is(claimErr, providerhealth.ErrOpen) || errors.Is(claimErr, providerhealth.ErrProbeBusy) {
+			handler.logCandidateSkip(request, candidate, "circuit_unavailable")
+			if candidate.Policy == imageoperation.Fixed {
+				break
+			}
+			continue
+		}
+		handler.writeHealthError(writer, claimErr)
+		return imageoperation.RoutingDecision{}, providerhealth.Permit{}, false
+	}
+	writeError(writer, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+	return imageoperation.RoutingDecision{}, providerhealth.Permit{}, false
+}
+
 func providerConfigured(ctx context.Context, availability ProviderAvailability, decision imageoperation.RoutingDecision) bool {
 	if availability == nil {
 		return true
@@ -321,15 +399,82 @@ func (handler *Handler) logCredentialSkip(request *http.Request, decision imageo
 	handler.logger.Info("image routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", "credential_unavailable")
 }
 
-func (handler *Handler) selectBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+func (handler *Handler) healthyCandidates(request *http.Request, candidates []imageoperation.RoutingDecision) ([]imageoperation.RoutingDecision, error) {
+	healthy := make([]imageoperation.RoutingDecision, 0, len(candidates))
+	for _, candidate := range candidates {
+		snapshot, err := handler.health.Inspect(request.Context(), candidate.ChannelID)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot.State == providerhealth.Open {
+			handler.logCandidateSkip(request, candidate, "circuit_open")
+			continue
+		}
+		healthy = append(healthy, candidate)
+	}
+	return healthy, nil
+}
+
+func (handler *Handler) writeHealthError(writer http.ResponseWriter, _ error) {
+	writeError(writer, http.StatusServiceUnavailable, "server_error", "provider_health_unavailable", "provider unavailable")
+}
+
+func (handler *Handler) releaseHealthPermit(request *http.Request, permit providerhealth.Permit) {
+	if !permit.Probe {
+		return
+	}
+	if err := handler.health.Release(context.WithoutCancel(request.Context()), permit); err != nil {
+		handler.logger.Warn("provider health permit release failed", "request_id", requestid.FromContext(request.Context()), "channel_id", permit.ChannelID, "category", "health_unavailable")
+	}
+}
+
+func (handler *Handler) observeHealth(request *http.Request, route imageoperation.RoutingDecision, permit providerhealth.Permit, response *http.Response, executionErr error) {
+	outcome := providerhealth.Neutral
+	if executionErr != nil {
+		if errors.Is(executionErr, providercredentials.ErrCredentialUnavailable) {
+			handler.releaseHealthPermit(request, permit)
+			return
+		}
+		switch {
+		case errors.Is(executionErr, openaiimages.ErrTimeout):
+			outcome = providerhealth.Timeout
+		case errors.Is(executionErr, openaiimages.ErrCanceled):
+			outcome = providerhealth.Neutral
+		default:
+			outcome = providerhealth.Connection
+		}
+	} else if response != nil {
+		switch {
+		case response.StatusCode >= 200 && response.StatusCode <= 299:
+			outcome = providerhealth.Success
+		case response.StatusCode == http.StatusTooManyRequests:
+			outcome = providerhealth.RateLimited
+		case response.StatusCode >= 500:
+			outcome = providerhealth.ServerError
+		}
+	}
+	observation := providerhealth.Observation{ChannelID: route.ChannelID, ObservationID: requestid.FromContext(request.Context()), Outcome: outcome, Permit: permit}
+	if _, err := handler.health.Observe(context.WithoutCancel(request.Context()), observation); err != nil {
+		handler.logger.Warn("provider health observation failed", "request_id", requestid.FromContext(request.Context()), "provider", string(route.Provider), "channel_id", route.ChannelID, "category", "health_unavailable")
+	}
+}
+
+type billableSelection struct {
+	decision imageoperation.RoutingDecision
+	charge   *billing.Charge
+	rank     int
+	permit   providerhealth.Permit
+}
+
+func (handler *Handler) selectBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (billableSelection, bool) {
 	replayed, found, replayErr := handler.billing.Replay(request.Context(), base)
 	if replayErr != nil {
 		handler.writeBillingError(writer, request, replayErr)
-		return imageoperation.RoutingDecision{}, nil, 0, false
+		return billableSelection{}, false
 	}
 	if found {
 		handler.writeSnapshot(writer, replayed.Response, true)
-		return imageoperation.RoutingDecision{}, nil, 0, false
+		return billableSelection{}, false
 	}
 	return handler.selectNewBillableCandidate(writer, request, candidates, base)
 }
@@ -340,7 +485,17 @@ type billableCandidateAttempt struct {
 	rank     int
 }
 
-func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (billableSelection, bool) {
+	var healthErr error
+	candidates, healthErr = handler.healthyCandidates(request, candidates)
+	if healthErr != nil {
+		handler.writeHealthError(writer, healthErr)
+		return billableSelection{}, false
+	}
+	if len(candidates) == 0 {
+		writeError(writer, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+		return billableSelection{}, false
+	}
 	if len(candidates) > 0 && candidates[0].Policy == imageoperation.Weighted {
 		return handler.selectWeightedCandidate(writer, request, candidates, base)
 	}
@@ -353,11 +508,20 @@ func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, r
 		attempts, prepareErr := handler.prepareBillableAttempts(request, candidates, base)
 		if prepareErr != nil {
 			handler.writeBillingError(writer, request, prepareErr)
-			return imageoperation.RoutingDecision{}, nil, 0, false
+			return billableSelection{}, false
 		}
 		retryEvaluation := false
 		for _, candidateAttempt := range attempts {
 			candidate := candidateAttempt.decision
+			permit, permitErr := handler.health.ClaimProbe(request.Context(), candidate.ChannelID, requestid.FromContext(request.Context()))
+			if permitErr != nil {
+				if errors.Is(permitErr, providerhealth.ErrOpen) || errors.Is(permitErr, providerhealth.ErrProbeBusy) {
+					handler.logCandidateSkip(request, candidate, "circuit_unavailable")
+					continue
+				}
+				handler.writeHealthError(writer, permitErr)
+				return billableSelection{}, false
+			}
 			attempt := base
 			attempt.ChannelID = candidate.ChannelID
 			if candidateAttempt.quote != nil {
@@ -367,31 +531,36 @@ func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, r
 				attempt.ExpectedQuote = candidateAttempt.quote
 			} else {
 				if handler.executors[candidate.Provider] == nil {
+					handler.releaseHealthPermit(request, permit)
 					handler.logCandidateSkip(request, candidate, "executor_unavailable")
 					continue
 				}
 				if !providerConfigured(request.Context(), handler.availability, candidate) {
+					handler.releaseHealthPermit(request, permit)
 					handler.logCredentialSkip(request, candidate)
 					continue
 				}
 				if _, quoteErr := handler.billing.Quote(request.Context(), attempt); quoteErr != nil {
 					if errors.Is(quoteErr, pricing.ErrPriceUnavailable) || errors.Is(quoteErr, pricing.ErrMarginViolation) {
+						handler.releaseHealthPermit(request, permit)
 						handler.logCandidateSkip(request, candidate, "price_unavailable")
 						continue
 					}
 					handler.writeBillingError(writer, request, quoteErr)
-					return imageoperation.RoutingDecision{}, nil, 0, false
+					handler.releaseHealthPermit(request, permit)
+					return billableSelection{}, false
 				}
 			}
 			started, beginErr := handler.billing.Begin(request.Context(), attempt)
 			if beginErr != nil {
+				handler.releaseHealthPermit(request, permit)
 				if lowestCost && errors.Is(beginErr, billing.ErrPriceSnapshotChanged) {
 					if evaluation == 0 {
 						retryEvaluation = true
 						break
 					}
 					handler.writeBillingError(writer, request, beginErr)
-					return imageoperation.RoutingDecision{}, nil, 0, false
+					return billableSelection{}, false
 				}
 				if errors.Is(beginErr, spendcap.ErrExceeded) {
 					handler.logSpendCapSkip(request, candidate, beginErr)
@@ -402,25 +571,26 @@ func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, r
 					continue
 				}
 				handler.writeBillingError(writer, request, beginErr)
-				return imageoperation.RoutingDecision{}, nil, 0, false
+				return billableSelection{}, false
 			}
 			if started.Replay {
+				handler.releaseHealthPermit(request, permit)
 				handler.writeSnapshot(writer, started.Response, true)
-				return imageoperation.RoutingDecision{}, nil, 0, false
+				return billableSelection{}, false
 			}
-			return candidate, &started, candidateAttempt.rank, true
+			return billableSelection{decision: candidate, charge: &started, rank: candidateAttempt.rank, permit: permit}, true
 		}
 		if retryEvaluation {
 			continue
 		}
 		writeError(writer, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
-		return imageoperation.RoutingDecision{}, nil, 0, false
+		return billableSelection{}, false
 	}
 	handler.writeBillingError(writer, request, billing.ErrPriceSnapshotChanged)
-	return imageoperation.RoutingDecision{}, nil, 0, false
+	return billableSelection{}, false
 }
 
-func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (billableSelection, bool) {
 	remaining := make([]imageoperation.RoutingDecision, 0, len(candidates))
 	for _, candidate := range candidates {
 		if handler.executors[candidate.Provider] == nil {
@@ -437,23 +607,35 @@ func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, requ
 		candidate, err := handler.weighted.Pick(remaining)
 		if err != nil {
 			handler.writeBillingError(writer, request, err)
-			return imageoperation.RoutingDecision{}, nil, 0, false
+			return billableSelection{}, false
 		}
 		remaining = removeCandidate(remaining, candidate.CandidateID)
+		permit, err := handler.health.ClaimProbe(request.Context(), candidate.ChannelID, requestid.FromContext(request.Context()))
+		if err != nil {
+			if errors.Is(err, providerhealth.ErrOpen) || errors.Is(err, providerhealth.ErrProbeBusy) {
+				handler.logCandidateSkip(request, candidate, "circuit_unavailable")
+				continue
+			}
+			handler.writeHealthError(writer, err)
+			return billableSelection{}, false
+		}
 		attempt := base
 		attempt.ChannelID = candidate.ChannelID
 		attempt.RoutingPolicy = string(imageoperation.Weighted)
 		attempt.CostRank = rank
 		if _, err := handler.billing.Quote(request.Context(), attempt); err != nil {
 			if errors.Is(err, pricing.ErrPriceUnavailable) || errors.Is(err, pricing.ErrMarginViolation) {
+				handler.releaseHealthPermit(request, permit)
 				handler.logCandidateSkip(request, candidate, "price_unavailable")
 				continue
 			}
 			handler.writeBillingError(writer, request, err)
-			return imageoperation.RoutingDecision{}, nil, 0, false
+			handler.releaseHealthPermit(request, permit)
+			return billableSelection{}, false
 		}
 		started, err := handler.billing.Begin(request.Context(), attempt)
 		if err != nil {
+			handler.releaseHealthPermit(request, permit)
 			if errors.Is(err, spendcap.ErrExceeded) {
 				handler.logSpendCapSkip(request, candidate, err)
 				continue
@@ -463,16 +645,17 @@ func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, requ
 				continue
 			}
 			handler.writeBillingError(writer, request, err)
-			return imageoperation.RoutingDecision{}, nil, 0, false
+			return billableSelection{}, false
 		}
 		if started.Replay {
+			handler.releaseHealthPermit(request, permit)
 			handler.writeSnapshot(writer, started.Response, true)
-			return imageoperation.RoutingDecision{}, nil, 0, false
+			return billableSelection{}, false
 		}
-		return candidate, &started, rank, true
+		return billableSelection{decision: candidate, charge: &started, rank: rank, permit: permit}, true
 	}
 	writeError(writer, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
-	return imageoperation.RoutingDecision{}, nil, 0, false
+	return billableSelection{}, false
 }
 
 func removeCandidate(candidates []imageoperation.RoutingDecision, candidateID string) []imageoperation.RoutingDecision {

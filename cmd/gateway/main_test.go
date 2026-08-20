@@ -253,31 +253,41 @@ func TestGatewayProcessRedisLossKeepsLivenessAndFailsReadiness(t *testing.T) {
 	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Skip("TEST_DATABASE_URL is required")
 	}
-	executable, address := buildGateway(t), availableAddress(t)
-	command := exec.Command(executable)
-	command.Env = append(gatewayEnvironment(address), "GATEWAY_RATE_LIMIT_MODE=required", "GATEWAY_REDIS_URL=redis://127.0.0.1:1/0", "GATEWAY_RATE_LIMIT_TIMEOUT=20ms")
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waitForHealth(t, "http://"+address+"/health/live", command, &output)
-	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + address + "/health/ready")
-	if err != nil {
-		_ = command.Process.Kill()
-		t.Fatal(err)
-	}
-	_, _ = io.Copy(io.Discard, response.Body)
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusServiceUnavailable {
-		_ = command.Process.Kill()
-		t.Fatalf("ready=%d logs=%s", response.StatusCode, output.String())
-	}
-	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	if err := command.Wait(); err != nil {
-		t.Fatalf("exit=%v logs=%s", err, output.String())
+	for _, test := range []struct {
+		name string
+		env  []string
+	}{
+		{"rate limit", []string{"GATEWAY_RATE_LIMIT_MODE=required", "GATEWAY_REDIS_URL=redis://127.0.0.1:1/0", "GATEWAY_RATE_LIMIT_TIMEOUT=20ms"}},
+		{"provider health", []string{"GATEWAY_PROVIDER_HEALTH_MODE=required", "GATEWAY_REDIS_URL=redis://127.0.0.1:1/0", "GATEWAY_PROVIDER_HEALTH_COMMAND_TIMEOUT=20ms"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executable, address := buildGateway(t), availableAddress(t)
+			command := exec.Command(executable)
+			command.Env = append(gatewayEnvironment(address), test.env...)
+			var output bytes.Buffer
+			command.Stdout, command.Stderr = &output, &output
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waitForHealth(t, "http://"+address+"/health/live", command, &output)
+			response, err := (&http.Client{Timeout: time.Second}).Get("http://" + address + "/health/ready")
+			if err != nil {
+				_ = command.Process.Kill()
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusServiceUnavailable {
+				_ = command.Process.Kill()
+				t.Fatalf("ready=%d logs=%s", response.StatusCode, output.String())
+			}
+			if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Wait(); err != nil {
+				t.Fatalf("exit=%v logs=%s", err, output.String())
+			}
+		})
 	}
 }
 
