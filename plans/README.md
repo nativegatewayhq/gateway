@@ -162,6 +162,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-020` | completed | [Phase 1 API Key Network Restrictions](./20260820_175231_plan_phase1_api_key_network_restrictions.md) | `phase-1-api-key-authorization` |
 | `gateway-20260820-021` | completed | [Phase 1 Hierarchical Cost Quotas](./20260820_181108_plan_phase1_hierarchical_cost_quotas.md) | `phase-1-cost-quotas` |
 | `gateway-20260820-022` | completed | [Phase 1 Provider Channel Spend Caps](./20260820_183744_plan_phase1_provider_channel_spend_caps.md) | `phase-1-provider-spend-controls` |
-| `gateway-20260820-023` | in_progress | [Phase 1 Encrypted Provider Credential Control Plane](./20260820_185824_plan_phase1_provider_credential_control_plane.md) | `phase-1-provider-credential-control-plane` |
+| `gateway-20260820-023` | completed | [Phase 1 Encrypted Provider Credential Control Plane](./20260820_185824_plan_phase1_provider_credential_control_plane.md) | `phase-1-provider-credential-control-plane` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-023
 title: Phase 1 Encrypted Provider Credential Control Plane
-status: in_progress
+status: completed
 created_at: 2026-08-20T18:58:24+09:00
-updated_at: 2026-08-20T18:58:24+09:00
+updated_at: 2026-08-20T19:29:54+09:00
 owners:
   - gateway
 initiative: phase-1-provider-credential-control-plane
@@ -201,23 +201,32 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] DB에 Provider credential plaintext column이나 plaintext audit가 없음
-- [ ] DB 단독 정보로 credential을 복호화할 수 없음
-- [ ] credential이 channel/provider에 정확히 scope됨
-- [ ] stage·activate·retire가 원자적이고 감사 가능하며 idempotent함
-- [ ] 다중 인스턴스 rotation에서 신규 request가 bounded delay 내 새 version을 사용함
-- [ ] 한 request가 credential 하나로 최대 한 번만 dispatch됨
-- [ ] credential failure가 pre-dispatch fallback과 과금 불변식을 유지함
-- [ ] legacy 환경변수 설치가 명시된 channel에서 호환됨
-- [ ] CLI, log, response, JSON과 오류에 credential·ciphertext·key metadata가 노출되지 않음
-- [ ] `/v1/models`와 routing availability가 active channel credential을 반영함
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] DB에 Provider credential plaintext column이나 plaintext audit가 없음
+- [x] DB 단독 정보로 credential을 복호화할 수 없음
+- [x] credential이 channel/provider에 정확히 scope됨
+- [x] stage·activate·retire가 원자적이고 감사 가능하며 idempotent함
+- [x] 다중 인스턴스 rotation에서 신규 request가 bounded delay 내 새 version을 사용함
+- [x] 한 request가 credential 하나로 최대 한 번만 dispatch됨
+- [x] credential failure가 pre-dispatch fallback과 과금 불변식을 유지함
+- [x] legacy 환경변수 설치가 명시된 channel에서 호환됨
+- [x] CLI, log, response, JSON과 오류에 credential·ciphertext·key metadata가 노출되지 않음
+- [x] `/v1/models`와 routing availability가 active channel credential을 반영함
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `161664dae11b11c7a6d22ceb1fe13d7c36007c1b`
+- PR: `https://github.com/nativegatewayhq/gateway/pull/22`
+- 로컬 release gate: `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과
+- 로컬 통합 검증: PostgreSQL `127.0.0.1:55433`, Redis `127.0.0.1:56379`를 사용한 `make integration-test` 통과
+- 암호화 경계: random data key/nonce, master-key wrapping, ID/channel/provider/version AAD, malformed·wrong-key·row-scope 변조의 fail-closed 동작과 plaintext column 부재 검증
+- lifecycle: stage/activate/retire, stable idempotency replay, conflicting replay, 이전 active 자동 retire audit, immutable ciphertext, append-only operation/event와 동시 activation을 실제 PostgreSQL에서 검증
+- rotation: 이전 key read/현재 key write keyring, key 변경 후 lifecycle replay, process 재생성 후 resolve, rotation 동시 resolve가 완전한 구·신 credential 중 하나만 사용하고 commit 이후 즉시 신 version을 사용함을 검증
+- Data Plane: OpenAI Images/Edits와 Gemini channel ID 전달, active credential 우선, built-in legacy fallback, DB/decrypt failure fail-closed, `/v1/models` filtering과 pre-reserve fallback 검증
+- 과금·보안: post-reserve credential race가 정확히 한 번 release되고 다른 Provider를 호출하지 않음, stdin CLI와 response/log/format/JSON redaction 및 applied header 정리 검증
+- GitHub Actions: `check` pass (`32359062681`), `validate` pass (`32359106054`)
 
 ## Rollback 계획
 
