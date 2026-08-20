@@ -4,7 +4,7 @@ An open-source multimodal AI API gateway that preserves official provider SDKs a
 
 ## Status
 
-Phase 0 native protocol validation and early Phase 1 billing foundations. The process exposes health endpoints, tenant-owned PostgreSQL service API key authentication, a capability-backed models endpoint, non-streaming Gemini `generateContent`, and OpenAI-compatible image generation and editing. OpenAI/xAI image requests can use required price-and-Wallet settlement; production payment deposits, dynamic routing, and Gemini billing remain unavailable.
+Phase 0 native protocol validation, Phase 1 image billing foundations, and early Phase 2 routing. The process exposes health endpoints, tenant-owned PostgreSQL service API key authentication, a capability-backed models endpoint, non-streaming Gemini `generateContent`, and OpenAI-compatible image generation and editing. Billing-required mode supports exact channel pricing, Wallet settlement, customer quotas, Provider spend caps, fixed/priority/lowest-cost routing, and Gemini/OpenAI/xAI image billing. Production payment deposits and managed route publication remain outside this repository.
 
 ## Development workflow
 
@@ -157,6 +157,14 @@ go run ./cmd/gateway-spend-cap \
 ```
 
 Repeating the channel/period updates the stable policy ID and appends an audit version. Disable with `-action disable -policy-id spcap_... -actor ... -reason ...`. Day and month policies may coexist and both must have capacity. Estimated Provider cost is reserved atomically with the charge, Wallet, and customer quota; actual cost is captured, known failures release it, and uncertain outcomes remain reserved until reconciliation. Channels without policies are unlimited.
+
+## Lowest-cost image routing
+
+An image model route may use the `lowest_cost` policy in billing-required mode. The Gateway filters candidates without an executor, active channel credential, valid exact price, or required margin, then compares every remaining candidate at one UTC evaluation timestamp. Selection uses estimated upstream cost first, configured priority second, and candidate ID last, so ties are deterministic; a lower customer sale price never overrides a higher upstream cost.
+
+The selected price ID, cost, sale, currency, channel, evaluation timestamp, policy, and cost rank are bound to Billing `Begin` and stored with the immutable charge. If the price snapshot changes between quote and reserve, the Gateway re-evaluates all candidates once before dispatch. A second price race fails closed. Provider channel spend-cap exhaustion moves to the next-lowest candidate, while Wallet, customer quota, database, and post-dispatch failures never trigger cost-routing fallback.
+
+Route publishers must prepare every candidate's active credential, exact channel price, minimum margin, and optional spend cap before enabling `lowest_cost`. Client responses and routing skip logs do not expose prices, margins, credentials, request content, balances, or remaining limits.
 
 ## Provider credentials
 

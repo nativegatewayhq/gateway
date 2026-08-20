@@ -209,52 +209,11 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			handler.writeSnapshot(tracked, replayed.Response, true)
 			return
 		}
-		var route imageoperation.RoutingDecision
-		selected := false
-		for index, candidate := range candidates {
-			if candidate.Provider != providercredentials.Google || handler.executor == nil {
-				handler.logCandidateSkip(request, candidate, "provider_unavailable")
-				continue
-			}
-			if !geminiProviderConfigured(request.Context(), handler.availability, candidate) {
-				handler.logCredentialSkip(request, candidate)
-				continue
-			}
-			attempt := base
-			attempt.ChannelID = candidate.ChannelID
-			if _, quoteErr := handler.billing.Quote(request.Context(), attempt); quoteErr != nil {
-				if errors.Is(quoteErr, pricing.ErrPriceUnavailable) || errors.Is(quoteErr, pricing.ErrMarginViolation) {
-					handler.logCandidateSkip(request, candidate, "price_unavailable")
-					continue
-				}
-				handler.writeBillingError(tracked, request, quoteErr)
-				return
-			}
-			startedCharge, beginErr := handler.billing.Begin(request.Context(), attempt)
-			if beginErr != nil {
-				if errors.Is(beginErr, spendcap.ErrExceeded) {
-					handler.logSpendCapSkip(request, candidate, beginErr)
-					continue
-				}
-				if errors.Is(beginErr, pricing.ErrPriceUnavailable) || errors.Is(beginErr, pricing.ErrMarginViolation) {
-					handler.logCandidateSkip(request, candidate, "price_race_unavailable")
-					continue
-				}
-				handler.writeBillingError(tracked, request, beginErr)
-				return
-			}
-			charge = &startedCharge
-			if charge.Replay {
-				handler.writeSnapshot(tracked, charge.Response, true)
-				return
-			}
-			route, fallbackDepth, selected = candidate, index, true
-			break
-		}
+		route, startedCharge, selectedRank, selected := handler.selectNewBillableCandidate(tracked, request, candidates, base)
 		if !selected {
-			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
 			return
 		}
+		charge, fallbackDepth = startedCharge, selectedRank
 		providerModel = route.ProviderModel
 		candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 	}
@@ -345,7 +304,7 @@ func geminiProviderConfigured(ctx context.Context, availability ProviderAvailabi
 }
 
 func (handler *Handler) logCandidateSkip(request *http.Request, decision imageoperation.RoutingDecision, category string) {
-	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "model", decision.Model, "candidate_id", decision.CandidateID, "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
+	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
 }
 
 func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageoperation.RoutingDecision, err error) {
@@ -359,6 +318,134 @@ func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageope
 
 func (handler *Handler) logCredentialSkip(request *http.Request, decision imageoperation.RoutingDecision) {
 	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", "credential_unavailable")
+}
+
+type geminiBillableCandidateAttempt struct {
+	decision imageoperation.RoutingDecision
+	quote    *billing.BoundQuote
+	rank     int
+}
+
+func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+	lowestCost := len(candidates) > 0 && candidates[0].Policy == imageoperation.LowestCost
+	maximumEvaluations := 1
+	if lowestCost {
+		maximumEvaluations = 2
+	}
+	for evaluation := 0; evaluation < maximumEvaluations; evaluation++ {
+		attempts, prepareErr := handler.prepareBillableAttempts(request, candidates, base)
+		if prepareErr != nil {
+			handler.writeBillingError(writer, request, prepareErr)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		retryEvaluation := false
+		for _, candidateAttempt := range attempts {
+			candidate := candidateAttempt.decision
+			attempt := base
+			attempt.ChannelID = candidate.ChannelID
+			if candidateAttempt.quote != nil {
+				attempt.RoutingPolicy = string(imageoperation.LowestCost)
+				attempt.CostRank = candidateAttempt.rank
+				attempt.EvaluationAt = candidateAttempt.quote.EvaluatedAt
+				attempt.ExpectedQuote = candidateAttempt.quote
+			} else {
+				if candidate.Provider != providercredentials.Google || handler.executor == nil {
+					handler.logCandidateSkip(request, candidate, "provider_unavailable")
+					continue
+				}
+				if !geminiProviderConfigured(request.Context(), handler.availability, candidate) {
+					handler.logCredentialSkip(request, candidate)
+					continue
+				}
+				if _, quoteErr := handler.billing.Quote(request.Context(), attempt); quoteErr != nil {
+					if errors.Is(quoteErr, pricing.ErrPriceUnavailable) || errors.Is(quoteErr, pricing.ErrMarginViolation) {
+						handler.logCandidateSkip(request, candidate, "price_unavailable")
+						continue
+					}
+					handler.writeBillingError(writer, request, quoteErr)
+					return imageoperation.RoutingDecision{}, nil, 0, false
+				}
+			}
+			started, beginErr := handler.billing.Begin(request.Context(), attempt)
+			if beginErr != nil {
+				if lowestCost && errors.Is(beginErr, billing.ErrPriceSnapshotChanged) {
+					if evaluation == 0 {
+						retryEvaluation = true
+						break
+					}
+					handler.writeBillingError(writer, request, beginErr)
+					return imageoperation.RoutingDecision{}, nil, 0, false
+				}
+				if errors.Is(beginErr, spendcap.ErrExceeded) {
+					handler.logSpendCapSkip(request, candidate, beginErr)
+					continue
+				}
+				if errors.Is(beginErr, pricing.ErrPriceUnavailable) || errors.Is(beginErr, pricing.ErrMarginViolation) {
+					handler.logCandidateSkip(request, candidate, "price_race_unavailable")
+					continue
+				}
+				handler.writeBillingError(writer, request, beginErr)
+				return imageoperation.RoutingDecision{}, nil, 0, false
+			}
+			if started.Replay {
+				handler.writeSnapshot(writer, started.Response, true)
+				return imageoperation.RoutingDecision{}, nil, 0, false
+			}
+			return candidate, &started, candidateAttempt.rank, true
+		}
+		if retryEvaluation {
+			continue
+		}
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+		return imageoperation.RoutingDecision{}, nil, 0, false
+	}
+	handler.writeBillingError(writer, request, billing.ErrPriceSnapshotChanged)
+	return imageoperation.RoutingDecision{}, nil, 0, false
+}
+
+func (handler *Handler) prepareBillableAttempts(request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) ([]geminiBillableCandidateAttempt, error) {
+	if len(candidates) == 0 || candidates[0].Policy != imageoperation.LowestCost {
+		attempts := make([]geminiBillableCandidateAttempt, 0, len(candidates))
+		for index, candidate := range candidates {
+			attempts = append(attempts, geminiBillableCandidateAttempt{decision: candidate, rank: index})
+		}
+		return attempts, nil
+	}
+	evaluatedAt := time.Now().UTC().Truncate(time.Microsecond)
+	estimates := make(map[string]pricing.Estimate, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Provider != providercredentials.Google || handler.executor == nil {
+			handler.logCandidateSkip(request, candidate, "provider_unavailable")
+			continue
+		}
+		if !geminiProviderConfigured(request.Context(), handler.availability, candidate) {
+			handler.logCredentialSkip(request, candidate)
+			continue
+		}
+		quoteRequest := base
+		quoteRequest.ChannelID = candidate.ChannelID
+		quoteRequest.RoutingPolicy = string(imageoperation.LowestCost)
+		quoteRequest.EvaluationAt = evaluatedAt
+		estimate, err := handler.billing.Quote(request.Context(), quoteRequest)
+		if err != nil {
+			if errors.Is(err, pricing.ErrPriceUnavailable) || errors.Is(err, pricing.ErrMarginViolation) {
+				handler.logCandidateSkip(request, candidate, "price_unavailable")
+				continue
+			}
+			return nil, err
+		}
+		estimates[candidate.ChannelID] = estimate
+	}
+	ordered, err := imageoperation.OrderLowestCost(candidates, estimates, evaluatedAt, base.Quantity)
+	if err != nil {
+		return nil, err
+	}
+	attempts := make([]geminiBillableCandidateAttempt, 0, len(ordered))
+	for rank, candidate := range ordered {
+		quote := billing.BoundQuote{PriceID: candidate.Estimate.PriceID, ChannelID: candidate.Estimate.ChannelID, Currency: candidate.Estimate.Currency, EstimatedCost: candidate.Estimate.EstimatedCost, MaximumSale: candidate.Estimate.MaximumSale, EvaluatedAt: candidate.Estimate.EvaluatedAt}
+		attempts = append(attempts, geminiBillableCandidateAttempt{decision: candidate.Decision, quote: &quote, rank: rank})
+	}
+	return attempts, nil
 }
 
 func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {

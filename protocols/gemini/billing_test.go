@@ -16,6 +16,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/costquota"
+	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
@@ -36,6 +37,8 @@ type geminiBillingFake struct {
 	quoteErrors   map[string]error
 	beginChannels []string
 	replayCalls   int
+	quotes        map[string]pricing.Estimate
+	quoteRequests []chargebilling.BeginRequest
 }
 
 func (fake *geminiBillingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
@@ -54,7 +57,15 @@ func (fake *geminiBillingFake) Replay(context.Context, chargebilling.BeginReques
 }
 
 func (fake *geminiBillingFake) Quote(_ context.Context, request chargebilling.BeginRequest) (pricing.Estimate, error) {
-	return pricing.Estimate{}, fake.quoteErrors[request.ChannelID]
+	fake.quoteRequests = append(fake.quoteRequests, request)
+	estimate := fake.quotes[request.ChannelID]
+	if estimate.ChannelID == "" {
+		estimate.ChannelID = request.ChannelID
+	}
+	if !request.EvaluationAt.IsZero() {
+		estimate.EvaluatedAt = request.EvaluationAt
+	}
+	return estimate, fake.quoteErrors[request.ChannelID]
 }
 
 func (fake *geminiBillingFake) Complete(_ context.Context, _ string, success bool, snapshot chargebilling.ResponseSnapshot) (chargebilling.Charge, error) {
@@ -135,6 +146,32 @@ func TestBillableGeminiFallsBackToNextExactPricedCandidate(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != 200 || executor.request.Model != "second-model" || len(fake.beginChannels) != 1 || fake.beginChannels[0] != "channel_00000000000000000000000000000004" {
 		t.Fatalf("response=%d model=%s begin=%v", response.Code, executor.request.Model, fake.beginChannels)
+	}
+}
+
+func TestBillableGeminiUsesLowestCostBoundQuote(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "gemini", Model: "gemini-logical", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.LowestCost, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_first", Provider: providercredentials.Google, ProviderModel: "expensive-model", ChannelID: "channel_00000000000000000000000000000003", Enabled: true, Priority: 1},
+		{ID: "candidate_second", Provider: providercredentials.Google, ProviderModel: "cheap-model", ChannelID: "channel_00000000000000000000000000000004", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &geminiBillingFake{beginCharge: chargebilling.Charge{ID: "charge_test"}, quotes: map[string]pricing.Estimate{
+		"channel_00000000000000000000000000000003": {PriceID: "price_00000000000000000000000000000003", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 50, MaximumSale: 51},
+		"channel_00000000000000000000000000000004": {PriceID: "price_00000000000000000000000000000004", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 10, MaximumSale: 90},
+	}}
+	executor := &stubExecutor{response: &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}}
+	handler := NewBillableHandlerWithAvailability(slog.Default(), &stubAuthenticator{principal: apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test"}}, registry, executor, 4096, fake, geminiChannelAvailability{"channel_00000000000000000000000000000003": true, "channel_00000000000000000000000000000004": true})
+	request := geminiRequest(strings.NewReader(`{"contents":[]}`))
+	request.URL.Path = "/v1beta/models/gemini-logical:generateContent"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || executor.request.Model != "cheap-model" || executor.request.ChannelID != "channel_00000000000000000000000000000004" || fake.beginRequest.ExpectedQuote == nil || fake.beginRequest.ExpectedQuote.PriceID != "price_00000000000000000000000000000004" || fake.beginRequest.CostRank != 0 {
+		t.Fatalf("response=%d request=%+v begin=%+v", response.Code, executor.request, fake.beginRequest)
+	}
+	if len(fake.quoteRequests) != 2 || !fake.quoteRequests[0].EvaluationAt.Equal(fake.quoteRequests[1].EvaluationAt) {
+		t.Fatalf("quotes=%+v", fake.quoteRequests)
 	}
 }
 

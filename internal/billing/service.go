@@ -13,6 +13,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,14 +25,24 @@ import (
 )
 
 var (
-	ErrInvalidRequest   = errors.New("invalid billable request")
-	ErrRequestConflict  = errors.New("billable request conflict")
-	ErrRequestPending   = errors.New("billable request already pending")
-	ErrAlreadySettled   = errors.New("billable request already settled")
-	ErrInvalidState     = errors.New("invalid charge state")
-	ErrSnapshotCorrupt  = errors.New("response snapshot corrupt")
-	ErrResponseTooLarge = errors.New("response snapshot too large")
+	ErrInvalidRequest       = errors.New("invalid billable request")
+	ErrRequestConflict      = errors.New("billable request conflict")
+	ErrRequestPending       = errors.New("billable request already pending")
+	ErrAlreadySettled       = errors.New("billable request already settled")
+	ErrInvalidState         = errors.New("invalid charge state")
+	ErrSnapshotCorrupt      = errors.New("response snapshot corrupt")
+	ErrResponseTooLarge     = errors.New("response snapshot too large")
+	ErrPriceSnapshotChanged = errors.New("price snapshot changed")
 )
+
+type BoundQuote struct {
+	PriceID       string
+	ChannelID     string
+	Currency      string
+	EstimatedCost int64
+	MaximumSale   int64
+	EvaluatedAt   time.Time
+}
 
 type BeginRequest struct {
 	RequestID          string
@@ -48,6 +59,10 @@ type BeginRequest struct {
 	IdempotencyKey     string
 	RequestFingerprint [32]byte
 	LegacyFingerprints [][32]byte
+	ExpectedQuote      *BoundQuote
+	RoutingPolicy      string
+	CostRank           int
+	EvaluationAt       time.Time
 }
 
 type ResponseSnapshot struct {
@@ -103,6 +118,9 @@ type Charge struct {
 	Response           ResponseSnapshot
 	ResponseSHA256     [32]byte
 	Replay             bool
+	RoutingPolicy      string
+	CostRank           *int
+	PriceEvaluatedAt   *time.Time
 }
 
 type Estimator interface {
@@ -161,7 +179,16 @@ func (service *Service) MaximumResponseBytes() int64 { return service.maxRespons
 func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge, error) {
 	request.Size = defaultDimension(request.Size)
 	request.Quality = defaultDimension(request.Quality)
+	request.EvaluationAt = canonicalEvaluationTime(request.EvaluationAt)
+	if request.ExpectedQuote != nil {
+		quote := *request.ExpectedQuote
+		quote.EvaluatedAt = canonicalEvaluationTime(quote.EvaluatedAt)
+		request.ExpectedQuote = &quote
+	}
 	if !validBeginRequest(request) {
+		return Charge{}, ErrInvalidRequest
+	}
+	if request.RoutingPolicy == "lowest_cost" && request.ExpectedQuote == nil {
 		return Charge{}, ErrInvalidRequest
 	}
 	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -196,9 +223,12 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 		existing.Replay = true
 		return existing, nil
 	}
-	estimate, err := service.estimator.EstimateInTx(ctx, tx, pricing.Request{Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, ChannelID: request.ChannelID, Quantity: request.Quantity, Size: request.Size, Quality: request.Quality})
+	estimate, err := service.estimator.EstimateInTx(ctx, tx, pricing.Request{Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, ChannelID: request.ChannelID, Quantity: request.Quantity, Size: request.Size, Quality: request.Quality, At: request.EvaluationAt})
 	if err != nil {
 		return Charge{}, err
+	}
+	if request.ExpectedQuote != nil && !matchesBoundQuote(estimate, *request.ExpectedQuote) {
+		return Charge{}, ErrPriceSnapshotChanged
 	}
 	operationIdentity := request.RequestID
 	if request.IdempotencyKey != "" {
@@ -214,13 +244,20 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 		return Charge{}, err
 	}
 	charge := Charge{ID: id, RequestID: request.RequestID, OrganizationID: request.OrganizationID, ProjectID: request.ProjectID, Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, ChannelID: estimate.ChannelID, PriceID: estimate.PriceID, Quantity: request.Quantity, Size: request.Size, Quality: request.Quality, Currency: estimate.Currency, EstimatedCost: estimate.EstimatedCost, ReservedSale: estimate.MaximumSale, ReservationID: reservation.Reservation.ID, State: "RESERVED", IdempotencyKey: request.IdempotencyKey, RequestFingerprint: request.RequestFingerprint}
+	if request.RoutingPolicy == "lowest_cost" {
+		rank := request.CostRank
+		evaluatedAt := request.EvaluationAt
+		charge.RoutingPolicy = request.RoutingPolicy
+		charge.CostRank = &rank
+		charge.PriceEvaluatedAt = &evaluatedAt
+	}
 	var storedKey, storedFingerprint any
 	if request.IdempotencyKey != "" {
 		storedKey = request.IdempotencyKey
 		storedFingerprint = request.RequestFingerprint[:]
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO image_request_charges(id,request_id,organization_id,project_id,protocol,operation,model,channel_id,price_id,quantity,size,quality,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.Quantity, charge.Size, charge.Quality, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, charge.State, storedKey, storedFingerprint)
+	_, err = tx.Exec(ctx, `INSERT INTO image_request_charges(id,request_id,organization_id,project_id,protocol,operation,model,channel_id,price_id,quantity,size,quality,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint,routing_policy,cost_rank,price_evaluated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.Quantity, charge.Size, charge.Quality, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, charge.State, storedKey, storedFingerprint, nullableString(charge.RoutingPolicy), charge.CostRank, charge.PriceEvaluatedAt)
 	if err != nil {
 		return Charge{}, err
 	}
@@ -245,6 +282,7 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 func (service *Service) Replay(ctx context.Context, request BeginRequest) (Charge, bool, error) {
 	request.Size = defaultDimension(request.Size)
 	request.Quality = defaultDimension(request.Quality)
+	request.EvaluationAt = canonicalEvaluationTime(request.EvaluationAt)
 	if !validBeginRequest(request) {
 		return Charge{}, false, ErrInvalidRequest
 	}
@@ -276,6 +314,7 @@ func (service *Service) Replay(ctx context.Context, request BeginRequest) (Charg
 func (service *Service) Quote(ctx context.Context, request BeginRequest) (pricing.Estimate, error) {
 	request.Size = defaultDimension(request.Size)
 	request.Quality = defaultDimension(request.Quality)
+	request.EvaluationAt = canonicalEvaluationTime(request.EvaluationAt)
 	if !validBeginRequest(request) {
 		return pricing.Estimate{}, ErrInvalidRequest
 	}
@@ -284,7 +323,7 @@ func (service *Service) Quote(ctx context.Context, request BeginRequest) (pricin
 		return pricing.Estimate{}, err
 	}
 	defer tx.Rollback(ctx)
-	return service.estimator.EstimateInTx(ctx, tx, pricing.Request{Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, ChannelID: request.ChannelID, Quantity: request.Quantity, Size: request.Size, Quality: request.Quality})
+	return service.estimator.EstimateInTx(ctx, tx, pricing.Request{Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, ChannelID: request.ChannelID, Quantity: request.Quantity, Size: request.Size, Quality: request.Quality, At: request.EvaluationAt})
 }
 
 func (service *Service) Capture(ctx context.Context, chargeID string) (Charge, error) {
@@ -529,20 +568,23 @@ func loadByID(ctx context.Context, tx pgx.Tx, id string, lock bool) (Charge, boo
 	return scanCharge(tx.QueryRow(ctx, query, id))
 }
 
-const chargeSelect = `SELECT id,request_id,organization_id,project_id,protocol,operation,model,channel_id,price_id,quantity,size,quality,currency,estimated_cost,reserved_sale,actual_cost,captured_sale,reservation_id,state,idempotency_key,request_fingerprint,response_snapshot_version,response_status,response_headers,response_body,response_body_sha256 FROM image_request_charges`
+const chargeSelect = `SELECT id,request_id,organization_id,project_id,protocol,operation,model,channel_id,price_id,quantity,size,quality,currency,estimated_cost,reserved_sale,actual_cost,captured_sale,reservation_id,state,idempotency_key,request_fingerprint,response_snapshot_version,response_status,response_headers,response_body,response_body_sha256,routing_policy,cost_rank,price_evaluated_at FROM image_request_charges`
 
 func scanCharge(row pgx.Row) (Charge, bool, error) {
 	var charge Charge
-	var key *string
+	var key, routingPolicy *string
 	var fingerprint, headersJSON, body, bodySHA []byte
 	var responseStatus *int
-	err := row.Scan(&charge.ID, &charge.RequestID, &charge.OrganizationID, &charge.ProjectID, &charge.Protocol, &charge.Operation, &charge.Model, &charge.ChannelID, &charge.PriceID, &charge.Quantity, &charge.Size, &charge.Quality, &charge.Currency, &charge.EstimatedCost, &charge.ReservedSale, &charge.ActualCost, &charge.CapturedSale, &charge.ReservationID, &charge.State, &key, &fingerprint, &charge.SnapshotVersion, &responseStatus, &headersJSON, &body, &bodySHA)
+	err := row.Scan(&charge.ID, &charge.RequestID, &charge.OrganizationID, &charge.ProjectID, &charge.Protocol, &charge.Operation, &charge.Model, &charge.ChannelID, &charge.PriceID, &charge.Quantity, &charge.Size, &charge.Quality, &charge.Currency, &charge.EstimatedCost, &charge.ReservedSale, &charge.ActualCost, &charge.CapturedSale, &charge.ReservationID, &charge.State, &key, &fingerprint, &charge.SnapshotVersion, &responseStatus, &headersJSON, &body, &bodySHA, &routingPolicy, &charge.CostRank, &charge.PriceEvaluatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Charge{}, false, nil
 	}
 	if err == nil {
 		if key != nil {
 			charge.IdempotencyKey = *key
+		}
+		if routingPolicy != nil {
+			charge.RoutingPolicy = *routingPolicy
 		}
 		copy(charge.RequestFingerprint[:], fingerprint)
 		if charge.SnapshotVersion == 1 && responseStatus != nil {
@@ -575,7 +617,33 @@ func validBeginRequest(request BeginRequest) bool {
 	hasFingerprint := request.RequestFingerprint != ([32]byte{})
 	validIdempotency := (request.IdempotencyKey == "" && !hasFingerprint) || (idempotency.Valid(request.IdempotencyKey) && hasFingerprint)
 	validProtocolOperation := (request.Protocol == "openai" && (request.Operation == "image.generate" || request.Operation == "image.edit")) || (request.Protocol == "gemini" && request.Operation == "image.generate")
-	return validIdempotency && validPrefixed(request.OrganizationID, "org_", 200) && validPrefixed(request.ProjectID, "project_", 200) && validText(request.RequestID, 128) && validProtocolOperation && validText(request.Model, 200) && validID(request.ChannelID, "channel_") && request.Quantity >= 1 && request.Quantity <= 10 && validText(request.Size, 80) && validText(request.Quality, 80)
+	validRouting := request.RoutingPolicy == "" && request.ExpectedQuote == nil && request.EvaluationAt.IsZero()
+	if request.RoutingPolicy == "lowest_cost" {
+		validRouting = request.CostRank >= 0 && !request.EvaluationAt.IsZero() && (request.ExpectedQuote == nil || validBoundQuote(*request.ExpectedQuote, request))
+	}
+	return validIdempotency && validRouting && validPrefixed(request.OrganizationID, "org_", 200) && validPrefixed(request.ProjectID, "project_", 200) && validText(request.RequestID, 128) && validProtocolOperation && validText(request.Model, 200) && validID(request.ChannelID, "channel_") && request.Quantity >= 1 && request.Quantity <= 10 && validText(request.Size, 80) && validText(request.Quality, 80)
+}
+
+func validBoundQuote(quote BoundQuote, request BeginRequest) bool {
+	return validID(quote.PriceID, "price_") && quote.ChannelID == request.ChannelID && quote.Currency == ledger.Currency && quote.EstimatedCost > 0 && quote.MaximumSale > 0 && quote.EvaluatedAt.Equal(request.EvaluationAt)
+}
+
+func matchesBoundQuote(estimate pricing.Estimate, quote BoundQuote) bool {
+	return estimate.PriceID == quote.PriceID && estimate.ChannelID == quote.ChannelID && estimate.Currency == quote.Currency && estimate.EstimatedCost == quote.EstimatedCost && estimate.MaximumSale == quote.MaximumSale && estimate.EvaluatedAt.Equal(quote.EvaluatedAt)
+}
+
+func canonicalEvaluationTime(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+	return value.UTC().Truncate(time.Microsecond)
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func (service *Service) prepareSnapshot(snapshot ResponseSnapshot) (ResponseSnapshot, []byte, [32]byte, error) {
