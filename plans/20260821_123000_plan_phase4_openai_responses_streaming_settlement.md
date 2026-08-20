@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-041
 title: Phase 4 OpenAI Responses SSE Streaming and Disconnect Settlement
-status: accepted
+status: in_progress
 created_at: 2026-08-21T12:30:00+09:00
-updated_at: 2026-08-21T12:30:00+09:00
+updated_at: 2026-08-21T12:45:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-streaming-settlement

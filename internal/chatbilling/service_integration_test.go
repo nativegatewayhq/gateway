@@ -129,6 +129,37 @@ func TestResponsesOperationPriceSettlementAndEvidenceAreIsolated(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamSettlementStoresOnlyTerminalEvidence(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	_, err := prices.Publish(ctx, chatpricing.Price{Operation: "responses.create", ChannelID: "channel_00000000000000000000000000000001", Model: "gpt-4.1", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 2_000_000, InputSale: 3_000_000, CachedInputCost: 1_000_000, CachedInputSale: 2_000_000, OutputCost: 4_000_000, OutputSale: 5_000_000}}, "responses-stream-test-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := BeginRequest{Operation: "responses.create", RequestID: "responses-stream-request", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "gpt-4.1", ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "responses-stream-idempotency", Fingerprint: [32]byte{4}, DeliveryMode: "stream"}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := [32]byte{8}
+	settled, err := service.CompleteStreamUsage(ctx, charge.ID, chatpricing.Usage{PromptTokens: 10, CachedInputTokens: 4, CompletionTokens: 5}, digest)
+	if err != nil || !settled.StreamCompleted || settled.CapturedSale != 51 || settled.ActualCost == nil || *settled.ActualCost != 36 {
+		t.Fatalf("settled=%+v err=%v", settled, err)
+	}
+	if _, found, replayErr := service.Replay(ctx, request); !errors.Is(replayErr, ErrConflict) || found {
+		t.Fatalf("found=%v err=%v", found, replayErr)
+	}
+	var schema, mode string
+	var storedDigest, body []byte
+	if err = pool.QueryRow(ctx, `SELECT e.schema_version,e.delivery_mode,e.terminal_event_sha256,c.response_body FROM chat_usage_evidence e JOIN chat_request_charges c ON c.id=e.charge_id WHERE e.charge_id=$1`, charge.ID).Scan(&schema, &mode, &storedDigest, &body); err != nil {
+		t.Fatal(err)
+	}
+	if schema != "openai-responses-stream-usage-v1" || mode != "stream" || !bytes.Equal(storedDigest, digest[:]) || body != nil {
+		t.Fatalf("schema=%s mode=%s digest=%x body=%v", schema, mode, storedDigest, body)
+	}
+}
+
 func TestUnknownOutcomeKeepsReservation(t *testing.T) {
 	service, pool := chatBillingFixture(t)
 	charge, err := service.Begin(context.Background(), BeginRequest{RequestID: "unknown", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "gpt-4.1", ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: 100, MaximumOutputTokens: 50})

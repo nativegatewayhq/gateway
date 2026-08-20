@@ -100,3 +100,36 @@ func TestWorkerRetriesStreamingSettlementExactlyOnce(t *testing.T) {
 		t.Fatalf("charge=%s task=%s captures=%d", chargeState, taskState, captureCount)
 	}
 }
+
+func TestWorkerRetriesResponsesStreamingSettlementExactlyOnce(t *testing.T) {
+	worker, service, pool := streamingWorkerFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	if _, err := prices.Publish(ctx, chatpricing.Price{Operation: "responses.create", ChannelID: "channel_00000000000000000000000000000001", Model: "gpt-4.1", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 500_000, CachedInputSale: 1_000_000, OutputCost: 3_000_000, OutputSale: 4_000_000}}, "responses-stream-worker-price"); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(ctx, chatbilling.BeginRequest{Operation: "responses.create", RequestID: "responses-stream-reconcile", OrganizationID: "org_stream", ProjectID: "project_stream", APIKeyID: "key_stream", Model: "gpt-4.1", ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: 100, MaximumOutputTokens: 50, DeliveryMode: "stream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := chatpricing.Usage{PromptTokens: 10, CachedInputTokens: 4, CompletionTokens: 5}
+	digest := [32]byte{6}
+	if err = service.MarkStreamReconcilingUsage(ctx, charge.ID, usage, digest); err != nil {
+		t.Fatal(err)
+	}
+	worked, err := worker.RunOne(ctx)
+	if err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	var chargeState, taskState, schema string
+	var captures int
+	if err = pool.QueryRow(ctx, `SELECT c.state,r.state,e.schema_version FROM chat_request_charges c JOIN chat_charge_reconciliations r ON r.charge_id=c.id JOIN chat_usage_evidence e ON e.charge_id=c.id WHERE c.id=$1`, charge.ID).Scan(&chargeState, &taskState, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM wallet_operations WHERE operation_key=$1`, "responses.create:stream:capture:"+charge.ID).Scan(&captures); err != nil {
+		t.Fatal(err)
+	}
+	if chargeState != "CAPTURED" || taskState != "RESOLVED" || schema != "openai-responses-stream-usage-v1" || captures != 1 {
+		t.Fatalf("charge=%s task=%s schema=%s captures=%d", chargeState, taskState, schema, captures)
+	}
+}

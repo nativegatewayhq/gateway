@@ -125,6 +125,10 @@ type ChatStreamRecord struct {
 	TerminalCategory, DisconnectSide string
 	FirstByte, Duration              time.Duration
 }
+type LLMStreamRecord struct {
+	Protocol, Operation, TerminalCategory, DisconnectSide string
+	FirstByte, Duration                                   time.Duration
+}
 type StorageRecord struct{ Protocol, Stage, Source, Outcome string }
 type ReconciliationRecord struct {
 	Outcome string
@@ -183,6 +187,21 @@ func (recorder *Recorder) Billing(ctx context.Context, record BillingRecord) {
 }
 func (recorder *Recorder) ChatStream(ctx context.Context, record ChatStreamRecord) {
 	attributes := metric.WithAttributes(attribute.String("gateway.stream.terminal", allowed(record.TerminalCategory, "complete", "missing_usage", "invalid_usage", "missing_done", "write_failed", "provider_error", "client_disconnect")), attribute.String("gateway.stream.disconnect_side", allowed(record.DisconnectSide, "none", "client", "provider")))
+	recorder.chatStreams.Add(ctx, 1, attributes)
+	if record.FirstByte > 0 {
+		recorder.chatFirstByte.Record(ctx, record.FirstByte.Seconds(), attributes)
+	}
+	if record.Duration >= 0 {
+		recorder.chatStreamDuration.Record(ctx, record.Duration.Seconds(), attributes)
+	}
+}
+func (recorder *Recorder) LLMStream(ctx context.Context, record LLMStreamRecord) {
+	attributes := metric.WithAttributes(
+		attribute.String("gateway.protocol", boundedProtocol(record.Protocol)),
+		attribute.String("gateway.operation", boundedOperation(record.Operation)),
+		attribute.String("gateway.stream.terminal", allowed(record.TerminalCategory, "complete", "missing_usage", "invalid_usage", "missing_terminal", "write_failed", "provider_error", "client_disconnect", "response_failed", "response_incomplete", "error_event")),
+		attribute.String("gateway.stream.disconnect_side", allowed(record.DisconnectSide, "none", "client", "provider")),
+	)
 	recorder.chatStreams.Add(ctx, 1, attributes)
 	if record.FirstByte > 0 {
 		recorder.chatFirstByte.Record(ctx, record.FirstByte.Seconds(), attributes)

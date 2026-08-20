@@ -94,3 +94,52 @@ assert r.output_text == "gateway ok"`
 		t.Fatalf("JavaScript Responses SDK: %v: %s", err, output)
 	}
 }
+
+func TestOfficialOpenAIResponsesStreamingSDKs(t *testing.T) {
+	registry, _ := responsesoperation.NewRegistry([]string{"gpt-4.1"})
+	stream := "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_sdk\",\"object\":\"response\",\"created_at\":1,\"status\":\"in_progress\",\"model\":\"gpt-4.1\",\"output\":[]}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"gateway ok\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_sdk\",\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"model\":\"gpt-4.1\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
+	handler := NewResponsesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, responsesExecutorFunc(func(_ context.Context, request openaiProvider.ResponsesRequest) (*http.Response, error) {
+		if !request.Streaming {
+			t.Fatal("streaming request flag missing")
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}, nil
+	}), channelAvailability{"channel_00000000000000000000000000000001": true}, 8192)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+s=c.responses.create(model="gpt-4.1",input="hello",stream=True)
+events=list(s)
+assert any(e.type == "response.output_text.delta" and e.delta == "gateway ok" for e in events)
+assert events[-1].type == "response.completed"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python Responses streaming SDK: %v: %s", err, output)
+	}
+	pythonAsync := `import asyncio
+from openai import AsyncOpenAI
+async def main():
+    c=AsyncOpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+    s=await c.responses.create(model="gpt-4.1",input="hello",stream=True)
+    text=""
+    terminal=""
+    async for e in s:
+        if e.type == "response.output_text.delta": text += e.delta
+        if e.type == "response.completed": terminal=e.type
+    assert text == "gateway ok" and terminal == "response.completed"
+asyncio.run(main())`
+	command = exec.Command("python3", "-c", pythonAsync)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python async Responses streaming SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;(async()=>{const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});const controller=new AbortController();const s=await c.responses.create({model:"gpt-4.1",input:"hello",stream:true},{signal:controller.signal});let text="",terminal="";for await(const e of s){if(e.type==="response.output_text.delta")text+=e.delta;if(e.type.startsWith("response.")&&(e.type.endsWith("completed")||e.type.endsWith("failed")||e.type.endsWith("incomplete")))terminal=e.type}if(text!=="gateway ok"||terminal!=="response.completed")process.exit(2)})().catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript Responses streaming SDK: %v: %s", err, output)
+	}
+}

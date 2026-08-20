@@ -222,7 +222,7 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		}
 		return Charge{}, err
 	}
-	if charge.Operation != "chat.completions" || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
+	if (charge.Operation != "chat.completions" && charge.Operation != "responses.create") || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
 		return Charge{}, ErrInvalid
 	}
 	amounts, err := chatpricing.Calculate(charge.Rates, usage)
@@ -238,7 +238,11 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 	if charge.State != "RESERVED" && charge.State != "RECONCILING" {
 		return Charge{}, ErrState
 	}
-	if _, err = s.wallet.CaptureInTx(ctx, tx, charge.ReservationID, amounts.Sale, "chat-stream-capture:"+id); err != nil {
+	operationKey := "chat-stream-capture:" + id
+	if charge.Operation == "responses.create" {
+		operationKey = "responses.create:stream:capture:" + id
+	}
+	if _, err = s.wallet.CaptureInTx(ctx, tx, charge.ReservationID, amounts.Sale, operationKey); err != nil {
 		return Charge{}, err
 	}
 	if s.quota != nil {
@@ -251,7 +255,11 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 			return Charge{}, err
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,schema_version,body_sha256,delivery_mode,terminal_event_sha256) VALUES($1,$2,$3,$4,'openai-chat-usage-v1',$5,'stream',$5) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, terminalDigest[:])
+	schemaVersion := "openai-chat-usage-v1"
+	if charge.Operation == "responses.create" {
+		schemaVersion = "openai-responses-stream-usage-v1"
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,schema_version,body_sha256,delivery_mode,terminal_event_sha256) VALUES($1,$2,$3,$4,$5,$6,'stream',$6) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, schemaVersion, terminalDigest[:])
 	if err != nil {
 		return Charge{}, err
 	}
@@ -565,7 +573,7 @@ func validStreamMetadata(side, category string) bool {
 		return false
 	}
 	switch category {
-	case "complete", "missing_usage", "invalid_usage", "missing_done", "write_failed", "provider_error", "client_disconnect":
+	case "complete", "missing_usage", "invalid_usage", "missing_done", "missing_terminal", "write_failed", "provider_error", "client_disconnect", "response_failed", "response_incomplete", "error_event":
 		return true
 	}
 	return false
