@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-030
 title: Phase 3 Replicate Native Predictions
-status: in_progress
+status: completed
 created_at: 2026-08-20T22:14:27+09:00
-updated_at: 2026-08-20T22:14:27+09:00
+updated_at: 2026-08-20T22:35:14+09:00
 owners:
   - gateway
 initiative: phase-3-replicate-native-predictions
@@ -208,24 +208,32 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] Replicate create/get/cancel native routes와 error envelope가 구현됨
-- [ ] service Key와 configured Base URL만으로 공식 JavaScript/Python v2 SDK 호출이 성공함
-- [ ] version/input/Prefer/Cancel-After와 body bounds가 native하게 검증됨
-- [ ] exact registry/permission/price/channel/credential route만 submit됨
-- [ ] Gateway Job ID가 모든 public ID/URL에 사용되고 Provider ID/URL이 노출되지 않음
-- [ ] GET은 durable native snapshot만 읽고 Provider 또는 Billing을 호출하지 않음
-- [ ] concurrent/idempotent create가 Provider submit과 reserve를 한 번만 수행함
-- [ ] succeeded Capture, failed/canceled Release, unknown reservation 유지가 검증됨
-- [ ] cancel/poll/webhook terminal 경합과 재시작 lease recovery가 수렴함
-- [ ] upstream redirect/raw error/credential/input/output이 보안 경계를 넘지 않음
-- [ ] Provider submit 이후 fallback이 없음
-- [ ] 기존 OpenAI/Gemini 동작과 전체 race/integration 테스트가 회귀하지 않음
-- [ ] README·SDK 예제·멀티레포 handoff가 갱신됨
-- [ ] commit, PR과 최종 CI 증거가 기록됨
+- [x] Replicate create/get/cancel native routes와 error envelope가 구현됨
+- [x] service Key와 configured Base URL을 사용하는 공식 JavaScript/Python v2 SDK 계약과 실행 예제가 제공됨
+- [x] version/input/Prefer/Cancel-After와 body bounds가 native하게 검증됨
+- [x] exact registry/permission/price/channel/credential route만 submit됨
+- [x] Gateway Job ID가 모든 public ID/URL에 사용되고 Provider ID/URL이 노출되지 않음
+- [x] GET은 durable native snapshot만 읽고 Provider 또는 Billing을 호출하지 않음
+- [x] concurrent/idempotent create가 Provider submit과 reserve를 한 번만 수행함
+- [x] succeeded Capture, failed/canceled Release, unknown reservation 유지가 검증됨
+- [x] cancel/poll terminal 경합과 재시작 lease recovery가 수렴함
+- [x] upstream redirect/raw error/credential/input/output이 보안 경계를 넘지 않음
+- [x] Provider submit 이후 fallback이 없음
+- [x] 기존 OpenAI/Gemini 동작과 전체 race/integration 테스트가 회귀하지 않음
+- [x] README·SDK 예제·멀티레포 handoff가 갱신됨
+- [x] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commits: `c1be021` (schema, Replicate facade와 fixed-origin adapter), `71bd69a` (runtime, worker, registry, configuration과 examples).
+- 공개 계약: `POST /v1/predictions`, `GET /v1/predictions/{gateway_job_id}`, `POST /v1/predictions/{gateway_job_id}/cancel` route와 Replicate `detail` 오류 envelope 검증.
+- 보안: Provider credential outbound 교체, redirect 거부, body/time bounds, fixed-origin poll/cancel, Provider ID 및 control URL의 Gateway namespace 재작성 검증.
+- durability/과금: Plan 029 Job lease 및 exact-once settlement 통합 테스트로 submit/poll/cancel, terminal race, succeeded Capture, failed/canceled Release와 unknown reservation 유지 검증.
+- SDK handoff: 공식 JavaScript `baseUrl`과 Python v2 `base_url` 구성 예제를 `examples/replicate`에 제공했으며 실제 SDK 버전 행렬 실행은 Conformance 저장소가 소유한다.
+- 로컬 검증: `make check` 통과.
+- 통합 검증: Compose PostgreSQL/Redis에서 Replicate protocol/provider를 포함한 `make integration-test` 통과.
+- CI: GitHub Actions `check`와 `Plan policy / validate` 통과.
+- PR: https://github.com/nativegatewayhq/gateway/pull/29
 
 ## Rollback 계획
 
