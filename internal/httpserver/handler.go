@@ -22,6 +22,7 @@ type Routes struct {
 	OpenAIImageEdits http.Handler
 	OpenAIModels     http.Handler
 	Replicate        http.Handler
+	ReplicateWebhook http.Handler
 	Fal              http.Handler
 }
 
@@ -53,6 +54,9 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	if len(routeSets) > 0 && routeSets[0].Replicate != nil {
 		mux.Handle("/v1/predictions", routeSets[0].Replicate)
 		mux.Handle("/v1/predictions/", routeSets[0].Replicate)
+	}
+	if len(routeSets) > 0 && routeSets[0].ReplicateWebhook != nil {
+		mux.Handle("/internal/webhooks/replicate/", routeSets[0].ReplicateWebhook)
 	}
 	mux.HandleFunc("GET /health/live", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})

@@ -52,6 +52,8 @@ func jobRepositoryFixture(t *testing.T) (*Repository, joboperation.Owner, Create
 	return repository, owner, request
 }
 
+func testWebhookCallbackSecret() []byte { return []byte("0123456789abcdef0123456789abcdef") }
+
 func TestCreateIsIdempotentAndTenantIsolated(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	ctx := context.Background()
@@ -258,6 +260,136 @@ func TestConcurrentConflictingTerminalObservationsCreateOneWinner(t *testing.T) 
 	var terminalEvents int
 	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_events WHERE job_id=$1 AND event_type='OBSERVED'`, created.ID).Scan(&terminalEvents); err != nil || terminalEvents != 1 {
 		t.Fatalf("events=%d err=%v", terminalEvents, err)
+	}
+}
+
+func TestSignedWebhookBindingReplayAndProviderIdentity(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	request.Provider = "replicate"
+	request.ChannelID = "channel_00000000000000000000000000000004"
+	ctx := context.Background()
+	created, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := repository.BeginSubmit(ctx, owner, created.ID, "submitter", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackSecret := testWebhookCallbackSecret()
+	binding, err := repository.CreateWebhookBinding(ctx, created.ID, "replicate", request.ChannelID, callbackSecret, time.Hour)
+	if err != nil || binding.Token == "" {
+		t.Fatalf("binding=%+v err=%v", binding, err)
+	}
+	providerID := "provider-" + request.RequestID
+	earlyBody := []byte(`{"id":"gateway-job","status":"succeeded"}`)
+	earlyObservation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: earlyBody, SHA256: sha256.Sum256(earlyBody)}}
+	if _, _, err := repository.ApplyWebhook(ctx, WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: "early-" + request.RequestID, Token: binding.Token, ProviderJobID: providerID, Observation: earlyObservation, CallbackSecret: callbackSecret}); !errors.Is(err, ErrWebhookNotReady) {
+		t.Fatalf("early webhook=%v", err)
+	}
+	if _, err := repository.ConfirmSubmit(ctx, owner, attempt, providerID, joboperation.Processing, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"id":"gateway-job","status":"succeeded"}`)
+	observation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}}
+	deliveryID := "delivery-" + request.RequestID
+	requestWebhook := WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: deliveryID, Token: binding.Token, ProviderJobID: providerID, Observation: observation, CallbackSecret: callbackSecret}
+	terminal, replay, err := repository.ApplyWebhook(ctx, requestWebhook)
+	if err != nil || replay || terminal.Status != joboperation.Succeeded || terminal.SettlementState != "PENDING" {
+		t.Fatalf("terminal=%+v replay=%v err=%v", terminal, replay, err)
+	}
+	replayed, replay, err := repository.ApplyWebhook(ctx, requestWebhook)
+	if err != nil || !replay || replayed.ID != created.ID {
+		t.Fatalf("replayed=%+v replay=%v err=%v", replayed, replay, err)
+	}
+	wrong := requestWebhook
+	wrong.DeliveryID = deliveryID + "-wrong"
+	wrong.Token = "whk_ffffffffffffffffffffffffffffffff"
+	if _, _, err := repository.ApplyWebhook(ctx, wrong); !errors.Is(err, ErrWebhookRejected) {
+		t.Fatalf("wrong token=%v", err)
+	}
+	wrong.Token = binding.Token
+	wrong.ProviderJobID = "other-provider-id"
+	wrong.Observation.ProviderJobID = "other-provider-id"
+	if _, _, err := repository.ApplyWebhook(ctx, wrong); !errors.Is(err, ErrWebhookRejected) {
+		t.Fatalf("wrong provider identity=%v", err)
+	}
+	repository.now = func() time.Time { return binding.ExpiresAt.Add(time.Second) }
+	expired := requestWebhook
+	expired.DeliveryID = deliveryID + "-expired"
+	if _, _, err := repository.ApplyWebhook(ctx, expired); !errors.Is(err, ErrWebhookRejected) {
+		t.Fatalf("expired capability=%v", err)
+	}
+	var deliveries, observed int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_webhook_deliveries WHERE job_id=$1`, created.ID).Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_events WHERE job_id=$1 AND source='webhook' AND event_type='OBSERVED'`, created.ID).Scan(&observed); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries != 1 || observed != 1 {
+		t.Fatalf("deliveries=%d observed=%d", deliveries, observed)
+	}
+	if _, err := repository.pool.Exec(ctx, `DELETE FROM async_job_webhook_deliveries WHERE provider='replicate' AND delivery_id=$1`, deliveryID); err == nil {
+		t.Fatal("append-only webhook delivery deleted")
+	}
+}
+
+func TestWebhookAndPollRaceConvergesOnOneTerminalEvent(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	request.Provider = "replicate"
+	request.ChannelID = "channel_00000000000000000000000000000004"
+	ctx := context.Background()
+	created, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := repository.BeginSubmit(ctx, owner, created.ID, "submitter", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackSecret := testWebhookCallbackSecret()
+	binding, err := repository.CreateWebhookBinding(ctx, created.ID, "replicate", request.ChannelID, callbackSecret, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := "provider-" + request.RequestID
+	if _, err := repository.ConfirmSubmit(ctx, owner, attempt, providerID, joboperation.Processing, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := repository.ClaimDue(ctx, "poller", time.Now(), time.Minute, 100)
+	pollLease, found := leaseFor(leases, created.ID)
+	if err != nil || !found {
+		t.Fatalf("lease=%+v err=%v", pollLease, err)
+	}
+	body := []byte(`{"id":"gateway-job","status":"succeeded"}`)
+	observation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}}
+	start := make(chan struct{})
+	errorsFound := make(chan error, 2)
+	go func() {
+		<-start
+		_, err := repository.ApplyObservation(ctx, pollLease, observation, "poll", time.Time{})
+		errorsFound <- err
+	}()
+	go func() {
+		<-start
+		_, _, err := repository.ApplyWebhook(ctx, WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: "race-" + request.RequestID, Token: binding.Token, ProviderJobID: providerID, Observation: observation, CallbackSecret: callbackSecret})
+		errorsFound <- err
+	}()
+	close(start)
+	first, second := <-errorsFound, <-errorsFound
+	for _, err := range []error{first, second} {
+		if err != nil && !errors.Is(err, joboperation.ErrLeaseLost) {
+			t.Fatalf("race error=%v (%v/%v)", err, first, second)
+		}
+	}
+	stored, err := repository.Get(ctx, owner, created.ID)
+	if err != nil || stored.Status != joboperation.Succeeded || stored.SettlementState != "PENDING" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	var observed int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_events WHERE job_id=$1 AND event_type='OBSERVED'`, created.ID).Scan(&observed); err != nil || observed != 1 {
+		t.Fatalf("observed=%d err=%v", observed, err)
 	}
 }
 

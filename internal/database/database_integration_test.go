@@ -28,6 +28,10 @@ func TestAllMigrationsApplyToEmptySchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(714821306)`); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock(714821306)`)
 	_, _ = conn.Exec(ctx, `DROP SCHEMA IF EXISTS gateway_fresh_migration_test CASCADE`)
 	if _, err := conn.Exec(ctx, `CREATE SCHEMA gateway_fresh_migration_test; SET search_path TO gateway_fresh_migration_test`); err != nil {
 		t.Fatal(err)
@@ -81,7 +85,7 @@ func TestMigrateIsRepeatable(t *testing.T) {
 	}
 	var exists bool
 	if err := pool.QueryRow(ctx, `SELECT NOT EXISTS (
-		SELECT required.name FROM (VALUES ('users'),('organizations'),('organization_memberships'),('projects'),('service_api_keys'),('service_api_key_model_permissions'),('organization_wallets'),('wallet_reservations'),('wallet_operations'),('ledger_entries'),('provider_channels'),('provider_prices'),('price_publications'),('image_request_charges'),('image_charge_reconciliations'),('image_assets'),('async_jobs'),('async_job_provider_attempts'),('async_job_events')) required(name)
+		SELECT required.name FROM (VALUES ('users'),('organizations'),('organization_memberships'),('projects'),('service_api_keys'),('service_api_key_model_permissions'),('organization_wallets'),('wallet_reservations'),('wallet_operations'),('ledger_entries'),('provider_channels'),('provider_prices'),('price_publications'),('image_request_charges'),('image_charge_reconciliations'),('image_assets'),('async_jobs'),('async_job_provider_attempts'),('async_job_events'),('async_job_webhook_bindings'),('async_job_webhook_deliveries')) required(name)
 		WHERE NOT EXISTS (SELECT 1 FROM information_schema.tables t WHERE t.table_schema='public' AND t.table_name=required.name)
 	)`).Scan(&exists); err != nil {
 		t.Fatal(err)

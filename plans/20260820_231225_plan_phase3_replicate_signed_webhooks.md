@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-032
 title: Phase 3 Replicate Signed Webhook Reconciliation
-status: in_progress
+status: completed
 created_at: 2026-08-20T23:12:25+09:00
-updated_at: 2026-08-20T23:12:25+09:00
+updated_at: 2026-08-20T23:40:02+09:00
 owners:
   - gateway
 initiative: phase-3-replicate-signed-webhooks
@@ -196,23 +196,32 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] Gateway-owned callback과 completed event filter만 Replicate submit에 주입됨
-- [ ] official raw-body HMAC, timestamp와 signature rotation 계약이 검증됨
-- [ ] callback capability, Provider/channel/Prediction identity가 모두 검증됨
-- [ ] duplicate delivery가 observation과 Ledger 전이를 늘리지 않음
-- [ ] success Capture와 known failed/canceled Release가 정확히 한 번 수렴함
-- [ ] webhook, polling과 cancel terminal race가 하나의 durable 결과로 수렴함
-- [ ] invalid/unknown webhook이 reservation을 임의 해제하지 않음
-- [ ] transient failure는 Provider retry로 복구되고 polling fallback이 유지됨
-- [ ] callback secret, URL, signature, Provider ID와 payload가 노출되지 않음
-- [ ] webhook-disabled rolling rollback이 기존 Replicate 동작을 보존함
-- [ ] 기존 fal/OpenAI/Gemini protocol과 전체 race/integration test가 회귀하지 않음
-- [ ] 운영 문서와 Cloud/Conformance handoff가 갱신됨
-- [ ] commit, PR과 최종 CI 증거가 기록됨
+- [x] Gateway-owned callback과 completed event filter만 Replicate submit에 주입됨
+- [x] official raw-body HMAC, timestamp와 signature rotation 계약이 검증됨
+- [x] callback capability, Provider/channel/Prediction identity가 모두 검증됨
+- [x] duplicate delivery가 observation과 Ledger 전이를 늘리지 않음
+- [x] success Capture와 known failed/canceled Release가 정확히 한 번 수렴함
+- [x] webhook, polling과 cancel terminal race가 하나의 durable 결과로 수렴함
+- [x] invalid/unknown webhook이 reservation을 임의 해제하지 않음
+- [x] transient failure는 Provider retry로 복구되고 polling fallback이 유지됨
+- [x] callback secret, URL, signature, Provider ID와 payload가 노출되지 않음
+- [x] webhook-disabled rolling rollback이 기존 Replicate 동작을 보존함
+- [x] 기존 fal/OpenAI/Gemini protocol과 전체 race/integration test가 회귀하지 않음
+- [x] 운영 문서와 Cloud/Conformance handoff가 갱신됨
+- [x] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commits: `9ec9db5` (signed ingress, HMAC-keyed callback capability, additive migration, durable replay/CAS, runtime wiring, telemetry와 운영 문서), `f3db3a8` (병렬 integration package의 fresh-schema migration advisory-lock 직렬화).
+- signature: exact raw body, `webhook-id`/`webhook-timestamp`/space-delimited `v1` signatures, active/previous `whsec_` secret, stale/future timestamp 및 duplicate header rejection을 단위 테스트로 검증함.
+- callback 경계: HTTPS public base, server-owned `completed` filter, per-Job random token의 keyed digest만 저장, client webhook 거부와 public response/log/metric route redaction을 검증함.
+- durable ingress: early delivery 503 retry, expired/wrong token, Provider/channel/Prediction mismatch, delivery replay와 append-only schema를 실제 PostgreSQL에서 검증함.
+- 동시성: webhook과 leased polling의 terminal race가 단일 `OBSERVED` event 및 settlement intent로 수렴함을 race integration test로 검증함. 기존 cancel terminal CAS suite도 통과함.
+- 과금: signed webhook `SUCCEEDED`의 Capture 1회 및 `FAILED`/`CANCELED`의 Release 1회를 실제 Wallet, Ledger와 settlement lease에서 검증함.
+- 로컬 검증: `make check` 통과.
+- 통합 검증: Compose PostgreSQL/Redis에서 migration, Job, billing, Replicate/fal/OpenAI/Gemini 회귀를 포함한 `make integration-test` 통과.
+- PR: https://github.com/nativegatewayhq/gateway/pull/32
+- CI: GitHub Actions `check`(run `32382118800`) 및 `Plan policy / validate`(run `32382118758`) 통과.
 
 ## Rollback 계획
 

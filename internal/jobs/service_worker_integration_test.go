@@ -4,7 +4,9 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,10 +30,12 @@ type fakeAsyncProvider struct {
 	submitStarted     chan struct{}
 	submitRelease     chan struct{}
 	pollAttempt       chan ProviderAttempt
+	submitPayload     any
 }
 
-func (provider *fakeAsyncProvider) Submit(_ context.Context, _ joboperation.Job, _ any) (SubmitResult, error) {
+func (provider *fakeAsyncProvider) Submit(_ context.Context, _ joboperation.Job, payload any) (SubmitResult, error) {
 	provider.submits.Add(1)
+	provider.submitPayload = payload
 	if provider.submitStarted != nil {
 		select {
 		case provider.submitStarted <- struct{}{}:
@@ -44,6 +48,41 @@ func (provider *fakeAsyncProvider) Submit(_ context.Context, _ joboperation.Job,
 		<-provider.submitRelease
 	}
 	return provider.submitResult, provider.submitError
+}
+
+type fakeWebhookPayload struct{ callback string }
+
+func (payload fakeWebhookPayload) WithWebhook(callback string) (any, error) {
+	payload.callback = callback
+	return payload, nil
+}
+
+func TestServiceCreatesBindingAndInjectsGatewayWebhookBeforeSubmit(t *testing.T) {
+	repository, _, request := jobRepositoryFixture(t)
+	request.Provider = "replicate"
+	request.ChannelID = "channel_00000000000000000000000000000004"
+	provider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "provider-" + request.RequestID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Hour}}
+	config := jobServiceConfig()
+	config.Webhooks = map[string]WebhookConfig{"replicate": {PublicBaseURL: "https://gateway.example", BindingTTL: time.Hour, CallbackSecret: testWebhookCallbackSecret()}}
+	service, err := NewService(repository, map[string]Provider{"replicate": provider}, config, "api-instance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.Submit(context.Background(), request, fakeWebhookPayload{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := provider.submitPayload.(fakeWebhookPayload)
+	if !ok || !strings.HasPrefix(payload.callback, "https://gateway.example/internal/webhooks/replicate/"+created.ID+"/whk_") {
+		t.Fatalf("payload=%+v", provider.submitPayload)
+	}
+	if strings.Contains(string(created.Snapshot.Body), "whk_") {
+		t.Fatal("callback capability leaked to public snapshot")
+	}
+	var digestBytes int
+	if err := repository.pool.QueryRow(context.Background(), `SELECT octet_length(token_digest) FROM async_job_webhook_bindings WHERE job_id=$1`, created.ID).Scan(&digestBytes); err != nil || digestBytes != sha256.Size {
+		t.Fatalf("digest=%d err=%v", digestBytes, err)
+	}
 }
 
 func TestConcurrentServiceSubmitDispatchesProviderOnce(t *testing.T) {
@@ -148,8 +187,8 @@ func TestSharedWorkerIsolatesReplicateAndFalProviders(t *testing.T) {
 	falRequest.ChannelID = "channel_00000000000000000000000000000005"
 	falRequest.Fingerprint = [32]byte{2}
 	snapshot := joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"output":"done"}`)}
-	replicateProvider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "replicate-job", Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: snapshot}, pollAttempt: make(chan ProviderAttempt, 1)}
-	falProvider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "fal-job", Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: snapshot}, pollAttempt: make(chan ProviderAttempt, 1)}
+	replicateProvider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "replicate-" + replicateRequest.RequestID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: snapshot}, pollAttempt: make(chan ProviderAttempt, 1)}
+	falProvider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "fal-" + falRequest.RequestID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: snapshot}, pollAttempt: make(chan ProviderAttempt, 1)}
 	providers := map[string]Provider{"replicate": replicateProvider, "fal": falProvider}
 	service, err := NewService(repository, providers, jobServiceConfig(), "shared-api")
 	if err != nil {
@@ -254,6 +293,105 @@ func TestSettlementConvergesExactlyOnceAfterCrashBoundary(t *testing.T) {
 		t.Fatalf("wallet=%d/%d", available, reserved)
 	}
 	_ = lease // intentionally abandoned to simulate the crash after Billing commit.
+}
+
+func TestWebhookTerminalSettlementCapturesOrReleasesExactlyOnce(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    joboperation.Status
+		expected  int64
+		entryType string
+	}{
+		{name: "success", status: joboperation.Succeeded, expected: 900, entryType: "capture"},
+		{name: "failure", status: joboperation.Failed, expected: 1000, entryType: "release"},
+		{name: "canceled", status: joboperation.Canceled, expected: 1000, entryType: "release"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository, owner, request := jobRepositoryFixture(t)
+			request.Provider = "replicate"
+			request.ChannelID = "channel_00000000000000000000000000000004"
+			ctx := context.Background()
+			wallet := ledger.NewService(repository.pool)
+			if _, err := wallet.Deposit(ctx, owner.OrganizationID, 1000, "webhook-deposit-"+request.RequestID); err != nil {
+				t.Fatal(err)
+			}
+			estimator, err := pricing.NewService(repository.pool, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: request.ChannelID, Protocol: "replicate", Operation: "image.generate", Model: request.Model, Size: "default", Quality: "default", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "webhook-price-"+request.RequestID); err != nil {
+				t.Fatal(err)
+			}
+			billingService, err := billing.NewService(repository.pool, estimator, wallet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			charge, err := billingService.Begin(ctx, billing.BeginRequest{RequestID: "charge-" + request.RequestID, OrganizationID: owner.OrganizationID, ProjectID: owner.ProjectID, APIKeyID: owner.APIKeyID, Protocol: "replicate", Operation: "image.generate", Model: request.Model, ChannelID: request.ChannelID, Quantity: 1, Size: "default", Quality: "default"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.ChargeID = charge.ID
+			providerID := "provider-" + request.RequestID
+			provider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: providerID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Hour}}
+			config := jobServiceConfig()
+			config.Webhooks = map[string]WebhookConfig{"replicate": {PublicBaseURL: "https://gateway.example", BindingTTL: time.Hour, CallbackSecret: testWebhookCallbackSecret()}}
+			service, err := NewService(repository, map[string]Provider{"replicate": provider}, config, "webhook-api")
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := service.Submit(ctx, request, fakeWebhookPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			callback := provider.submitPayload.(fakeWebhookPayload).callback
+			token := callback[strings.LastIndex(callback, "/")+1:]
+			observation := joboperation.Observation{Status: test.status, ProviderJobID: providerID}
+			if test.status != joboperation.Canceled {
+				body := []byte(`{"id":"` + created.ID + `","status":"` + strings.ToLower(string(test.status)) + `"}`)
+				statusCode := 200
+				if test.status == joboperation.Failed {
+					statusCode = 500
+					observation.FailureCategory = "provider_error"
+				}
+				observation.Snapshot = joboperation.Snapshot{Status: statusCode, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}
+			}
+			webhook := WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: "settlement-" + request.RequestID, Token: token, ProviderJobID: providerID, Observation: observation}
+			if _, replay, err := service.ApplyWebhook(ctx, webhook); err != nil || replay {
+				t.Fatalf("apply replay=%v err=%v", replay, err)
+			}
+			if _, replay, err := service.ApplyWebhook(ctx, webhook); err != nil || !replay {
+				t.Fatalf("duplicate replay=%v err=%v", replay, err)
+			}
+			if _, err := repository.pool.Exec(ctx, `UPDATE async_jobs SET settlement_next_attempt_at='epoch' WHERE id=$1`, created.ID); err != nil {
+				t.Fatal(err)
+			}
+			workerConfig := jobWorkerConfig()
+			workerConfig.BatchSize = 1
+			worker, _ := NewWorker(repository, map[string]Provider{"replicate": provider}, billingService, workerConfig, "webhook-worker")
+			settlements, err := repository.ClaimSettlements(ctx, "webhook-worker", time.Now(), time.Minute, 1)
+			settlement, found := settlementFor(settlements, created.ID)
+			if err != nil || !found {
+				t.Fatalf("settlement=%+v err=%v", settlement, err)
+			}
+			if err := worker.settle(ctx, settlement); err != nil {
+				t.Fatal(err)
+			}
+			if err := repository.MarkSettled(ctx, settlement); err != nil {
+				t.Fatal(err)
+			}
+			var available, reserved int64
+			if err := repository.pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id=$1`, owner.OrganizationID).Scan(&available, &reserved); err != nil {
+				t.Fatal(err)
+			}
+			var entries int
+			if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE reservation_id=$1 AND entry_type=$2`, charge.ReservationID, test.entryType).Scan(&entries); err != nil {
+				t.Fatal(err)
+			}
+			if available != test.expected || reserved != 0 || entries != 1 {
+				t.Fatalf("wallet=%d/%d entries=%d", available, reserved, entries)
+			}
+		})
+	}
 }
 
 func TestSubmitUnknownAndCancelUnknownRemainReconciling(t *testing.T) {

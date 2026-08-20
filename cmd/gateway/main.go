@@ -222,11 +222,14 @@ func run(stdout, stderr io.Writer) int {
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 	var replicateHandler http.Handler
+	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
 	var asyncWorker *jobs.Worker
 	asyncProviders := map[string]jobs.Provider{}
+	var replicateAdapter *replicateProvider.Client
 	if cfg.ReplicateEnabled {
-		replicateAdapter, replicateErr := replicateProvider.New(replicateProvider.Config{Endpoint: cfg.ReplicateEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.ReplicateTimeout, MaximumBodyBytes: cfg.ReplicateBodyBytes}, providerCredentialRegistry)
+		var replicateErr error
+		replicateAdapter, replicateErr = replicateProvider.New(replicateProvider.Config{Endpoint: cfg.ReplicateEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.ReplicateTimeout, MaximumBodyBytes: cfg.ReplicateBodyBytes}, providerCredentialRegistry)
 		if replicateErr != nil {
 			logger.Error("gateway Replicate provider initialization failed")
 			return 1
@@ -247,7 +250,11 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway Job repository initialization failed")
 			return 1
 		}
-		jobService, serviceErr := jobs.NewService(jobRepository, asyncProviders, jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval}, "gateway-submit")
+		serviceConfig := jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval}
+		if cfg.ReplicateWebhookMode == config.ReplicateWebhookRequired {
+			serviceConfig.Webhooks = map[string]jobs.WebhookConfig{"replicate": {PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.ReplicateWebhookBindingTTL, CallbackSecret: cfg.ReplicateWebhookCallbackSecret}}
+		}
+		jobService, serviceErr := jobs.NewService(jobRepository, asyncProviders, serviceConfig, "gateway-submit")
 		if serviceErr != nil {
 			logger.Error("gateway Job service initialization failed")
 			return 1
@@ -262,6 +269,19 @@ func run(stdout, stderr io.Writer) int {
 		asyncWorker.SetTelemetry(telemetryRuntime.Recorder)
 		if cfg.ReplicateEnabled {
 			replicateHandler = replicateProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.ReplicateBodyBytes, cfg.PublicBaseURL)
+			if cfg.ReplicateWebhookMode == config.ReplicateWebhookRequired {
+				verifier, verifierErr := replicateProtocol.NewSignatureVerifier(cfg.ReplicateWebhookSecrets, cfg.ReplicateWebhookTolerance)
+				if verifierErr != nil {
+					logger.Error("gateway Replicate webhook verifier initialization failed")
+					return 1
+				}
+				replicateWebhookHandler, serviceErr = replicateProtocol.NewWebhookHandler(logger, verifier, jobService, replicateAdapter, cfg.ReplicateBodyBytes)
+				if serviceErr != nil {
+					logger.Error("gateway Replicate webhook handler initialization failed")
+					return 1
+				}
+				replicateWebhookHandler.(*replicateProtocol.WebhookHandler).SetTelemetry(telemetryRuntime.Recorder)
+			}
 		}
 		if cfg.FalEnabled {
 			falHandler = falProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.FalBodyBytes, cfg.PublicBaseURL)
@@ -312,6 +332,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
 		Replicate:           replicateHandler,
+		ReplicateWebhook:    replicateWebhookHandler,
 		Fal:                 falHandler,
 		ClientIPResolver:    clientIPResolver,
 		Telemetry:           telemetryRuntime.Recorder,

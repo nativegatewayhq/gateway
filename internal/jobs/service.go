@@ -2,7 +2,11 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
@@ -31,9 +35,20 @@ type Provider interface {
 	Cancel(context.Context, ProviderAttempt) (joboperation.Observation, error)
 }
 
+type WebhookPayload interface {
+	WithWebhook(string) (any, error)
+}
+
+type WebhookConfig struct {
+	PublicBaseURL  string
+	BindingTTL     time.Duration
+	CallbackSecret []byte
+}
+
 type ServiceConfig struct {
 	SubmitLease time.Duration
 	PollDelay   time.Duration
+	Webhooks    map[string]WebhookConfig
 }
 
 type Service struct {
@@ -57,6 +72,16 @@ func NewService(repository *Repository, providers map[string]Provider, config Se
 		}
 		copyProviders[name] = provider
 	}
+	webhooks := make(map[string]WebhookConfig, len(config.Webhooks))
+	for provider, webhook := range config.Webhooks {
+		if provider != "replicate" || webhook.BindingTTL <= 0 || webhook.BindingTTL > 30*24*time.Hour || strings.TrimSuffix(webhook.PublicBaseURL, "/") == "" || len(webhook.CallbackSecret) != 32 {
+			return nil, joboperation.ErrInvalid
+		}
+		webhook.PublicBaseURL = strings.TrimSuffix(webhook.PublicBaseURL, "/")
+		webhook.CallbackSecret = append([]byte(nil), webhook.CallbackSecret...)
+		webhooks[provider] = webhook
+	}
+	config.Webhooks = webhooks
 	return &Service{repository: repository, providers: copyProviders, config: config, owner: owner}, nil
 }
 
@@ -78,6 +103,21 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 			return service.repository.Get(ctx, created.Owner, created.ID)
 		}
 		return joboperation.Job{}, err
+	}
+	if webhook, enabled := service.config.Webhooks[created.Provider]; enabled {
+		injectable, ok := payload.(WebhookPayload)
+		if !ok {
+			return service.handleSubmitError(ctx, created, attempt, predispatchFailure("webhook payload unavailable"))
+		}
+		binding, bindingErr := service.repository.CreateWebhookBinding(ctx, created.ID, created.Provider, created.ChannelID, webhook.CallbackSecret, webhook.BindingTTL)
+		if bindingErr != nil {
+			return service.handleSubmitError(ctx, created, attempt, predispatchFailure("webhook binding unavailable"))
+		}
+		callback := fmt.Sprintf("%s/internal/webhooks/%s/%s/%s", webhook.PublicBaseURL, created.Provider, created.ID, binding.Token)
+		payload, err = injectable.WithWebhook(callback)
+		if err != nil {
+			return service.handleSubmitError(ctx, created, attempt, predispatchFailure("webhook payload unavailable"))
+		}
 	}
 	result, submitErr := provider.Submit(ctx, created, payload)
 	if submitErr != nil {
@@ -120,6 +160,20 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 		service.record(ctx, created.Protocol, "submit", terminal.Status, "success")
 	}
 	return terminal, err
+}
+
+func (service *Service) ApplyWebhook(ctx context.Context, request WebhookObservation) (joboperation.Job, bool, error) {
+	webhook, enabled := service.config.Webhooks[request.Provider]
+	if !enabled {
+		return joboperation.Job{}, false, ErrWebhookRejected
+	}
+	request.CallbackSecret = webhook.CallbackSecret
+	return service.repository.ApplyWebhook(ctx, request)
+}
+
+func predispatchFailure(_ string) *ProviderError {
+	body := []byte(`{"detail":"prediction request could not be prepared"}`)
+	return &ProviderError{Category: "unavailable", Known: true, Observation: joboperation.Observation{Status: joboperation.Failed, FailureCategory: "unavailable", Snapshot: joboperation.Snapshot{Status: http.StatusServiceUnavailable, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}}}
 }
 
 func (service *Service) handleSubmitError(ctx context.Context, created joboperation.Job, attempt ProviderAttempt, submitErr error) (joboperation.Job, error) {
