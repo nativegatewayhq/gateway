@@ -163,6 +163,46 @@ func TestGeminiProtocolPriceUsageAndIdempotencyAreIsolated(t *testing.T) {
 	}
 }
 
+func TestGeminiStreamSettlementStoresDetailedTerminalEvidenceExactlyOnce(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	_, err := prices.Publish(ctx, chatpricing.Price{Protocol: "gemini", Operation: "chat.completions", ChannelID: "channel_00000000000000000000000000000003", Model: "gemini-2.5-pro", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 500_000, CachedInputSale: 1_000_000, OutputCost: 3_000_000, OutputSale: 4_000_000}}, "gemini-stream-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := BeginRequest{Protocol: "gemini", Operation: "chat.completions", RequestID: "gemini-stream-request", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "gemini-2.5-pro", ChannelID: "channel_00000000000000000000000000000003", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "gemini-stream-idempotency", Fingerprint: [32]byte{11}, DeliveryMode: "stream"}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := chatpricing.Usage{PromptTokens: 12, CachedInputTokens: 3, CompletionTokens: 9, ToolUsePromptTokens: 2, ThoughtsTokens: 4}
+	digest := [32]byte{12}
+	first, err := service.CompleteStreamUsage(ctx, charge.ID, usage, digest)
+	if err != nil || first.CapturedSale != 57 || first.ActualCost == nil || *first.ActualCost != 38 {
+		t.Fatalf("settled=%+v err=%v", first, err)
+	}
+	second, err := service.CompleteStreamUsage(ctx, charge.ID, usage, digest)
+	if err != nil || second.CapturedSale != first.CapturedSale {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	if _, err = service.CompleteStreamUsage(ctx, charge.ID, usage, [32]byte{99}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different terminal evidence error=%v", err)
+	}
+	var schema string
+	var tool, thoughts, captures int64
+	if err = pool.QueryRow(ctx, `SELECT schema_version,tool_use_prompt_tokens,thoughts_tokens FROM chat_usage_evidence WHERE charge_id=$1`, charge.ID).Scan(&schema, &tool, &thoughts); err != nil {
+		t.Fatal(err)
+	}
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM wallet_operations WHERE operation_key=$1`, "gemini:chat.completions:stream:capture:"+charge.ID).Scan(&captures)
+	if schema != "gemini-stream-usage-v1" || tool != 2 || thoughts != 4 || captures != 1 {
+		t.Fatalf("schema=%s tool=%d thoughts=%d captures=%d", schema, tool, thoughts, captures)
+	}
+	if _, found, replayErr := service.Replay(ctx, request); !errors.Is(replayErr, ErrConflict) || found {
+		t.Fatalf("found=%v err=%v", found, replayErr)
+	}
+}
+
 func TestResponsesStreamSettlementStoresOnlyTerminalEvidence(t *testing.T) {
 	service, pool := chatBillingFixture(t)
 	ctx := context.Background()

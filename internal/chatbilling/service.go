@@ -232,7 +232,7 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		}
 		return Charge{}, err
 	}
-	if charge.Protocol != "openai" || (charge.Operation != "chat.completions" && charge.Operation != "responses.create") || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
+	if !((charge.Protocol == "openai" && (charge.Operation == "chat.completions" || charge.Operation == "responses.create")) || (charge.Protocol == "gemini" && charge.Operation == "chat.completions")) || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
 		return Charge{}, ErrInvalid
 	}
 	amounts, err := chatpricing.Calculate(charge.Rates, usage)
@@ -240,7 +240,7 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		return Charge{}, ErrInvalid
 	}
 	if charge.State == "CAPTURED" {
-		if charge.StreamCompleted && charge.CapturedSale == amounts.Sale && charge.ActualCost != nil && *charge.ActualCost == amounts.Cost {
+		if charge.StreamCompleted && charge.CapturedSale == amounts.Sale && charge.ActualCost != nil && *charge.ActualCost == amounts.Cost && sameStreamEvidence(ctx, tx, id, usage, terminalDigest) {
 			return charge, nil
 		}
 		return Charge{}, ErrConflict
@@ -251,6 +251,8 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 	operationKey := "chat-stream-capture:" + id
 	if charge.Operation == "responses.create" {
 		operationKey = "responses.create:stream:capture:" + id
+	} else if charge.Protocol == "gemini" {
+		operationKey = "gemini:chat.completions:stream:capture:" + id
 	}
 	if _, err = s.wallet.CaptureInTx(ctx, tx, charge.ReservationID, amounts.Sale, operationKey); err != nil {
 		return Charge{}, err
@@ -268,8 +270,10 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 	schemaVersion := "openai-chat-usage-v1"
 	if charge.Operation == "responses.create" {
 		schemaVersion = "openai-responses-stream-usage-v1"
+	} else if charge.Protocol == "gemini" {
+		schemaVersion = "gemini-stream-usage-v1"
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,schema_version,body_sha256,delivery_mode,terminal_event_sha256) VALUES($1,$2,$3,$4,$5,$6,'stream',$6) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, schemaVersion, terminalDigest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,schema_version,body_sha256,delivery_mode,terminal_event_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'stream',$8) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, schemaVersion, terminalDigest[:])
 	if err != nil {
 		return Charge{}, err
 	}
@@ -282,6 +286,13 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		return Charge{}, err
 	}
 	return charge, nil
+}
+
+func sameStreamEvidence(ctx context.Context, tx pgx.Tx, id string, usage chatpricing.Usage, digest [32]byte) bool {
+	var prompt, cached, completion, toolUse, thoughts int64
+	var storedDigest []byte
+	err := tx.QueryRow(ctx, `SELECT prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,terminal_event_sha256 FROM chat_usage_evidence WHERE charge_id=$1 AND delivery_mode='stream'`, id).Scan(&prompt, &cached, &completion, &toolUse, &thoughts, &storedDigest)
+	return err == nil && prompt == usage.PromptTokens && cached == usage.CachedInputTokens && completion == usage.CompletionTokens && toolUse == usage.ToolUsePromptTokens && thoughts == usage.ThoughtsTokens && bytes.Equal(storedDigest, digest[:])
 }
 func (s *Service) CompleteUsage(ctx context.Context, id string, usage chatpricing.Usage, snapshot billing.ResponseSnapshot) (Charge, error) {
 	if !validUsage(usage) {
@@ -443,7 +454,7 @@ func (s *Service) MarkStreamReconcilingUsage(ctx context.Context, id string, usa
 	if result.RowsAffected() == 0 {
 		return ErrState
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,prompt_tokens,cached_input_tokens,completion_tokens,terminal_category,terminal_event_sha256) VALUES($1,'settlement_failed',$2,$3,$4,'complete',$5) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, terminalDigest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,terminal_category,terminal_event_sha256) VALUES($1,'settlement_failed',$2,$3,$4,$5,$6,'complete',$7) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, terminalDigest[:])
 	if err != nil {
 		return err
 	}
@@ -573,7 +584,7 @@ func loadID(ctx context.Context, tx pgx.Tx, id string, lock bool) (Charge, bool,
 }
 func validBegin(r BeginRequest) bool {
 	has := r.Fingerprint != ([32]byte{})
-	return ((r.Protocol == "openai" && (r.Operation == "chat.completions" || r.Operation == "responses.create")) || (r.Protocol == "gemini" && r.Operation == "chat.completions" && r.DeliveryMode == "non_stream")) && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
+	return ((r.Protocol == "openai" && (r.Operation == "chat.completions" || r.Operation == "responses.create")) || (r.Protocol == "gemini" && r.Operation == "chat.completions")) && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
 }
 func sameRequest(c Charge, r BeginRequest) bool {
 	identity := c.RequestID == r.RequestID

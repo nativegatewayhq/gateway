@@ -162,7 +162,7 @@ func run(stdout, stderr io.Writer) int {
 		}
 		return nil
 	}
-	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
+	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout, cfg.GeminiStreamIdleTimeout)
 	imageModels, err := imageoperation.DefaultRegistryWithAsync(cfg.ReplicateModels, cfg.FalModels)
 	if err != nil {
 		logger.Error("gateway model registry initialization failed")

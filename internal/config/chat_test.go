@@ -52,12 +52,17 @@ func TestResponsesConfigurationRequiresLimitsWithBilling(t *testing.T) {
 }
 
 func TestGeminiLLMConfiguration(t *testing.T) {
-	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_GEMINI_LLM_MODELS": "gemini-2.5-pro,gemini-2.5-flash"}
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_GEMINI_LLM_MODELS": "gemini-2.5-pro,gemini-2.5-flash", "GATEWAY_GEMINI_STREAM_IDLE_TIMEOUT": "9s"}
 	lookup := func(key string) (string, bool) { v, ok := values[key]; return v, ok }
 	cfg, err := Load(lookup)
-	if err != nil || len(cfg.GeminiLLMModels) != 2 || cfg.GeminiLLMModels[0] != "gemini-2.5-pro" {
+	if err != nil || len(cfg.GeminiLLMModels) != 2 || cfg.GeminiLLMModels[0] != "gemini-2.5-pro" || cfg.GeminiStreamIdleTimeout != 9*time.Second {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
+	values["GATEWAY_GEMINI_STREAM_IDLE_TIMEOUT"] = "0s"
+	if _, err = Load(lookup); err == nil {
+		t.Fatal("invalid Gemini stream idle timeout accepted")
+	}
+	values["GATEWAY_GEMINI_STREAM_IDLE_TIMEOUT"] = "9s"
 	for _, invalid := range []string{"gemini-image", "gemini-2.5-pro,gemini-2.5-pro", "bad model", ""} {
 		values["GATEWAY_GEMINI_LLM_MODELS"] = invalid
 		if _, err = Load(lookup); err == nil {

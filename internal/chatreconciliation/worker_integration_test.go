@@ -164,3 +164,34 @@ func TestWorkerRetriesGeminiSettlementWithDetailedUsageExactlyOnce(t *testing.T)
 		t.Fatalf("charge=%s task=%s schema=%s tool=%d thoughts=%d", chargeState, taskState, schema, tool, thoughts)
 	}
 }
+
+func TestWorkerRetriesGeminiStreamingSettlementExactlyOnce(t *testing.T) {
+	worker, service, pool := streamingWorkerFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	if _, err := prices.Publish(ctx, chatpricing.Price{Protocol: "gemini", Operation: "chat.completions", ChannelID: "channel_00000000000000000000000000000003", Model: "gemini-2.5-pro", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 500_000, CachedInputSale: 1_000_000, OutputCost: 3_000_000, OutputSale: 4_000_000}}, "gemini-stream-worker-price"); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(ctx, chatbilling.BeginRequest{Protocol: "gemini", Operation: "chat.completions", RequestID: "gemini-stream-reconcile", OrganizationID: "org_stream", ProjectID: "project_stream", APIKeyID: "key_stream", Model: "gemini-2.5-pro", ChannelID: "channel_00000000000000000000000000000003", MaximumInputTokens: 100, MaximumOutputTokens: 50, DeliveryMode: "stream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := chatpricing.Usage{PromptTokens: 12, CachedInputTokens: 3, CompletionTokens: 9, ToolUsePromptTokens: 2, ThoughtsTokens: 4}
+	digest := [32]byte{13}
+	if err = service.MarkStreamReconcilingUsage(ctx, charge.ID, usage, digest); err != nil {
+		t.Fatal(err)
+	}
+	worked, err := worker.RunOne(ctx)
+	if err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	var chargeState, taskState, schema string
+	var tool, thoughts, captures int64
+	if err = pool.QueryRow(ctx, `SELECT c.state,r.state,e.schema_version,e.tool_use_prompt_tokens,e.thoughts_tokens FROM chat_request_charges c JOIN chat_charge_reconciliations r ON r.charge_id=c.id JOIN chat_usage_evidence e ON e.charge_id=c.id WHERE c.id=$1`, charge.ID).Scan(&chargeState, &taskState, &schema, &tool, &thoughts); err != nil {
+		t.Fatal(err)
+	}
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM wallet_operations WHERE operation_key=$1`, "gemini:chat.completions:stream:capture:"+charge.ID).Scan(&captures)
+	if chargeState != "CAPTURED" || taskState != "RESOLVED" || schema != "gemini-stream-usage-v1" || tool != 2 || thoughts != 4 || captures != 1 {
+		t.Fatalf("charge=%s task=%s schema=%s tool=%d thoughts=%d captures=%d", chargeState, taskState, schema, tool, thoughts, captures)
+	}
+}

@@ -77,6 +77,9 @@ type LLMBilling interface {
 	Release(context.Context, string, billing.ResponseSnapshot) (chatbilling.Charge, error)
 	MarkReconciling(context.Context, string, string, *billing.ResponseSnapshot) error
 	MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error
+	CompleteStreamUsage(context.Context, string, chatpricing.Usage, [32]byte) (chatbilling.Charge, error)
+	MarkStreamReconcilingUsage(context.Context, string, chatpricing.Usage, [32]byte) error
+	MarkStreamReconciling(context.Context, string, string, string, string) error
 }
 
 type Handler struct {
@@ -150,7 +153,7 @@ func NewBillableHandlerWithLLMTokenBilling(logger *slog.Logger, authenticator Au
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	tracked := &statusWriter{ResponseWriter: writer}
 	started := time.Now()
-	model, _ := modelFromRequest(request)
+	model, action, _ := modelActionFromRequest(request)
 	providerModel := model
 	operation := string(imageoperation.Generate)
 	candidateID, channelID, routingPolicy := "", "", "fixed"
@@ -197,14 +200,30 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(tracked, http.StatusMethodNotAllowed, "INVALID_ARGUMENT", "method not allowed")
 		return
 	}
-	parsedModel, validPath := modelFromRequest(request)
+	parsedModel, parsedAction, validPath := modelActionFromRequest(request)
 	if !validPath || !validModel(parsedModel) {
 		writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid model")
 		return
 	}
 	model = parsedModel
+	action = parsedAction
 	if handler.llmModels.Contains(model) {
 		operation = geminioperation.ChatCompletions
+	}
+	if action == "streamGenerateContent" && operation != geminioperation.ChatCompletions {
+		writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "streaming is enabled only for configured Gemini LLM models")
+		return
+	}
+	if action == "streamGenerateContent" {
+		if _, ok := writer.(http.Flusher); !ok {
+			writeError(tracked, http.StatusInternalServerError, "INTERNAL", "streaming response is unavailable")
+			return
+		}
+		query := request.URL.Query()
+		if len(query["alt"]) != 1 || query.Get("alt") != "sse" {
+			writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "streamGenerateContent requires alt=sse")
+			return
+		}
 	}
 	principal, authenticated := handler.authenticate(tracked, request)
 	if !authenticated {
@@ -256,7 +275,11 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	if operation == geminioperation.ChatCompletions && handler.llmBilling != nil {
-		handler.serveBillableLLM(tracked, request, principal, model, body)
+		if action == "streamGenerateContent" {
+			handler.serveBillableLLMStream(tracked, request, principal, model, body)
+		} else {
+			handler.serveBillableLLM(tracked, request, principal, model, body)
+		}
 		return
 	}
 	if handler.billing == nil {
@@ -327,6 +350,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	response, err := handler.executeProvider(request.Context(), operation, google.GenerateContentRequest{
 		Model:       providerModel,
 		ChannelID:   channelID,
+		Action:      action,
+		Streaming:   action == "streamGenerateContent",
 		Query:       request.URL.Query(),
 		ContentType: request.Header.Get("Content-Type"),
 		Accept:      request.Header.Get("Accept"),
@@ -397,7 +422,13 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	copyResponseHeaders(tracked.Header(), response.Header)
 	tracked.WriteHeader(response.StatusCode)
-	if _, err := io.Copy(tracked, response.Body); err != nil {
+	var copyErr error
+	if action == "streamGenerateContent" && response.StatusCode >= 200 && response.StatusCode < 300 {
+		_, copyErr = relayGeminiStream(tracked, response.Body, handler.maxBodyBytes, false)
+	} else {
+		_, copyErr = io.Copy(tracked, response.Body)
+	}
+	if copyErr != nil {
 		handler.logger.Warn("gemini upstream response copy failed",
 			"request_id", requestid.FromContext(request.Context()),
 			"provider", "google",
@@ -533,6 +564,156 @@ func (handler *Handler) serveBillableLLM(writer http.ResponseWriter, request *ht
 	}
 	handler.recordLLMBilling(request.Context(), "capture", "success")
 	handler.writeSnapshot(writer, settled.Response, false)
+}
+
+func (handler *Handler) serveBillableLLMStream(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, model string, body []byte) {
+	query := request.URL.Query()
+	if len(query["alt"]) != 1 || query.Get("alt") != "sse" {
+		writeError(writer, http.StatusBadRequest, "INVALID_ARGUMENT", "streamGenerateContent requires alt=sse")
+		return
+	}
+	configured, modelErr := handler.llmModels.Resolve(model)
+	maximumOutput, limitErr := extractGeminiMaximumOutput(body)
+	if modelErr != nil || limitErr != nil || configured.MaximumInputTokens < 1 || configured.MaximumOutputTokens < 1 || int64(len(body)) > configured.MaximumInputTokens || maximumOutput < 1 || maximumOutput > configured.MaximumOutputTokens {
+		writeError(writer, http.StatusBadRequest, "INVALID_ARGUMENT", "managed Gemini LLM requires valid input and output token limits")
+		return
+	}
+	channelID, ok := providercredentials.LegacyChannel(providercredentials.Google)
+	if !ok {
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+		return
+	}
+	if handler.availability != nil {
+		if channels, supported := handler.availability.(interface {
+			ConfiguredChannel(context.Context, string, providercredentials.ProviderID) bool
+		}); supported && !channels.ConfiguredChannel(request.Context(), channelID, providercredentials.Google) {
+			writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+			return
+		}
+	}
+	key, keyErr := idempotency.Extract(request.Header)
+	if keyErr != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_ARGUMENT", "idempotency key is invalid")
+		return
+	}
+	var fingerprint [32]byte
+	if key != "" {
+		normalized := request.URL.Query()
+		normalized.Del("key")
+		fingerprint = idempotency.Fingerprint("gemini", geminioperation.ChatCompletions, model, channelID, request.Method+" "+request.URL.EscapedPath()+"?"+normalized.Encode()+" text/event-stream", body)
+	}
+	begin := chatbilling.BeginRequest{Protocol: "gemini", Operation: geminioperation.ChatCompletions, RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: model, ChannelID: channelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput, DeliveryMode: "stream"}
+	if key != "" {
+		_, found, replayErr := handler.llmBilling.Replay(request.Context(), begin)
+		if replayErr != nil {
+			handler.recordLLMBilling(request.Context(), "replay", "failure")
+			handler.writeLLMBillingError(writer, replayErr)
+			return
+		}
+		if found {
+			// Streaming transcripts are intentionally never retained or replayed.
+			handler.writeLLMBillingError(writer, chatbilling.ErrConflict)
+			return
+		}
+	}
+	permit, allowed := handler.claimFixedHealth(writer, request, channelID)
+	if !allowed {
+		return
+	}
+	charge, beginErr := handler.llmBilling.Begin(request.Context(), begin)
+	if beginErr != nil {
+		handler.releaseHealthPermit(request, permit)
+		handler.recordLLMBilling(request.Context(), "begin", "failure")
+		handler.writeLLMBillingError(writer, beginErr)
+		return
+	}
+	handler.recordLLMBilling(request.Context(), "begin", "success")
+	if charge.Replay {
+		handler.releaseHealthPermit(request, permit)
+		handler.writeLLMBillingError(writer, chatbilling.ErrConflict)
+		return
+	}
+	response, executeErr := handler.executeProvider(request.Context(), geminioperation.ChatCompletions, google.GenerateContentRequest{Model: model, ChannelID: channelID, Action: "streamGenerateContent", Streaming: true, Query: request.URL.Query(), ContentType: request.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: request.UserAgent(), APIClient: request.Header.Get("x-goog-api-client"), Body: bytes.NewReader(body)})
+	handler.observeHealth(request, channelID, permit, response, executeErr)
+	if executeErr != nil {
+		reason := "executor_connection_lost"
+		if errors.Is(executeErr, google.ErrTimeout) || errors.Is(executeErr, google.ErrStreamIdle) {
+			reason = "executor_timeout"
+		}
+		_ = handler.llmBilling.MarkStreamReconciling(context.WithoutCancel(request.Context()), charge.ID, reason, "provider", "provider_error")
+		handler.recordLLMBilling(request.Context(), "reconciling", "success")
+		handler.writeExecutorError(writer, executeErr)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		responseBody, readErr := readBounded(response.Body, handler.maxBodyBytes)
+		if readErr != nil {
+			_ = handler.llmBilling.MarkStreamReconciling(context.WithoutCancel(request.Context()), charge.ID, "response_unavailable", "provider", "provider_error")
+			writeError(writer, http.StatusBadGateway, "UNAVAILABLE", "provider response unavailable")
+			return
+		}
+		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeGeminiResponseHeaders(response.Header), Body: responseBody}
+		settled, settleErr := handler.llmBilling.Release(context.WithoutCancel(request.Context()), charge.ID, snapshot)
+		if settleErr != nil {
+			_ = handler.llmBilling.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "settlement_failed", &snapshot)
+			writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "settlement unavailable")
+			return
+		}
+		handler.recordLLMBilling(request.Context(), "release", "success")
+		handler.writeSnapshot(writer, settled.Response, false)
+		return
+	}
+	mediaType, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if mediaErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		_ = handler.llmBilling.MarkStreamReconciling(context.WithoutCancel(request.Context()), charge.ID, "stream_protocol_invalid", "provider", "invalid_usage")
+		writeError(writer, http.StatusBadGateway, "UNAVAILABLE", "invalid provider stream")
+		return
+	}
+	copyGeminiStreamHeaders(writer.Header(), response.Header)
+	writer.WriteHeader(response.StatusCode)
+	streamStarted := time.Now()
+	result, relayErr := relayGeminiStream(writer, response.Body, handler.maxBodyBytes, true)
+	if relayErr != nil || !result.UsageFound || !result.Terminal || result.Usage.PromptTokens > charge.MaximumInputTokens || result.Usage.CompletionTokens > charge.MaximumOutputTokens {
+		reason, side, category := "stream_protocol_invalid", "provider", "invalid_usage"
+		if errors.Is(relayErr, errGeminiStreamWrite) {
+			reason, side, category = "stream_write_failed", "client", "write_failed"
+		} else if errors.Is(request.Context().Err(), context.Canceled) {
+			reason, side, category = "client_disconnect", "client", "client_disconnect"
+		} else if errors.Is(relayErr, google.ErrStreamIdle) || errors.Is(relayErr, google.ErrTimeout) {
+			reason, category = "executor_timeout", "provider_error"
+		} else if relayErr == nil && !result.UsageFound {
+			reason, category = "stream_usage_missing", "missing_usage"
+		} else if relayErr == nil && !result.Terminal {
+			reason, category = "stream_protocol_invalid", "missing_terminal"
+		}
+		_ = handler.llmBilling.MarkStreamReconciling(context.WithoutCancel(request.Context()), charge.ID, reason, side, category)
+		handler.recordGeminiStream(request.Context(), category, side, result.FirstByte, time.Since(streamStarted))
+		return
+	}
+	if _, settleErr := handler.llmBilling.CompleteStreamUsage(context.WithoutCancel(request.Context()), charge.ID, result.Usage, result.TerminalDigest); settleErr != nil {
+		_ = handler.llmBilling.MarkStreamReconcilingUsage(context.WithoutCancel(request.Context()), charge.ID, result.Usage, result.TerminalDigest)
+		handler.recordLLMBilling(request.Context(), "reconciling", "failure")
+		handler.recordGeminiStream(request.Context(), "complete", "none", result.FirstByte, time.Since(streamStarted))
+		return
+	}
+	handler.recordLLMBilling(request.Context(), "capture", "success")
+	handler.recordGeminiStream(request.Context(), "complete", "none", result.FirstByte, time.Since(streamStarted))
+}
+
+func (handler *Handler) recordGeminiStream(ctx context.Context, category, side string, firstByte, duration time.Duration) {
+	if handler.telemetry != nil {
+		handler.telemetry.LLMStream(ctx, telemetry.LLMStreamRecord{Protocol: "gemini", Operation: geminioperation.ChatCompletions, TerminalCategory: category, DisconnectSide: side, FirstByte: firstByte, Duration: duration})
+	}
+}
+
+func copyGeminiStreamHeaders(destination, source http.Header) {
+	for _, key := range []string{"Content-Type", "Cache-Control", "X-Goog-Request-Id"} {
+		for _, value := range source.Values(key) {
+			destination.Add(key, value)
+		}
+	}
+	destination.Set("X-Content-Type-Options", "nosniff")
 }
 
 func (handler *Handler) recordLLMBilling(ctx context.Context, transition, outcome string) {
@@ -677,7 +858,7 @@ func (handler *Handler) writeLLMBillingError(writer http.ResponseWriter, err err
 
 func geminiProviderTelemetryOutcome(response *http.Response, err error) string {
 	switch {
-	case errors.Is(err, google.ErrTimeout):
+	case errors.Is(err, google.ErrTimeout), errors.Is(err, google.ErrStreamIdle):
 		return "timeout"
 	case errors.Is(err, google.ErrCanceled):
 		return "canceled"
@@ -1221,7 +1402,7 @@ func (handler *Handler) executorErrorSnapshot(err error) billing.ResponseSnapsho
 	switch {
 	case errors.Is(err, providercredentials.ErrCredentialUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable"
-	case errors.Is(err, google.ErrTimeout):
+	case errors.Is(err, google.ErrTimeout), errors.Is(err, google.ErrStreamIdle):
 		status, code, message = http.StatusGatewayTimeout, "DEADLINE_EXCEEDED", "provider request timed out"
 	case errors.Is(err, google.ErrCanceled):
 		status, code, message = 499, "CANCELLED", "request canceled"
@@ -1298,7 +1479,7 @@ func (handler *Handler) writeExecutorError(writer http.ResponseWriter, err error
 	switch {
 	case errors.Is(err, providercredentials.ErrCredentialUnavailable):
 		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
-	case errors.Is(err, google.ErrTimeout):
+	case errors.Is(err, google.ErrTimeout), errors.Is(err, google.ErrStreamIdle):
 		writeError(writer, http.StatusGatewayTimeout, "DEADLINE_EXCEEDED", "provider request timed out")
 	case errors.Is(err, google.ErrCanceled):
 		writeError(writer, 499, "CANCELLED", "request canceled")
@@ -1325,19 +1506,31 @@ func validModel(model string) bool {
 	return true
 }
 
-func modelFromRequest(request *http.Request) (string, bool) {
+func modelActionFromRequest(request *http.Request) (string, string, bool) {
 	const prefix = "/v1beta/models/"
-	const suffix = ":generateContent"
 	escapedPath := request.URL.EscapedPath()
-	if !strings.HasPrefix(escapedPath, prefix) || !strings.HasSuffix(escapedPath, suffix) {
-		return "", false
+	if !strings.HasPrefix(escapedPath, prefix) {
+		return "", "", false
 	}
-	escapedModel := strings.TrimSuffix(strings.TrimPrefix(escapedPath, prefix), suffix)
+	remainder := strings.TrimPrefix(escapedPath, prefix)
+	separator := strings.LastIndexByte(remainder, ':')
+	if separator < 1 {
+		return "", "", false
+	}
+	escapedModel, action := remainder[:separator], remainder[separator+1:]
+	if action != "generateContent" && action != "streamGenerateContent" {
+		return "", "", false
+	}
 	model, err := url.PathUnescape(escapedModel)
 	if err != nil || strings.Contains(model, "/") {
-		return "", false
+		return "", "", false
 	}
-	return model, true
+	return model, action, true
+}
+
+func modelFromRequest(request *http.Request) (string, bool) {
+	model, _, ok := modelActionFromRequest(request)
+	return model, ok
 }
 
 func safeModelForLog(model string) string {
@@ -1408,6 +1601,12 @@ func (writer *statusWriter) Write(content []byte) (int, error) {
 		writer.WriteHeader(http.StatusOK)
 	}
 	return writer.ResponseWriter.Write(content)
+}
+
+func (writer *statusWriter) Flush() {
+	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func (writer *statusWriter) statusCode() int {

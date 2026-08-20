@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-044
 title: Phase 4 Gemini Native SSE Streaming and Disconnect Settlement
-status: proposed
+status: in_progress
 created_at: 2026-08-21T19:00:00+09:00
-updated_at: 2026-08-21T19:00:00+09:00
+updated_at: 2026-08-21T19:30:00+09:00
 owners:
   - gateway
 initiative: phase-4-gemini-streaming-settlement
