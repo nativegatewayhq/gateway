@@ -128,6 +128,11 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	route := candidates[0]
+	usage, err := requestedOutputUsage(body, route.Usage)
+	if err != nil {
+		writeDetail(writer, http.StatusUnprocessableEntity, "input.num_outputs is not supported for this model")
+		return
+	}
 	if route.Provider != providercredentials.Replicate || (handler.availability != nil && !handler.availability.ConfiguredChannel(request.Context(), route.ChannelID, route.Provider)) {
 		writeDetail(writer, http.StatusServiceUnavailable, "Prediction provider is unavailable")
 		return
@@ -153,7 +158,7 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 	}
 	chargeID := ""
 	if handler.billing != nil {
-		charge, err := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "replicate", Operation: "image.generate", Model: version, ChannelID: route.ChannelID, Quantity: 1, Size: "default", Quality: "default", IdempotencyKey: key, RequestFingerprint: fingerprint})
+		charge, err := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "replicate", Operation: "image.generate", Model: version, ChannelID: route.ChannelID, Quantity: usage.Quantity, Size: "default", Quality: "default", IdempotencyKey: key, RequestFingerprint: fingerprint})
 		if err != nil {
 			handler.billingError(writer, err)
 			return
@@ -161,7 +166,7 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		chargeID = charge.ID
 	}
 	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
-	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "replicate", Operation: "image.generate", Model: version, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint}, providerreplicate.SubmitPayload{Body: body, Prefer: prefer, CancelAfter: cancelAfter})
+	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "replicate", Operation: "image.generate", Model: version, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: usage}, providerreplicate.SubmitPayload{Body: body, Prefer: prefer, CancelAfter: cancelAfter})
 	if err != nil {
 		writeDetail(writer, http.StatusServiceUnavailable, "Prediction could not be submitted")
 		return
@@ -283,6 +288,25 @@ func validateCreate(body []byte) (string, error) {
 		return "", errors.New("input must be an object")
 	}
 	return version, nil
+}
+
+func requestedOutputUsage(body []byte, capability imageoperation.UsageCapability) (*joboperation.Usage, error) {
+	if capability.Dimension != "output" || capability.Unit != "image" || capability.RequestExtractor != "replicate-input-num_outputs-v1" || capability.DefaultQuantity < 1 || capability.MaximumQuantity < capability.DefaultQuantity {
+		return nil, errors.New("usage capability unavailable")
+	}
+	var envelope struct {
+		Input map[string]json.RawMessage `json:"input"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || envelope.Input == nil {
+		return nil, errors.New("invalid input")
+	}
+	quantity := capability.DefaultQuantity
+	if raw, exists := envelope.Input["num_outputs"]; exists {
+		if json.Unmarshal(raw, &quantity) != nil || quantity < 1 || quantity > capability.MaximumQuantity {
+			return nil, errors.New("invalid output quantity")
+		}
+	}
+	return &joboperation.Usage{Dimension: capability.Dimension, Unit: capability.Unit, Quantity: quantity, Provenance: "request", ExtractorVersion: capability.RequestExtractor, ResultExtractorVersion: capability.ResultExtractor}, nil
 }
 func parsePrefer(value string) (string, time.Duration, error) {
 	value = strings.TrimSpace(value)

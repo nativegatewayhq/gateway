@@ -126,7 +126,7 @@ func (client *Client) Poll(ctx context.Context, attempt jobs.ProviderAttempt) (j
 	if err != nil {
 		return joboperation.Observation{}, &jobs.ProviderError{Category: "invalid_response"}
 	}
-	return joboperation.Observation{Status: joboperation.Succeeded, Snapshot: resultSnapshot}, nil
+	return joboperation.Observation{Status: joboperation.Succeeded, Snapshot: resultSnapshot, Usage: falOutputUsage(resultBody, "poll")}, nil
 }
 
 func (client *Client) resultSnapshot(jobID string, status int, headers http.Header, body []byte) (joboperation.Snapshot, error) {
@@ -170,15 +170,54 @@ func (client *Client) WebhookObservation(jobID string, body []byte) (string, job
 		if err != nil {
 			return "", joboperation.Observation{}, err
 		}
-		return providerID, joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: snapshot}, nil
+		return providerID, joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: snapshot, Usage: falOutputUsage(resultBody, "webhook")}, nil
 	case "ERROR", "FAILED":
 		failureBody := []byte(`{"detail":"Queue request failed"}`)
-		return providerID, joboperation.Observation{Status: joboperation.Failed, ProviderJobID: providerID, FailureCategory: "provider_error", Snapshot: joboperation.Snapshot{Status: http.StatusInternalServerError, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: failureBody, SHA256: sha256.Sum256(failureBody)}}, nil
+		usage := &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 0, Provenance: "webhook", ExtractorVersion: "fal-output-v1"}
+		if payload := envelope["payload"]; len(payload) > 0 && string(payload) != "null" {
+			usage = falOutputUsage(payload, "webhook")
+		}
+		return providerID, joboperation.Observation{Status: joboperation.Failed, ProviderJobID: providerID, FailureCategory: "provider_error", Snapshot: joboperation.Snapshot{Status: http.StatusInternalServerError, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: failureBody, SHA256: sha256.Sum256(failureBody)}, Usage: usage}, nil
 	case "CANCELED", "CANCELLED":
-		return providerID, joboperation.Observation{Status: joboperation.Canceled, ProviderJobID: providerID, FailureCategory: "canceled"}, nil
+		usage := &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 0, Provenance: "webhook", ExtractorVersion: "fal-output-v1"}
+		if payload := envelope["payload"]; len(payload) > 0 && string(payload) != "null" {
+			usage = falOutputUsage(payload, "webhook")
+		}
+		return providerID, joboperation.Observation{Status: joboperation.Canceled, ProviderJobID: providerID, FailureCategory: "canceled", Usage: usage}, nil
 	default:
 		return "", joboperation.Observation{}, errors.New("invalid fal webhook status")
 	}
+}
+
+func falOutputUsage(body []byte, source string) *joboperation.Usage {
+	quantity := int64(0)
+	var value map[string]json.RawMessage
+	if json.Unmarshal(body, &value) == nil {
+		if raw, exists := value["images"]; exists {
+			var images []json.RawMessage
+			if json.Unmarshal(raw, &images) == nil {
+				for _, image := range images {
+					if usableImage(image) && quantity < joboperation.MaximumObservedUsage {
+						quantity++
+					}
+				}
+			}
+		} else if raw, exists := value["image"]; exists && usableImage(raw) {
+			quantity = 1
+		}
+	}
+	return &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: quantity, Provenance: source, ExtractorVersion: "fal-output-v1"}
+}
+
+func usableImage(raw json.RawMessage) bool {
+	var object struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal(raw, &object) != nil || object.URL == "" || len(object.URL) > 8192 || strings.ContainsAny(object.URL, "\r\n") {
+		return false
+	}
+	parsed, err := url.Parse(object.URL)
+	return err == nil && ((parsed.Scheme == "https" && parsed.Host != "") || (parsed.Scheme == "data" && strings.HasPrefix(object.URL, "data:image/")))
 }
 
 func (client *Client) Cancel(ctx context.Context, attempt jobs.ProviderAttempt) (joboperation.Observation, error) {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -358,7 +359,38 @@ func (service *Service) CompleteWithAmounts(ctx context.Context, chargeID string
 	return service.complete(ctx, chargeID, true, &actualCost, &actualSale, snapshot)
 }
 
+// CompleteWithQuantity settles an asynchronous output-priced request using the
+// immutable per-unit amounts captured by its original charge estimate.
+func (service *Service) CompleteWithQuantity(ctx context.Context, chargeID string, actualQuantity int64, snapshot ResponseSnapshot) (Charge, error) {
+	if !validID(chargeID, "charge_") || actualQuantity <= 0 {
+		return Charge{}, ErrInvalidRequest
+	}
+	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return Charge{}, err
+	}
+	charge, found, err := loadByID(ctx, tx, chargeID, false)
+	if err != nil {
+		tx.Rollback(ctx)
+		return Charge{}, err
+	}
+	if !found || charge.Quantity <= 0 || actualQuantity > charge.Quantity || charge.EstimatedCost%charge.Quantity != 0 || charge.ReservedSale%charge.Quantity != 0 {
+		tx.Rollback(ctx)
+		return Charge{}, ErrInvalidRequest
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Charge{}, err
+	}
+	actualCost := charge.EstimatedCost / charge.Quantity * actualQuantity
+	actualSale := charge.ReservedSale / charge.Quantity * actualQuantity
+	return service.completeWithOperation(ctx, chargeID, true, &actualCost, &actualSale, snapshot, "image-capture:"+chargeID+":usage:"+strconv.FormatInt(actualQuantity, 10))
+}
+
 func (service *Service) complete(ctx context.Context, chargeID string, success bool, actualCost, actualSale *int64, snapshot ResponseSnapshot) (Charge, error) {
+	return service.completeWithOperation(ctx, chargeID, success, actualCost, actualSale, snapshot, "image-capture:"+chargeID)
+}
+
+func (service *Service) completeWithOperation(ctx context.Context, chargeID string, success bool, actualCost, actualSale *int64, snapshot ResponseSnapshot, captureOperationKey string) (Charge, error) {
 	if !validID(chargeID, "charge_") {
 		return Charge{}, ErrInvalidRequest
 	}
@@ -405,7 +437,7 @@ func (service *Service) complete(ctx context.Context, chargeID string, success b
 		if captureAmount <= 0 || captureAmount > charge.ReservedSale {
 			return Charge{}, ErrInvalidRequest
 		}
-		if _, err := service.wallet.CaptureInTx(ctx, tx, charge.ReservationID, captureAmount, "image-capture:"+charge.ID); err != nil {
+		if _, err := service.wallet.CaptureInTx(ctx, tx, charge.ReservationID, captureAmount, captureOperationKey); err != nil {
 			return Charge{}, err
 		}
 		captureCost := charge.EstimatedCost

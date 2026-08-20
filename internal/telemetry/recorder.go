@@ -28,6 +28,7 @@ type Recorder struct {
 	reconciliation   metric.Int64Counter
 	authentication   metric.Int64Counter
 	jobs             metric.Int64Counter
+	jobUsage         metric.Int64Histogram
 }
 
 func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Recorder, error) {
@@ -79,7 +80,11 @@ func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Re
 	if err != nil {
 		return nil, err
 	}
-	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation, authentication: authentication, jobs: jobs}, nil
+	jobUsage, err := meter.Int64Histogram("gateway.jobs.usage.quantity", metric.WithUnit("{image}"))
+	if err != nil {
+		return nil, err
+	}
+	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation, authentication: authentication, jobs: jobs, jobUsage: jobUsage}, nil
 }
 
 type HTTPRecord struct {
@@ -96,6 +101,10 @@ type ProviderRecord struct {
 type RouteRecord struct{ Protocol, Operation, Policy, Outcome, Rejection string }
 type AuthenticationRecord struct{ Protocol, Stage, Outcome string }
 type JobRecord struct{ Protocol, Stage, Status, Outcome string }
+type JobUsageRecord struct {
+	Protocol, Kind, Outcome, Reason string
+	Quantity                        int64
+}
 type BillingRecord struct{ Protocol, Operation, Transition, Outcome string }
 type StorageRecord struct{ Protocol, Stage, Source, Outcome string }
 type ReconciliationRecord struct {
@@ -143,6 +152,12 @@ func (recorder *Recorder) Authentication(ctx context.Context, record Authenticat
 }
 func (recorder *Recorder) Job(ctx context.Context, record JobRecord) {
 	recorder.jobs.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.job.stage", boundedJobStage(record.Stage)), attribute.String("gateway.job.status", boundedJobStatus(record.Status)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
+}
+func (recorder *Recorder) JobUsage(ctx context.Context, record JobUsageRecord) {
+	if record.Quantity < 0 || record.Quantity > 128 {
+		return
+	}
+	recorder.jobUsage.Record(ctx, record.Quantity, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.job.usage.kind", allowed(record.Kind, "estimated", "actual")), attribute.String("gateway.outcome", boundedOutcome(record.Outcome)), attribute.String("gateway.job.usage.reason", boundedUsageReason(record.Reason))))
 }
 func (recorder *Recorder) Billing(ctx context.Context, record BillingRecord) {
 	recorder.billing.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.operation", boundedOperation(record.Operation)), attribute.String("gateway.billing.transition", boundedTransition(record.Transition)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
@@ -286,6 +301,9 @@ func boundedJobStage(value string) string {
 }
 func boundedJobStatus(value string) string {
 	return allowed(value, "PENDING", "QUEUED", "PROCESSING", "SUCCEEDED", "FAILED", "CANCELED", "RECONCILING")
+}
+func boundedUsageReason(value string) string {
+	return allowed(value, "none", "usage_unknown", "usage_exceeds_estimate", "partial_terminal_conflict", "usage_identity_mismatch")
 }
 func boundedRejection(value string) string {
 	return allowed(value, "none", "circuit_open", "circuit_unavailable", "price_unavailable", "price_race_unavailable", "margin", "spend_cap_exhausted", "credential_unavailable", "provider_unavailable", "executor_unavailable")

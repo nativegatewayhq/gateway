@@ -394,6 +394,146 @@ func TestWebhookTerminalSettlementCapturesOrReleasesExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestAsyncPartialOutputUsageSettlesExactlyOnce(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	request.Provider = "replicate"
+	request.ChannelID = "channel_00000000000000000000000000000004"
+	request.EstimatedUsage = &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 3, Provenance: "request", ExtractorVersion: "replicate-input-num_outputs-v1", ResultExtractorVersion: "replicate-output-v1"}
+	ctx := context.Background()
+	wallet := ledger.NewService(repository.pool)
+	if _, err := wallet.Deposit(ctx, owner.OrganizationID, 1000, "partial-deposit-"+request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	estimator, err := pricing.NewService(repository.pool, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: request.ChannelID, Protocol: "replicate", Operation: "image.generate", Model: request.Model, Size: "default", Quality: "default", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "partial-price-"+request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	billingService, err := billing.NewService(repository.pool, estimator, wallet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charge, err := billingService.Begin(ctx, billing.BeginRequest{RequestID: "charge-" + request.RequestID, OrganizationID: owner.OrganizationID, ProjectID: owner.ProjectID, APIKeyID: owner.APIKeyID, Protocol: "replicate", Operation: "image.generate", Model: request.Model, ChannelID: request.ChannelID, Quantity: 3, Size: "default", Quality: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ChargeID = charge.ID
+	providerID := "provider-" + request.RequestID
+	body := []byte(`{"id":"` + request.RequestID + `","status":"succeeded","output":["https://delivery.example/a.png","https://delivery.example/b.png"]}`)
+	provider := &fakeAsyncProvider{
+		submitResult:    SubmitResult{ProviderJobID: providerID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Hour},
+		pollObservation: joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}, Usage: &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 2, Provenance: "poll", ExtractorVersion: "replicate-output-v1"}},
+	}
+	service, err := NewService(repository, map[string]Provider{"replicate": provider}, jobServiceConfig(), "partial-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.Submit(ctx, request, fakeWebhookPayload{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE async_job_provider_attempts SET next_poll_at='epoch' WHERE job_id=$1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := NewWorker(repository, map[string]Provider{"replicate": provider}, billingService, jobWorkerConfig(), "partial-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := worker.RunOnce(ctx)
+	if err != nil || result.Observed != 1 || result.Settled < 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	stored, err := repository.Get(ctx, owner, created.ID)
+	if err != nil || stored.ActualUsage == nil || stored.ActualUsage.Quantity != 2 || stored.EstimatedUsage == nil || stored.EstimatedUsage.Quantity != 3 || stored.SettlementState != "SETTLED" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	var available, reserved int64
+	if err := repository.pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id=$1`, owner.OrganizationID).Scan(&available, &reserved); err != nil || available != 800 || reserved != 0 {
+		t.Fatalf("wallet=%d/%d err=%v", available, reserved, err)
+	}
+	var evidence, captures int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_usage_evidence WHERE job_id=$1 AND quantity=2`, created.ID).Scan(&evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE reservation_id=$1 AND entry_type='capture'`, charge.ReservationID).Scan(&captures); err != nil {
+		t.Fatal(err)
+	}
+	if evidence != 1 || captures != 1 {
+		t.Fatalf("evidence=%d captures=%d", evidence, captures)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE async_jobs SET estimated_quantity=1 WHERE id=$1`, created.ID); err == nil {
+		t.Fatal("immutable estimate was updated")
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE async_job_usage_evidence SET quantity=1 WHERE job_id=$1`, created.ID); err == nil {
+		t.Fatal("append-only usage evidence was updated")
+	}
+	second, err := worker.RunOnce(ctx)
+	if err != nil || second.Settled != 0 {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+}
+
+func TestUnsafeAsyncUsageHoldsReservationWithoutSettlement(t *testing.T) {
+	for _, test := range []struct {
+		name, reason string
+		status       joboperation.Status
+		quantity     int64
+	}{{"unknown", "usage_unknown", joboperation.Succeeded, 0}, {"exceeds estimate", "usage_exceeds_estimate", joboperation.Succeeded, 11}, {"failed with output", "partial_terminal_conflict", joboperation.Failed, 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			repository, owner, request := jobRepositoryFixture(t)
+			request.Provider = "replicate"
+			request.ChannelID = "channel_00000000000000000000000000000004"
+			request.EstimatedUsage = &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 3, Provenance: "request", ExtractorVersion: "replicate-input-num_outputs-v1", ResultExtractorVersion: "replicate-output-v1"}
+			ctx := context.Background()
+			wallet := ledger.NewService(repository.pool)
+			if _, err := wallet.Deposit(ctx, owner.OrganizationID, 1000, "unsafe-deposit-"+request.RequestID); err != nil {
+				t.Fatal(err)
+			}
+			estimator, _ := pricing.NewService(repository.pool, 0)
+			if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: request.ChannelID, Protocol: "replicate", Operation: "image.generate", Model: request.Model, Size: "default", Quality: "default", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "unsafe-price-"+request.RequestID); err != nil {
+				t.Fatal(err)
+			}
+			billingService, _ := billing.NewService(repository.pool, estimator, wallet)
+			charge, err := billingService.Begin(ctx, billing.BeginRequest{RequestID: "unsafe-charge-" + request.RequestID, OrganizationID: owner.OrganizationID, ProjectID: owner.ProjectID, APIKeyID: owner.APIKeyID, Protocol: "replicate", Operation: "image.generate", Model: request.Model, ChannelID: request.ChannelID, Quantity: 3, Size: "default", Quality: "default"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.ChargeID = charge.ID
+			created, _, err := repository.Create(ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := repository.BeginSubmit(ctx, owner, created.ID, "unsafe-submit", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerID := "provider-" + request.RequestID
+			if _, err := repository.ConfirmSubmit(ctx, owner, attempt, providerID, joboperation.Queued, time.Now().Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			body := []byte(`{"status":"terminal"}`)
+			observation := joboperation.Observation{Status: test.status, ProviderJobID: providerID, Usage: &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: test.quantity, Provenance: "poll", ExtractorVersion: "replicate-output-v1"}}
+			if test.status != joboperation.Canceled {
+				observation.Snapshot = joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}
+			}
+			stored, err := repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1, Provider: "replicate", ChannelID: request.ChannelID, ProviderJobID: providerID, State: "SUBMITTED"}}, observation, "poll", time.Time{})
+			if err != nil || stored.SettlementState != "MANUAL_REVIEW" || stored.UsageReconciliationReason != test.reason {
+				t.Fatalf("stored=%+v err=%v", stored, err)
+			}
+			var available, reserved int64
+			if err := repository.pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id=$1`, owner.OrganizationID).Scan(&available, &reserved); err != nil || available != 700 || reserved != 300 {
+				t.Fatalf("wallet=%d/%d err=%v", available, reserved, err)
+			}
+			var terminalEntries int
+			if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE reservation_id=$1 AND entry_type IN ('capture','release')`, charge.ReservationID).Scan(&terminalEntries); err != nil || terminalEntries != 0 {
+				t.Fatalf("terminal entries=%d err=%v", terminalEntries, err)
+			}
+		})
+	}
+}
+
 func TestSubmitUnknownAndCancelUnknownRemainReconciling(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	provider := &fakeAsyncProvider{submitError: context.DeadlineExceeded, pollError: errors.New("unavailable"), cancelObservation: joboperation.Observation{Status: joboperation.Canceled}}

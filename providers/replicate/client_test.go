@@ -126,4 +126,8 @@ func TestWebhookObservationRequiresTerminalAndSanitizesIdentity(t *testing.T) {
 	if _, _, err := client.WebhookObservation("job_00000000000000000000000000000000", []byte(`{"id":"provider","status":"processing"}`)); err == nil {
 		t.Fatal("non-terminal webhook accepted")
 	}
+	_, canceled, err := client.WebhookObservation("job_00000000000000000000000000000000", []byte(`{"id":"provider","status":"canceled","output":["https://delivery.example/partial.png"]}`))
+	if err != nil || canceled.Status != joboperation.Canceled || canceled.Usage == nil || canceled.Usage.Quantity != 1 || len(canceled.Snapshot.Body) != 0 {
+		t.Fatalf("canceled=%+v err=%v", canceled, err)
+	}
 }

@@ -27,17 +27,19 @@ func (stub authStub) Authenticate(context.Context, string) (apikey.Principal, er
 type modelsStub struct{}
 
 func (modelsStub) Candidates(_, model string, _ imageoperation.Operation, _ imageoperation.MediaType) ([]imageoperation.RoutingDecision, error) {
-	return []imageoperation.RoutingDecision{{Protocol: "fal", Model: model, Provider: providercredentials.Fal, ChannelID: "channel_00000000000000000000000000000005", Policy: imageoperation.Fixed}}, nil
+	return []imageoperation.RoutingDecision{{Protocol: "fal", Model: model, Provider: providercredentials.Fal, ChannelID: "channel_00000000000000000000000000000005", Policy: imageoperation.Fixed, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 10, RequestExtractor: "fal-input-num_images-v1", ResultExtractor: "fal-output-v1"}}}, nil
 }
 
 type jobsStub struct {
 	value         joboperation.Job
 	submits, gets int
 	cancels       int
+	request       jobs.CreateRequest
 }
 
 func (stub *jobsStub) Submit(_ context.Context, request jobs.CreateRequest, _ any) (joboperation.Job, error) {
 	stub.submits++
+	stub.request = request
 	stub.value = joboperation.Job{ID: testJobID, Owner: request.Owner, Protocol: "fal", Model: request.Model, Status: joboperation.Queued, Snapshot: joboperation.Snapshot{Status: 200, Body: []byte(`{"request_id":"` + testJobID + `","status_url":"https://gateway.example/fal-ai/flux/dev/requests/` + testJobID + `/status"}`)}}
 	return stub.value, nil
 }
@@ -71,7 +73,7 @@ func TestSubmitStatusResultAndCancel(t *testing.T) {
 	service := &jobsStub{}
 	handler := testHandler(service)
 	response := request(handler, http.MethodPost, "/fal-ai/flux/dev", `{"prompt":"cat"}`)
-	if response.Code != http.StatusOK || service.submits != 1 || !strings.Contains(response.Body.String(), testJobID) {
+	if response.Code != http.StatusOK || service.submits != 1 || service.request.EstimatedUsage == nil || service.request.EstimatedUsage.Quantity != 1 || !strings.Contains(response.Body.String(), testJobID) {
 		t.Fatalf("submit=%d body=%s submits=%d", response.Code, response.Body.String(), service.submits)
 	}
 	response = request(handler, http.MethodGet, "/fal-ai/flux/dev/requests/"+testJobID+"/status?logs=false", "")
@@ -87,6 +89,14 @@ func TestSubmitStatusResultAndCancel(t *testing.T) {
 	response = request(handler, http.MethodPut, "/fal-ai/flux/dev/requests/"+testJobID+"/cancel", "")
 	if response.Code != http.StatusOK || service.cancels != 1 || !strings.Contains(response.Body.String(), "CANCELED") {
 		t.Fatalf("cancel=%d body=%s cancels=%d", response.Code, response.Body.String(), service.cancels)
+	}
+}
+
+func TestSubmitPassesMaximumOutputUsageToJob(t *testing.T) {
+	service := &jobsStub{}
+	response := request(testHandler(service), http.MethodPost, "/fal-ai/flux/dev", `{"prompt":"cat","num_images":5}`)
+	if response.Code != http.StatusOK || service.request.EstimatedUsage == nil || service.request.EstimatedUsage.Quantity != 5 {
+		t.Fatalf("status=%d usage=%+v body=%s", response.Code, service.request.EstimatedUsage, response.Body.String())
 	}
 }
 

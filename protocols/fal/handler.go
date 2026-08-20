@@ -132,6 +132,11 @@ func (handler *Handler) submit(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	selected := candidates[0]
+	usage, err := requestedOutputUsage(body, selected.Usage)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "num_images is not supported for this model")
+		return
+	}
 	if selected.Provider != providercredentials.Fal || (handler.availability != nil && !handler.availability.ConfiguredChannel(request.Context(), selected.ChannelID, selected.Provider)) {
 		writeError(writer, http.StatusServiceUnavailable, "Queue provider unavailable")
 		return
@@ -147,7 +152,7 @@ func (handler *Handler) submit(writer http.ResponseWriter, request *http.Request
 	}
 	chargeID := ""
 	if handler.billing != nil {
-		charge, beginErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "fal", Operation: "image.generate", Model: model, ChannelID: selected.ChannelID, Quantity: 1, Size: "default", Quality: "default", IdempotencyKey: key, RequestFingerprint: fingerprint})
+		charge, beginErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "fal", Operation: "image.generate", Model: model, ChannelID: selected.ChannelID, Quantity: usage.Quantity, Size: "default", Quality: "default", IdempotencyKey: key, RequestFingerprint: fingerprint})
 		if beginErr != nil {
 			handler.billingError(writer, beginErr)
 			return
@@ -155,7 +160,7 @@ func (handler *Handler) submit(writer http.ResponseWriter, request *http.Request
 		chargeID = charge.ID
 	}
 	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
-	value, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "fal", Operation: "image.generate", Model: model, Provider: string(selected.Provider), ChannelID: selected.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint}, providerfal.SubmitPayload{Body: body})
+	value, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "fal", Operation: "image.generate", Model: model, Provider: string(selected.Provider), ChannelID: selected.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: usage}, providerfal.SubmitPayload{Body: body})
 	if err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "Queue request could not be submitted")
 		return
@@ -342,6 +347,23 @@ func validBody(body []byte) bool {
 		}
 	}
 	return true
+}
+
+func requestedOutputUsage(body []byte, capability imageoperation.UsageCapability) (*joboperation.Usage, error) {
+	if capability.Dimension != "output" || capability.Unit != "image" || capability.RequestExtractor != "fal-input-num_images-v1" || capability.DefaultQuantity < 1 || capability.MaximumQuantity < capability.DefaultQuantity {
+		return nil, errors.New("usage capability unavailable")
+	}
+	var value map[string]json.RawMessage
+	if json.Unmarshal(body, &value) != nil || value == nil {
+		return nil, errors.New("invalid input")
+	}
+	quantity := capability.DefaultQuantity
+	if raw, exists := value["num_images"]; exists {
+		if json.Unmarshal(raw, &quantity) != nil || quantity < 1 || quantity > capability.MaximumQuantity {
+			return nil, errors.New("invalid output quantity")
+		}
+	}
+	return &joboperation.Usage{Dimension: capability.Dimension, Unit: capability.Unit, Quantity: quantity, Provenance: "request", ExtractorVersion: capability.RequestExtractor, ResultExtractorVersion: capability.ResultExtractor}, nil
 }
 
 func validStatusQuery(values map[string][]string) bool {

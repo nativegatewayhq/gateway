@@ -267,6 +267,7 @@ func TestSignedWebhookBindingReplayAndProviderIdentity(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	request.Provider = "replicate"
 	request.ChannelID = "channel_00000000000000000000000000000004"
+	request.EstimatedUsage = &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 3, Provenance: "request", ExtractorVersion: "replicate-input-num_outputs-v1", ResultExtractorVersion: "replicate-output-v1"}
 	ctx := context.Background()
 	created, _, err := repository.Create(ctx, request)
 	if err != nil {
@@ -291,9 +292,13 @@ func TestSignedWebhookBindingReplayAndProviderIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := []byte(`{"id":"gateway-job","status":"succeeded"}`)
-	observation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}}
+	pollObservation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}, Usage: &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 2, Provenance: "poll", ExtractorVersion: "replicate-output-v1"}}
+	webhookObservation := pollObservation
+	webhookUsage := *pollObservation.Usage
+	webhookUsage.Provenance = "webhook"
+	webhookObservation.Usage = &webhookUsage
 	deliveryID := "delivery-" + request.RequestID
-	requestWebhook := WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: deliveryID, Token: binding.Token, ProviderJobID: providerID, Observation: observation, CallbackSecret: callbackSecret}
+	requestWebhook := WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: deliveryID, Token: binding.Token, ProviderJobID: providerID, Observation: webhookObservation, CallbackSecret: callbackSecret}
 	terminal, replay, err := repository.ApplyWebhook(ctx, requestWebhook)
 	if err != nil || replay || terminal.Status != joboperation.Succeeded || terminal.SettlementState != "PENDING" {
 		t.Fatalf("terminal=%+v replay=%v err=%v", terminal, replay, err)
@@ -339,6 +344,7 @@ func TestWebhookAndPollRaceConvergesOnOneTerminalEvent(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	request.Provider = "replicate"
 	request.ChannelID = "channel_00000000000000000000000000000004"
+	request.EstimatedUsage = &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 3, Provenance: "request", ExtractorVersion: "replicate-input-num_outputs-v1", ResultExtractorVersion: "replicate-output-v1"}
 	ctx := context.Background()
 	created, _, err := repository.Create(ctx, request)
 	if err != nil {
@@ -363,17 +369,21 @@ func TestWebhookAndPollRaceConvergesOnOneTerminalEvent(t *testing.T) {
 		t.Fatalf("lease=%+v err=%v", pollLease, err)
 	}
 	body := []byte(`{"id":"gateway-job","status":"succeeded"}`)
-	observation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}}
+	pollObservation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}, Usage: &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 2, Provenance: "poll", ExtractorVersion: "replicate-output-v1"}}
+	webhookObservation := pollObservation
+	webhookUsage := *pollObservation.Usage
+	webhookUsage.Provenance = "webhook"
+	webhookObservation.Usage = &webhookUsage
 	start := make(chan struct{})
 	errorsFound := make(chan error, 2)
 	go func() {
 		<-start
-		_, err := repository.ApplyObservation(ctx, pollLease, observation, "poll", time.Time{})
+		_, err := repository.ApplyObservation(ctx, pollLease, pollObservation, "poll", time.Time{})
 		errorsFound <- err
 	}()
 	go func() {
 		<-start
-		_, _, err := repository.ApplyWebhook(ctx, WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: "race-" + request.RequestID, Token: binding.Token, ProviderJobID: providerID, Observation: observation, CallbackSecret: callbackSecret})
+		_, _, err := repository.ApplyWebhook(ctx, WebhookObservation{JobID: created.ID, Provider: "replicate", DeliveryID: "race-" + request.RequestID, Token: binding.Token, ProviderJobID: providerID, Observation: webhookObservation, CallbackSecret: callbackSecret})
 		errorsFound <- err
 	}()
 	close(start)
@@ -387,9 +397,12 @@ func TestWebhookAndPollRaceConvergesOnOneTerminalEvent(t *testing.T) {
 	if err != nil || stored.Status != joboperation.Succeeded || stored.SettlementState != "PENDING" {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
-	var observed int
+	var observed, evidence int
 	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_events WHERE job_id=$1 AND event_type='OBSERVED'`, created.ID).Scan(&observed); err != nil || observed != 1 {
 		t.Fatalf("observed=%d err=%v", observed, err)
+	}
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_usage_evidence WHERE job_id=$1 AND quantity=2`, created.ID).Scan(&evidence); err != nil || evidence != 1 {
+		t.Fatalf("evidence=%d err=%v", evidence, err)
 	}
 }
 
