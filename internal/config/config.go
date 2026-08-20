@@ -11,15 +11,16 @@ import (
 )
 
 const (
-	defaultHTTPAddr        = ":8080"
-	defaultLogLevel        = "info"
-	defaultShutdownTimeout = 10 * time.Second
-	defaultGoogleTimeout   = 2 * time.Minute
-	maxGoogleTimeout       = 10 * time.Minute
-	defaultGeminiBodyBytes = int64(32 * 1024 * 1024)
-	defaultImagesTimeout   = 2 * time.Minute
-	maxImagesTimeout       = 10 * time.Minute
-	defaultImagesBodyBytes = int64(1024 * 1024)
+	defaultHTTPAddr            = ":8080"
+	defaultLogLevel            = "info"
+	defaultShutdownTimeout     = 10 * time.Second
+	defaultGoogleTimeout       = 2 * time.Minute
+	maxGoogleTimeout           = 10 * time.Minute
+	defaultGeminiBodyBytes     = int64(32 * 1024 * 1024)
+	defaultImagesTimeout       = 2 * time.Minute
+	maxImagesTimeout           = 10 * time.Minute
+	defaultImagesBodyBytes     = int64(1024 * 1024)
+	defaultImageEditsBodyBytes = int64(64 * 1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -28,27 +29,31 @@ type LookupEnv func(string) (string, bool)
 // Config contains non-provider process settings. Provider credentials remain
 // in their opaque registry and are never exposed through this structure.
 type Config struct {
-	HTTPAddr        string
-	LogLevel        slog.Level
-	ShutdownTimeout time.Duration
-	DatabaseURL     string
-	GoogleTimeout   time.Duration
-	GeminiBodyBytes int64
-	ImagesTimeout   time.Duration
-	ImagesBodyBytes int64
+	HTTPAddr            string
+	LogLevel            slog.Level
+	ShutdownTimeout     time.Duration
+	DatabaseURL         string
+	GoogleTimeout       time.Duration
+	GeminiBodyBytes     int64
+	ImagesTimeout       time.Duration
+	ImagesBodyBytes     int64
+	ImageEditsBodyBytes int64
+	ImageEditSpoolLimit int
 }
 
 // Load reads configuration through lookup and validates every value before
 // the server starts. Errors name the setting but never echo its value.
 func Load(lookup LookupEnv) (Config, error) {
 	cfg := Config{
-		HTTPAddr:        defaultHTTPAddr,
-		LogLevel:        slog.LevelInfo,
-		ShutdownTimeout: defaultShutdownTimeout,
-		GoogleTimeout:   defaultGoogleTimeout,
-		GeminiBodyBytes: defaultGeminiBodyBytes,
-		ImagesTimeout:   defaultImagesTimeout,
-		ImagesBodyBytes: defaultImagesBodyBytes,
+		HTTPAddr:            defaultHTTPAddr,
+		LogLevel:            slog.LevelInfo,
+		ShutdownTimeout:     defaultShutdownTimeout,
+		GoogleTimeout:       defaultGoogleTimeout,
+		GeminiBodyBytes:     defaultGeminiBodyBytes,
+		ImagesTimeout:       defaultImagesTimeout,
+		ImagesBodyBytes:     defaultImagesBodyBytes,
+		ImageEditsBodyBytes: defaultImageEditsBodyBytes,
+		ImageEditSpoolLimit: 8,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -98,6 +103,20 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES: must be an integer between 1 and 1048576")
 		}
 		cfg.ImagesBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES"); ok {
+		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || bodyBytes <= 0 || bodyBytes > 256*1024*1024 {
+			return Config{}, fmt.Errorf("GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES: must be an integer between 1 and 268435456")
+		}
+		cfg.ImageEditsBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS"); ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit < 1 || limit > 128 {
+			return Config{}, fmt.Errorf("GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS: must be an integer between 1 and 128")
+		}
+		cfg.ImageEditSpoolLimit = limit
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {

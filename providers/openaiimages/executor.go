@@ -23,10 +23,30 @@ var (
 )
 
 type Request struct {
-	ContentType string
-	Accept      string
-	UserAgent   string
-	Body        io.Reader
+	Operation     Operation
+	ContentType   string
+	ContentLength int64
+	Accept        string
+	UserAgent     string
+	Body          io.Reader
+}
+
+type Operation uint8
+
+const (
+	Generate Operation = iota
+	Edit
+)
+
+func (operation Operation) path() (string, bool) {
+	switch operation {
+	case Generate:
+		return "/v1/images/generations", true
+	case Edit:
+		return "/v1/images/edits", true
+	default:
+		return "", false
+	}
 }
 
 type Executor struct {
@@ -83,10 +103,14 @@ func (executor *Executor) Generate(ctx context.Context, input Request) (*http.Re
 	if executor == nil || executor.origin == nil || (executor.provider != providercredentials.OpenAI && executor.provider != providercredentials.XAI) {
 		return nil, ErrInvalidRequest
 	}
+	path, validOperation := input.Operation.path()
+	if !validOperation {
+		return nil, ErrInvalidRequest
+	}
 	requestURL := *executor.origin
 	requestURL.User = nil
 	requestURL.Fragment = ""
-	requestURL.Path = "/v1/images/generations"
+	requestURL.Path = path
 	requestURL.RawPath = ""
 	requestURL.RawQuery = ""
 
@@ -98,6 +122,9 @@ func (executor *Executor) Generate(ctx context.Context, input Request) (*http.Re
 	}
 	request.Host = ""
 	request.RequestURI = ""
+	if input.ContentLength > 0 {
+		request.ContentLength = input.ContentLength
+	}
 	if input.ContentType != "" {
 		request.Header.Set("Content-Type", input.ContentType)
 	}

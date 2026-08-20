@@ -37,6 +37,7 @@ func TestRunFailsWhenPortIsInUse(t *testing.T) {
 		ProviderCredentials: registry,
 		Gemini:              http.NotFoundHandler(),
 		OpenAIImages:        http.NotFoundHandler(),
+		OpenAIImageEdits:    http.NotFoundHandler(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "listen failed") {
 		t.Fatalf("Run() error = %v, want listen error", err)

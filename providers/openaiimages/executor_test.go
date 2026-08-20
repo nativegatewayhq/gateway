@@ -134,3 +134,22 @@ func TestGenerateRejectsRedirectAndMissingCredential(t *testing.T) {
 		t.Fatalf("missing credential error = %v", err)
 	}
 }
+
+func TestGenerateUsesEditPathAndRejectsUnknownOperation(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/v1/images/edits" {
+			t.Fatalf("path = %q", request.URL.Path)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	executor := NewWithClient(providercredentials.OpenAI, credentialRegistry(t), time.Second, client)
+	response, err := executor.Generate(context.Background(), Request{Operation: Edit, Body: strings.NewReader("edit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if _, err := executor.Generate(context.Background(), Request{Operation: Operation(99)}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("unknown operation error = %v", err)
+	}
+}
