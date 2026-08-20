@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-002
 title: Phase 0 Service API Key Authentication
-status: in_progress
+status: completed
 created_at: 2026-08-20T12:47:31+09:00
-updated_at: 2026-08-20T12:54:00+09:00
+updated_at: 2026-08-20T13:04:14+09:00
 owners:
   - gateway
 initiative: phase-0-service-api-key-auth
@@ -224,22 +224,35 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] PostgreSQL 설정, 연결, 종료와 migration이 재현 가능하게 동작함
-- [ ] API Key 생성 결과의 원문이 데이터베이스에 저장되지 않음
-- [ ] 생성된 Key 원문이 성공 응답 외 로그와 오류에 노출되지 않음
-- [ ] 네 가지 인증 형식이 하나의 인증 주체로 정상 처리됨
-- [ ] 누락, malformed, unknown, 비활성 및 만료 Key가 안전하게 거부됨
-- [ ] 복수 credential 위치와 중복 값이 명시적으로 거부됨
-- [ ] 데이터베이스 장애가 민감 정보 없는 `503`과 readiness 실패로 표현됨
-- [ ] health endpoint가 인증 없이 유지됨
-- [ ] 동시성과 redaction을 포함한 단위·통합 테스트가 통과함
-- [ ] formatter, vet, race test, build와 integration test가 CI에서 통과함
-- [ ] README에 PostgreSQL 실행, migration 및 개발용 Key 생성 절차가 기록됨
-- [ ] 검증 증거가 이 계획에 기록됨
+- [x] PostgreSQL 설정, 연결, 종료와 migration이 재현 가능하게 동작함
+- [x] API Key 생성 결과의 원문이 데이터베이스에 저장되지 않음
+- [x] 생성된 Key 원문이 성공 응답 외 로그와 오류에 노출되지 않음
+- [x] 네 가지 인증 형식이 하나의 인증 주체로 정상 처리됨
+- [x] 누락, malformed, unknown, 비활성 및 만료 Key가 안전하게 거부됨
+- [x] 복수 credential 위치와 중복 값이 명시적으로 거부됨
+- [x] 데이터베이스 장애가 민감 정보 없는 `503`과 readiness 실패로 표현됨
+- [x] health endpoint가 인증 없이 유지됨
+- [x] 동시성과 redaction을 포함한 단위·통합 테스트가 통과함
+- [x] formatter, vet, race test, build와 integration test가 CI에서 통과함
+- [x] README에 PostgreSQL 실행, migration 및 개발용 Key 생성 절차가 기록됨
+- [x] 검증 증거가 이 계획에 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 계획 승인 commit: `8e6ee74` (`docs: plan service API key authentication`)
+- 구현 commit: `7deacc6` (`feat: add service API key authentication`)
+- Draft PR: `https://github.com/nativegatewayhq/gateway/pull/2`
+- CI:
+  - `check`: `https://github.com/nativegatewayhq/gateway/actions/runs/32330430949/job/96309876967`
+  - `validate`: `https://github.com/nativegatewayhq/gateway/actions/runs/32330430935/job/96309876755`
+- 로컬 검증:
+  - `make check`: formatter, vet, race test와 두 binary build 통과
+  - `make integration-test`: migration 반복 적용, hash-only CLI 발급, 활성·비활성·만료 인증, DB 연결 상실, readiness와 Gateway process 테스트 통과
+  - `git diff --check`: 통과
+- 보안 검증:
+  - API Key 원문이 데이터베이스의 text column에 저장되지 않음을 실제 PostgreSQL에서 확인
+  - credential과 database URL이 인증 오류, readiness 응답 및 로그에 포함되지 않음을 확인
+  - 복수 위치, 중복 header/query, 제어 문자와 길이 초과 credential 거부 확인
 
 ## Rollback 계획
 
