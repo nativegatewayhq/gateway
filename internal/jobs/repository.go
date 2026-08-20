@@ -3,8 +3,10 @@ package jobs
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +21,11 @@ import (
 )
 
 const defaultMaximumResultBytes = 32 * 1024 * 1024
+
+var (
+	ErrWebhookRejected = errors.New("webhook rejected")
+	ErrWebhookNotReady = errors.New("webhook binding not ready")
+)
 
 type CreateRequest struct {
 	RequestID, Protocol, Operation, Model string
@@ -36,6 +43,17 @@ type ProviderAttempt struct {
 }
 
 type Lease struct{ ProviderAttempt }
+
+type WebhookBinding struct {
+	JobID, Provider, ChannelID, Token string
+	ExpiresAt                         time.Time
+}
+
+type WebhookObservation struct {
+	JobID, Provider, DeliveryID, Token, ProviderJobID string
+	Observation                                       joboperation.Observation
+	CallbackSecret                                    []byte
+}
 
 type SettlementLease struct {
 	Job          joboperation.Job
@@ -63,6 +81,27 @@ func NewDefaultRepository(pool *pgxpool.Pool) (*Repository, error) {
 }
 
 func (repository *Repository) Ready(ctx context.Context) error { return repository.pool.Ping(ctx) }
+
+func (repository *Repository) CreateWebhookBinding(ctx context.Context, jobID, provider, channelID string, callbackSecret []byte, ttl time.Duration) (WebhookBinding, error) {
+	if !joboperation.ValidID(jobID) || provider != "replicate" || channelID == "" || len(callbackSecret) != 32 || ttl <= 0 || ttl > 30*24*time.Hour {
+		return WebhookBinding{}, joboperation.ErrInvalid
+	}
+	token, err := repository.id("whk_")
+	if err != nil {
+		return WebhookBinding{}, err
+	}
+	digest := webhookTokenDigest(callbackSecret, token)
+	expires := repository.now().UTC().Add(ttl)
+	result, err := repository.pool.Exec(ctx, `INSERT INTO async_job_webhook_bindings(job_id,provider,channel_id,token_digest,expires_at)
+		SELECT id,$2,$3,$4,$5 FROM async_jobs WHERE id=$1 AND provider=$2 AND channel_id=$3 ON CONFLICT DO NOTHING`, jobID, provider, channelID, digest[:], expires)
+	if err != nil {
+		return WebhookBinding{}, err
+	}
+	if result.RowsAffected() != 1 {
+		return WebhookBinding{}, joboperation.ErrConflict
+	}
+	return WebhookBinding{JobID: jobID, Provider: provider, ChannelID: channelID, Token: token, ExpiresAt: expires}, nil
+}
 
 func (repository *Repository) Create(ctx context.Context, request CreateRequest) (joboperation.Job, bool, error) {
 	if !validCreate(request) {
@@ -334,6 +373,114 @@ func (repository *Repository) ApplyObservation(ctx context.Context, lease Lease,
 		return joboperation.Job{}, err
 	}
 	return repository.getUnowned(ctx, lease.JobID)
+}
+
+// ApplyWebhook durably records one verified Provider delivery and its terminal
+// observation in the same transaction. Signature verification belongs at the
+// HTTP boundary; this method enforces the independent callback capability and
+// Provider identity binding before mutating the Job or settlement intent.
+func (repository *Repository) ApplyWebhook(ctx context.Context, request WebhookObservation) (joboperation.Job, bool, error) {
+	if !joboperation.ValidID(request.JobID) || request.Provider != "replicate" || request.DeliveryID == "" || len(request.DeliveryID) > 200 || request.Token == "" || len(request.CallbackSecret) != 32 || len(request.ProviderJobID) > 500 || !request.Observation.Status.Terminal() {
+		return joboperation.Job{}, false, joboperation.ErrInvalid
+	}
+	if request.Observation.ProviderJobID != "" && request.Observation.ProviderJobID != request.ProviderJobID {
+		return joboperation.Job{}, false, fmt.Errorf("%w: observation identity", ErrWebhookRejected)
+	}
+	tx, err := repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return joboperation.Job{}, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var channelID string
+	var digest []byte
+	var expiresAt time.Time
+	var disabledAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT channel_id,token_digest,expires_at,disabled_at FROM async_job_webhook_bindings WHERE job_id=$1 AND provider=$2 FOR UPDATE`, request.JobID, request.Provider).Scan(&channelID, &digest, &expiresAt, &disabledAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return joboperation.Job{}, false, fmt.Errorf("%w: binding missing", ErrWebhookRejected)
+	}
+	if err != nil {
+		return joboperation.Job{}, false, err
+	}
+	presented := webhookTokenDigest(request.CallbackSecret, request.Token)
+	if disabledAt != nil || !repository.now().UTC().Before(expiresAt) || len(digest) != sha256.Size || subtle.ConstantTimeCompare(digest, presented) != 1 {
+		return joboperation.Job{}, false, fmt.Errorf("%w: capability", ErrWebhookRejected)
+	}
+
+	current, found, err := loadByID(ctx, tx, request.JobID, true)
+	if err != nil {
+		return joboperation.Job{}, false, err
+	}
+	if !found || current.Provider != request.Provider || current.ChannelID != channelID {
+		return joboperation.Job{}, false, fmt.Errorf("%w: job binding", ErrWebhookRejected)
+	}
+	var attempt ProviderAttempt
+	var storedProviderJobID *string
+	err = tx.QueryRow(ctx, `SELECT job_id,attempt_no,provider,channel_id,provider_job_id,state FROM async_job_provider_attempts WHERE job_id=$1 AND attempt_no=1 FOR UPDATE`, request.JobID).Scan(&attempt.JobID, &attempt.AttemptNo, &attempt.Provider, &attempt.ChannelID, &storedProviderJobID, &attempt.State)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return joboperation.Job{}, false, fmt.Errorf("%w: attempt missing", ErrWebhookRejected)
+	}
+	if err != nil {
+		return joboperation.Job{}, false, err
+	}
+	if storedProviderJobID == nil && attempt.State == "SUBMITTING" {
+		return joboperation.Job{}, false, ErrWebhookNotReady
+	}
+	if storedProviderJobID == nil || *storedProviderJobID != request.ProviderJobID || attempt.Provider != request.Provider || attempt.ChannelID != channelID {
+		return joboperation.Job{}, false, fmt.Errorf("%w: provider identity", ErrWebhookRejected)
+	}
+	attempt.ProviderJobID = *storedProviderJobID
+
+	var deliveredJobID, deliveredStatus string
+	err = tx.QueryRow(ctx, `SELECT job_id,terminal_status FROM async_job_webhook_deliveries WHERE provider=$1 AND delivery_id=$2`, request.Provider, request.DeliveryID).Scan(&deliveredJobID, &deliveredStatus)
+	if err == nil {
+		if deliveredJobID != request.JobID || deliveredStatus != string(request.Observation.Status) {
+			return joboperation.Job{}, false, fmt.Errorf("%w: delivery collision", ErrWebhookRejected)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return joboperation.Job{}, false, err
+		}
+		return current, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return joboperation.Job{}, false, err
+	}
+
+	if current.Status.Terminal() {
+		if !joboperation.SameTerminal(current, request.Observation) {
+			return joboperation.Job{}, false, joboperation.ErrConflict
+		}
+	} else {
+		if err := joboperation.ValidateObservation(current.Status, request.Observation, repository.maximumBodyBytes); err != nil {
+			return joboperation.Job{}, false, err
+		}
+		if err := updateJobStatus(ctx, tx, current, request.Observation.Status, request.Observation, "webhook", "OBSERVED"); err != nil {
+			return joboperation.Job{}, false, err
+		}
+		result, err := tx.Exec(ctx, `UPDATE async_job_provider_attempts SET state='TERMINAL',lease_owner=NULL,lease_token=NULL,lease_until=NULL,next_poll_at='infinity',updated_at=now() WHERE job_id=$1 AND attempt_no=1 AND provider=$2 AND channel_id=$3 AND provider_job_id=$4`, request.JobID, request.Provider, channelID, request.ProviderJobID)
+		if err != nil {
+			return joboperation.Job{}, false, err
+		}
+		if result.RowsAffected() != 1 {
+			return joboperation.Job{}, false, fmt.Errorf("%w: attempt changed", ErrWebhookRejected)
+		}
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO async_job_webhook_deliveries(provider,delivery_id,job_id,terminal_status) VALUES($1,$2,$3,$4)`, request.Provider, request.DeliveryID, request.JobID, request.Observation.Status)
+	if err != nil {
+		return joboperation.Job{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return joboperation.Job{}, false, err
+	}
+	result, err := repository.getUnowned(ctx, request.JobID)
+	return result, false, err
+}
+
+func webhookTokenDigest(secret []byte, token string) []byte {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(token))
+	return mac.Sum(nil)
 }
 
 func (repository *Repository) Reschedule(ctx context.Context, lease Lease, next time.Time, category string) error {

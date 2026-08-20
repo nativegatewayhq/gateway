@@ -30,6 +30,32 @@ type SubmitPayload struct {
 	Body                []byte
 	Prefer, CancelAfter string
 }
+
+func (payload SubmitPayload) WithWebhook(callback string) (any, error) {
+	parsed, err := url.Parse(callback)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, ErrInvalidConfig
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(payload.Body, &envelope) != nil {
+		return nil, errors.New("invalid Replicate submit payload")
+	}
+	if _, exists := envelope["webhook"]; exists {
+		return nil, errors.New("client webhook is not allowed")
+	}
+	if _, exists := envelope["webhook_events_filter"]; exists {
+		return nil, errors.New("client webhook filter is not allowed")
+	}
+	envelope["webhook"], _ = json.Marshal(callback)
+	envelope["webhook_events_filter"], _ = json.Marshal([]string{"completed"})
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, err
+	}
+	payload.Body = body
+	return payload, nil
+}
+
 type Client struct {
 	endpoint, publicBase *url.URL
 	credentials          *providercredentials.Registry
@@ -200,6 +226,18 @@ func (client *Client) observation(jobID string, statusCode int, headers http.Hea
 	}
 	snapshot := joboperation.Snapshot{Status: statusCode, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: sanitized, SHA256: sha256.Sum256(sanitized)}
 	return providerID, joboperation.Observation{Status: mapped, FailureCategory: category}, snapshot, nil
+}
+
+// WebhookObservation validates and sanitizes a native Replicate Prediction
+// delivered by webhook. Only terminal completed-event payloads are accepted.
+func (client *Client) WebhookObservation(jobID string, body []byte) (string, joboperation.Observation, error) {
+	providerID, observation, snapshot, err := client.observation(jobID, http.StatusOK, http.Header{"Content-Type": {"application/json"}}, body)
+	if err != nil || !observation.Status.Terminal() {
+		return "", joboperation.Observation{}, errors.New("invalid Replicate webhook observation")
+	}
+	observation.Snapshot = snapshot
+	observation.ProviderJobID = providerID
+	return providerID, observation, nil
 }
 func mapStatus(value string) (joboperation.Status, string, bool) {
 	switch value {

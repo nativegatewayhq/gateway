@@ -61,6 +61,11 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_REPLICATE_MODELS` | unset | Comma-separated exact community model versions in `owner/model:version` form |
 | `GATEWAY_REPLICATE_REQUEST_TIMEOUT` | `2m` | Replicate submit, poll, and cancel request timeout; maximum `10m` |
 | `GATEWAY_REPLICATE_MAX_BODY_BYTES` | `1048576` | Maximum Replicate native request or response body; maximum 256 MiB |
+| `GATEWAY_REPLICATE_WEBHOOK_MODE` | `disabled` | `required` injects a Gateway-owned completed-event callback into every new Replicate Prediction |
+| `GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS` | unset | One active, or active and previous, comma-separated Replicate `whsec_...` secrets; never log these values |
+| `GATEWAY_REPLICATE_WEBHOOK_CALLBACK_SECRET` | unset | Base64-encoded 32-byte deployment secret used to HMAC per-Job callback capabilities |
+| `GATEWAY_REPLICATE_WEBHOOK_TOLERANCE` | `5m` | Accepted signed timestamp window; configurable from `1m` through `15m` |
+| `GATEWAY_REPLICATE_WEBHOOK_BINDING_TTL` | `168h` | Callback capability lifetime; configurable from `1h` through `720h` |
 | `GATEWAY_FAL_API_KEY` | unset | Optional fal upstream credential; enables native Queue routes when models and a public base URL are configured |
 | `GATEWAY_FAL_QUEUE_ENDPOINT` | `https://queue.fal.run` | Fixed fal Queue origin; loopback HTTP is accepted only for local testing |
 | `GATEWAY_FAL_MODELS` | unset | Comma-separated exact model-scoped IDs such as `fal-ai/flux/dev` |
@@ -450,7 +455,17 @@ export GATEWAY_REPLICATE_MODELS='owner/model:version'
 export GATEWAY_PUBLIC_BASE_URL='https://gateway.example.com'
 ```
 
-The Gateway accepts `POST /v1/predictions`, `GET /v1/predictions/{id}`, and `POST /v1/predictions/{id}/cancel`. It replaces the upstream Prediction ID and control URLs with a durable Gateway Job ID, and GET reads the stored native snapshot rather than polling Replicate directly. A background worker owns upstream polling and exact-once terminal billing settlement. Client-supplied webhooks are rejected in this release.
+The Gateway accepts `POST /v1/predictions`, `GET /v1/predictions/{id}`, and `POST /v1/predictions/{id}/cancel`. It replaces the upstream Prediction ID and control URLs with a durable Gateway Job ID, and GET reads the stored native snapshot rather than polling Replicate directly. A background worker owns upstream polling and exact-once terminal billing settlement.
+
+Signed Provider callbacks can reduce terminal observation latency while retaining polling as the recovery path:
+
+```bash
+export GATEWAY_REPLICATE_WEBHOOK_MODE='required'
+export GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS='whsec_BASE64_SECRET'
+export GATEWAY_REPLICATE_WEBHOOK_CALLBACK_SECRET='BASE64_32_BYTE_SECRET'
+```
+
+Webhook mode requires an HTTPS `GATEWAY_PUBLIC_BASE_URL`. The Gateway injects its own completed-event callback, verifies Replicate's raw-body HMAC and timestamp, then checks a per-Job capability and exact upstream Prediction identity before applying the terminal observation. Delivery replay, polling, cancellation and settlement converge through the same PostgreSQL CAS and append-only Ledger path. Client-supplied webhook fields remain rejected, and callback URLs, tokens, signatures and bodies must never appear in logs or metrics. During rollback, set webhook mode to `disabled`; polling continues to reconcile existing Predictions.
 
 The official JavaScript client can use its `baseUrl` option, and the Replicate Python v2 client can use `base_url` (or `REPLICATE_BASE_URL`). In both cases, pass the service API key as the client credential. See [`examples/replicate`](./examples/replicate). Legacy Python v1 clients do not expose the same custom base-URL contract; use v2 or direct HTTP.
 

@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
@@ -36,6 +37,8 @@ const (
 	defaultRateLimitTimeout    = 100 * time.Millisecond
 	defaultReplicateTimeout    = 2 * time.Minute
 	defaultReplicateBodyBytes  = int64(1024 * 1024)
+	defaultWebhookTolerance    = 5 * time.Minute
+	defaultWebhookBindingTTL   = 7 * 24 * time.Hour
 	defaultFalTimeout          = 2 * time.Minute
 	defaultFalBodyBytes        = int64(1024 * 1024)
 )
@@ -46,92 +49,103 @@ type LookupEnv func(string) (string, bool)
 type BillingMode string
 type RateLimitMode string
 type ProviderHealthMode string
+type ReplicateWebhookMode string
 
 const (
-	BillingDisabled        BillingMode        = "disabled"
-	BillingRequired        BillingMode        = "required"
-	RateLimitDisabled      RateLimitMode      = "disabled"
-	RateLimitRequired      RateLimitMode      = "required"
-	ProviderHealthDisabled ProviderHealthMode = "disabled"
-	ProviderHealthRequired ProviderHealthMode = "required"
+	BillingDisabled          BillingMode          = "disabled"
+	BillingRequired          BillingMode          = "required"
+	RateLimitDisabled        RateLimitMode        = "disabled"
+	RateLimitRequired        RateLimitMode        = "required"
+	ProviderHealthDisabled   ProviderHealthMode   = "disabled"
+	ProviderHealthRequired   ProviderHealthMode   = "required"
+	ReplicateWebhookDisabled ReplicateWebhookMode = "disabled"
+	ReplicateWebhookRequired ReplicateWebhookMode = "required"
 )
 
 // Config contains non-provider process settings. Provider credentials remain
 // in their opaque registry and are never exposed through this structure.
 type Config struct {
-	HTTPAddr             string
-	LogLevel             slog.Level
-	ShutdownTimeout      time.Duration
-	DatabaseURL          string
-	GoogleTimeout        time.Duration
-	GeminiBodyBytes      int64
-	ImagesTimeout        time.Duration
-	ImagesBodyBytes      int64
-	ImageEditsBodyBytes  int64
-	ImageEditSpoolLimit  int
-	BillingMode          BillingMode
-	MinimumMarginBPS     int64
-	ReplayBodyBytes      int64
-	ReconcileInterval    time.Duration
-	ReconcileLease       time.Duration
-	ReconcileBackoff     time.Duration
-	ReconcileMaxBackoff  time.Duration
-	ReconcileBatchSize   int
-	ReconcileMaxAttempts int
-	RateLimitMode        RateLimitMode
-	RedisURL             string
-	RateLimitTimeout     time.Duration
-	ProviderHealthMode   ProviderHealthMode
-	ProviderHealth       providerhealth.Config
-	ImageStorage         imagestorage.Config
-	Telemetry            telemetry.Config
-	TrustedProxyPrefixes []netip.Prefix
-	ReplicateEnabled     bool
-	ReplicateEndpoint    string
-	ReplicateModels      []string
-	ReplicateTimeout     time.Duration
-	ReplicateBodyBytes   int64
-	FalEnabled           bool
-	FalEndpoint          string
-	FalModels            []string
-	FalTimeout           time.Duration
-	FalBodyBytes         int64
-	PublicBaseURL        string
+	HTTPAddr                       string
+	LogLevel                       slog.Level
+	ShutdownTimeout                time.Duration
+	DatabaseURL                    string
+	GoogleTimeout                  time.Duration
+	GeminiBodyBytes                int64
+	ImagesTimeout                  time.Duration
+	ImagesBodyBytes                int64
+	ImageEditsBodyBytes            int64
+	ImageEditSpoolLimit            int
+	BillingMode                    BillingMode
+	MinimumMarginBPS               int64
+	ReplayBodyBytes                int64
+	ReconcileInterval              time.Duration
+	ReconcileLease                 time.Duration
+	ReconcileBackoff               time.Duration
+	ReconcileMaxBackoff            time.Duration
+	ReconcileBatchSize             int
+	ReconcileMaxAttempts           int
+	RateLimitMode                  RateLimitMode
+	RedisURL                       string
+	RateLimitTimeout               time.Duration
+	ProviderHealthMode             ProviderHealthMode
+	ProviderHealth                 providerhealth.Config
+	ImageStorage                   imagestorage.Config
+	Telemetry                      telemetry.Config
+	TrustedProxyPrefixes           []netip.Prefix
+	ReplicateEnabled               bool
+	ReplicateEndpoint              string
+	ReplicateModels                []string
+	ReplicateTimeout               time.Duration
+	ReplicateBodyBytes             int64
+	ReplicateWebhookMode           ReplicateWebhookMode
+	ReplicateWebhookSecrets        []string
+	ReplicateWebhookCallbackSecret []byte
+	ReplicateWebhookTolerance      time.Duration
+	ReplicateWebhookBindingTTL     time.Duration
+	FalEnabled                     bool
+	FalEndpoint                    string
+	FalModels                      []string
+	FalTimeout                     time.Duration
+	FalBodyBytes                   int64
+	PublicBaseURL                  string
 }
 
 // Load reads configuration through lookup and validates every value before
 // the server starts. Errors name the setting but never echo its value.
 func Load(lookup LookupEnv) (Config, error) {
 	cfg := Config{
-		HTTPAddr:             defaultHTTPAddr,
-		LogLevel:             slog.LevelInfo,
-		ShutdownTimeout:      defaultShutdownTimeout,
-		GoogleTimeout:        defaultGoogleTimeout,
-		GeminiBodyBytes:      defaultGeminiBodyBytes,
-		ImagesTimeout:        defaultImagesTimeout,
-		ImagesBodyBytes:      defaultImagesBodyBytes,
-		ImageEditsBodyBytes:  defaultImageEditsBodyBytes,
-		ImageEditSpoolLimit:  8,
-		BillingMode:          BillingDisabled,
-		ReplayBodyBytes:      defaultReplayBodyBytes,
-		ReconcileInterval:    defaultReconcileInterval,
-		ReconcileLease:       defaultReconcileLease,
-		ReconcileBackoff:     defaultReconcileBackoff,
-		ReconcileMaxBackoff:  defaultReconcileMaxBackoff,
-		ReconcileBatchSize:   10,
-		ReconcileMaxAttempts: 5,
-		RateLimitMode:        RateLimitDisabled,
-		RateLimitTimeout:     defaultRateLimitTimeout,
-		ProviderHealthMode:   ProviderHealthDisabled,
-		ProviderHealth:       providerhealth.DefaultConfig(),
-		ImageStorage:         imagestorage.DefaultConfig(),
-		Telemetry:            telemetry.DefaultConfig(),
-		ReplicateEndpoint:    "https://api.replicate.com",
-		ReplicateTimeout:     defaultReplicateTimeout,
-		ReplicateBodyBytes:   defaultReplicateBodyBytes,
-		FalEndpoint:          "https://queue.fal.run",
-		FalTimeout:           defaultFalTimeout,
-		FalBodyBytes:         defaultFalBodyBytes,
+		HTTPAddr:                   defaultHTTPAddr,
+		LogLevel:                   slog.LevelInfo,
+		ShutdownTimeout:            defaultShutdownTimeout,
+		GoogleTimeout:              defaultGoogleTimeout,
+		GeminiBodyBytes:            defaultGeminiBodyBytes,
+		ImagesTimeout:              defaultImagesTimeout,
+		ImagesBodyBytes:            defaultImagesBodyBytes,
+		ImageEditsBodyBytes:        defaultImageEditsBodyBytes,
+		ImageEditSpoolLimit:        8,
+		BillingMode:                BillingDisabled,
+		ReplayBodyBytes:            defaultReplayBodyBytes,
+		ReconcileInterval:          defaultReconcileInterval,
+		ReconcileLease:             defaultReconcileLease,
+		ReconcileBackoff:           defaultReconcileBackoff,
+		ReconcileMaxBackoff:        defaultReconcileMaxBackoff,
+		ReconcileBatchSize:         10,
+		ReconcileMaxAttempts:       5,
+		RateLimitMode:              RateLimitDisabled,
+		RateLimitTimeout:           defaultRateLimitTimeout,
+		ProviderHealthMode:         ProviderHealthDisabled,
+		ProviderHealth:             providerhealth.DefaultConfig(),
+		ImageStorage:               imagestorage.DefaultConfig(),
+		Telemetry:                  telemetry.DefaultConfig(),
+		ReplicateEndpoint:          "https://api.replicate.com",
+		ReplicateTimeout:           defaultReplicateTimeout,
+		ReplicateBodyBytes:         defaultReplicateBodyBytes,
+		ReplicateWebhookMode:       ReplicateWebhookDisabled,
+		ReplicateWebhookTolerance:  defaultWebhookTolerance,
+		ReplicateWebhookBindingTTL: defaultWebhookBindingTTL,
+		FalEndpoint:                "https://queue.fal.run",
+		FalTimeout:                 defaultFalTimeout,
+		FalBodyBytes:               defaultFalBodyBytes,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -342,6 +356,53 @@ func loadReplicate(cfg *Config, lookup LookupEnv) error {
 		}
 		cfg.ReplicateBodyBytes = limit
 	}
+	if value, ok := lookup("GATEWAY_REPLICATE_WEBHOOK_MODE"); ok {
+		switch ReplicateWebhookMode(strings.ToLower(strings.TrimSpace(value))) {
+		case ReplicateWebhookDisabled:
+			cfg.ReplicateWebhookMode = ReplicateWebhookDisabled
+		case ReplicateWebhookRequired:
+			cfg.ReplicateWebhookMode = ReplicateWebhookRequired
+		default:
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_MODE: must be disabled or required")
+		}
+	}
+	if value, ok := lookup("GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS"); ok {
+		for _, part := range strings.Split(value, ",") {
+			secret := strings.TrimSpace(part)
+			if !strings.HasPrefix(secret, "whsec_") || len(secret) > 512 {
+				return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS: contains an invalid secret")
+			}
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, "whsec_"))
+			if err != nil || len(decoded) < 16 || len(decoded) > 128 {
+				return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS: contains an invalid secret")
+			}
+			cfg.ReplicateWebhookSecrets = append(cfg.ReplicateWebhookSecrets, secret)
+		}
+		if len(cfg.ReplicateWebhookSecrets) > 2 {
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS: must contain at most two secrets")
+		}
+	}
+	if value, ok := lookup("GATEWAY_REPLICATE_WEBHOOK_CALLBACK_SECRET"); ok {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+		if err != nil || len(decoded) != 32 {
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_CALLBACK_SECRET: must be a base64-encoded 32-byte secret")
+		}
+		cfg.ReplicateWebhookCallbackSecret = decoded
+	}
+	if value, ok := lookup("GATEWAY_REPLICATE_WEBHOOK_TOLERANCE"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration < time.Minute || duration > 15*time.Minute {
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_TOLERANCE: must be between 1m and 15m")
+		}
+		cfg.ReplicateWebhookTolerance = duration
+	}
+	if value, ok := lookup("GATEWAY_REPLICATE_WEBHOOK_BINDING_TTL"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration < time.Hour || duration > 30*24*time.Hour {
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_BINDING_TTL: must be between 1h and 720h")
+		}
+		cfg.ReplicateWebhookBindingTTL = duration
+	}
 	for key, value := range map[string]string{"GATEWAY_REPLICATE_API_ENDPOINT": cfg.ReplicateEndpoint, "GATEWAY_PUBLIC_BASE_URL": cfg.PublicBaseURL} {
 		if value == "" {
 			if cfg.ReplicateEnabled {
@@ -357,6 +418,21 @@ func loadReplicate(cfg *Config, lookup LookupEnv) error {
 	}
 	if cfg.ReplicateEnabled && len(cfg.ReplicateModels) == 0 {
 		return fmt.Errorf("GATEWAY_REPLICATE_MODELS: must not be empty when Replicate is enabled")
+	}
+	if cfg.ReplicateWebhookMode == ReplicateWebhookRequired {
+		parsed, _ := url.Parse(cfg.PublicBaseURL)
+		if !cfg.ReplicateEnabled {
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_MODE: required needs Replicate enabled")
+		}
+		if parsed == nil || parsed.Scheme != "https" {
+			return fmt.Errorf("GATEWAY_PUBLIC_BASE_URL: must be HTTPS when Replicate webhooks are required")
+		}
+		if len(cfg.ReplicateWebhookSecrets) == 0 {
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS: required when Replicate webhooks are required")
+		}
+		if len(cfg.ReplicateWebhookCallbackSecret) != 32 {
+			return fmt.Errorf("GATEWAY_REPLICATE_WEBHOOK_CALLBACK_SECRET: required when Replicate webhooks are required")
+		}
 	}
 	return nil
 }

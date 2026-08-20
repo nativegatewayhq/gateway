@@ -106,6 +106,17 @@ func TestReplicatePredictionRoutesAreMounted(t *testing.T) {
 	}
 }
 
+func TestReplicateWebhookRouteIsMountedAboveFalWildcard(t *testing.T) {
+	t.Parallel()
+	webhook := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
+	fal := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusTeapot) })
+	handler := NewHandler(discardLogger(), nil, Routes{ReplicateWebhook: webhook, Fal: fal})
+	response := serveRequest(t, handler, http.MethodPost, "/internal/webhooks/replicate/job_00000000000000000000000000000000/token", "")
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", response.Code)
+	}
+}
+
 func TestFalWildcardRouteIsMountedBelowOwnedRoutes(t *testing.T) {
 	t.Parallel()
 	fal := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusAccepted) })

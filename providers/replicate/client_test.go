@@ -87,3 +87,43 @@ func TestRejectsRedirectOversizeAndMalformedStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestSubmitPayloadInjectsOnlyGatewayWebhook(t *testing.T) {
+	payload := SubmitPayload{Body: []byte(`{"version":"owner/model:version","input":{"prompt":"cat"}}`), Prefer: "respond-async"}
+	value, err := payload.WithWebhook("https://gateway.example/internal/webhooks/replicate/job_00000000000000000000000000000000/whk_00000000000000000000000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := value.(SubmitPayload)
+	var envelope map[string]any
+	if json.Unmarshal(injected.Body, &envelope) != nil || envelope["webhook"] == nil {
+		t.Fatalf("body=%s", injected.Body)
+	}
+	filter, ok := envelope["webhook_events_filter"].([]any)
+	if !ok || len(filter) != 1 || filter[0] != "completed" {
+		t.Fatalf("filter=%v", envelope["webhook_events_filter"])
+	}
+	for _, body := range []string{`{"version":"x","input":{},"webhook":"https://evil.example"}`, `{"version":"x","input":{},"webhook_events_filter":["start"]}`} {
+		if _, err := (SubmitPayload{Body: []byte(body)}).WithWebhook("https://gateway.example/callback"); err == nil {
+			t.Fatal("client webhook accepted")
+		}
+	}
+	if _, err := payload.WithWebhook("http://gateway.example/callback"); err == nil {
+		t.Fatal("insecure callback accepted")
+	}
+}
+
+func TestWebhookObservationRequiresTerminalAndSanitizesIdentity(t *testing.T) {
+	registry, _ := providercredentials.Load(func(string) (string, bool) { return "", false })
+	client, err := New(Config{Endpoint: "https://api.replicate.com", PublicBaseURL: "https://gateway.example", Timeout: time.Second, MaximumBodyBytes: 1 << 20}, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID, observation, err := client.WebhookObservation("job_00000000000000000000000000000000", []byte(`{"id":"provider-secret-id","status":"succeeded","urls":{"get":"https://evil.example"}}`))
+	if err != nil || providerID != "provider-secret-id" || strings.Contains(string(observation.Snapshot.Body), "provider-secret-id") || strings.Contains(string(observation.Snapshot.Body), "evil.example") {
+		t.Fatalf("provider=%q observation=%+v err=%v", providerID, observation, err)
+	}
+	if _, _, err := client.WebhookObservation("job_00000000000000000000000000000000", []byte(`{"id":"provider","status":"processing"}`)); err == nil {
+		t.Fatal("non-terminal webhook accepted")
+	}
+}

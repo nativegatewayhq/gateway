@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"log/slog"
 	"strings"
 	"testing"
@@ -79,6 +80,38 @@ func TestLoadReplicateConfigurationAndSecretSafeFailures(t *testing.T) {
 	_, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
 	if err == nil || strings.Contains(err.Error(), "provider-secret") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestLoadReplicateRequiredWebhookConfiguration(t *testing.T) {
+	secret := "whsec_" + base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	callbackSecret := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":                      "postgres://gateway:test@localhost/gateway",
+		"GATEWAY_REPLICATE_API_TOKEN":               "provider-secret",
+		"GATEWAY_REPLICATE_MODELS":                  "owner/model:version",
+		"GATEWAY_PUBLIC_BASE_URL":                   "https://gateway.example",
+		"GATEWAY_REPLICATE_WEBHOOK_MODE":            "required",
+		"GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS": secret,
+		"GATEWAY_REPLICATE_WEBHOOK_CALLBACK_SECRET": callbackSecret,
+		"GATEWAY_REPLICATE_WEBHOOK_TOLERANCE":       "4m",
+		"GATEWAY_REPLICATE_WEBHOOK_BINDING_TTL":     "168h",
+	}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReplicateWebhookMode != ReplicateWebhookRequired || len(cfg.ReplicateWebhookSecrets) != 1 || len(cfg.ReplicateWebhookCallbackSecret) != 32 || cfg.ReplicateWebhookTolerance != 4*time.Minute || cfg.ReplicateWebhookBindingTTL != 7*24*time.Hour {
+		t.Fatalf("config=%+v", cfg)
+	}
+	values["GATEWAY_PUBLIC_BASE_URL"] = "http://localhost:8080"
+	if _, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("required webhook accepted insecure public base")
+	}
+	values["GATEWAY_PUBLIC_BASE_URL"] = "https://gateway.example"
+	values["GATEWAY_REPLICATE_WEBHOOK_SIGNING_SECRETS"] = "whsec_provider-secret"
+	if _, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil || strings.Contains(err.Error(), "provider-secret") {
+		t.Fatalf("secret-safe error=%v", err)
 	}
 }
 
