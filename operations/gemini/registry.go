@@ -14,10 +14,19 @@ var (
 	ErrInvalidModel  = errors.New("invalid gemini LLM model")
 )
 
-type Registry struct{ models map[string]struct{} }
+type Limits struct{ MaximumInputTokens, MaximumOutputTokens int64 }
+type Model struct {
+	ID                                      string
+	MaximumInputTokens, MaximumOutputTokens int64
+}
+type Registry struct{ models map[string]Model }
 
 func NewRegistry(ids []string) (*Registry, error) {
-	registry := &Registry{models: make(map[string]struct{}, len(ids))}
+	return NewRegistryWithLimits(ids, nil)
+}
+
+func NewRegistryWithLimits(ids []string, limits map[string]Limits) (*Registry, error) {
+	registry := &Registry{models: make(map[string]Model, len(ids))}
 	for _, id := range ids {
 		if !validID(id) {
 			return nil, ErrInvalidModel
@@ -25,7 +34,16 @@ func NewRegistry(ids []string) (*Registry, error) {
 		if _, exists := registry.models[id]; exists {
 			return nil, ErrInvalidModel
 		}
-		registry.models[id] = struct{}{}
+		limit := limits[id]
+		if limit.MaximumInputTokens < 0 || limit.MaximumOutputTokens < 0 || (limit.MaximumInputTokens == 0) != (limit.MaximumOutputTokens == 0) {
+			return nil, ErrInvalidModel
+		}
+		registry.models[id] = Model{ID: id, MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
+	}
+	for id := range limits {
+		if _, ok := registry.models[id]; !ok {
+			return nil, ErrInvalidModel
+		}
 	}
 	return registry, nil
 }
@@ -36,6 +54,17 @@ func (registry *Registry) Contains(id string) bool {
 	}
 	_, ok := registry.models[id]
 	return ok
+}
+
+func (registry *Registry) Resolve(id string) (Model, error) {
+	if registry == nil {
+		return Model{}, ErrModelNotFound
+	}
+	model, ok := registry.models[id]
+	if !ok {
+		return Model{}, ErrModelNotFound
+	}
+	return model, nil
 }
 
 func (registry *Registry) List() []string {

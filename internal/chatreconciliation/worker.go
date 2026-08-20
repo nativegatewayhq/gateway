@@ -47,9 +47,9 @@ func (w *Worker) RunOne(ctx context.Context) (bool, error) {
 	var id, reason string
 	var status *int
 	var headersJSON, body []byte
-	var prompt, cached, completion *int64
+	var prompt, cached, completion, toolUse, thoughts *int64
 	var terminalDigest []byte
-	err = tx.QueryRow(ctx, `SELECT charge_id,reason,response_status,response_headers::text,response_body,prompt_tokens,cached_input_tokens,completion_tokens,terminal_event_sha256 FROM chat_charge_reconciliations WHERE (state='PENDING' AND next_attempt_at<=now()) OR (state='LEASED' AND lease_until<=now()) ORDER BY next_attempt_at,charge_id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &reason, &status, &headersJSON, &body, &prompt, &cached, &completion, &terminalDigest)
+	err = tx.QueryRow(ctx, `SELECT charge_id,reason,response_status,response_headers::text,response_body,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,terminal_event_sha256 FROM chat_charge_reconciliations WHERE (state='PENDING' AND next_attempt_at<=now()) OR (state='LEASED' AND lease_until<=now()) ORDER BY next_attempt_at,charge_id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &reason, &status, &headersJSON, &body, &prompt, &cached, &completion, &toolUse, &thoughts, &terminalDigest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -69,6 +69,12 @@ func (w *Worker) RunOne(ctx context.Context) (bool, error) {
 		return true, w.retry(ctx, id, "provider_outcome_requires_manual_review")
 	}
 	usage := chatpricing.Usage{PromptTokens: *prompt, CachedInputTokens: *cached, CompletionTokens: *completion}
+	if toolUse != nil {
+		usage.ToolUsePromptTokens = *toolUse
+	}
+	if thoughts != nil {
+		usage.ThoughtsTokens = *thoughts
+	}
 	if len(terminalDigest) == 32 {
 		var digest [32]byte
 		copy(digest[:], terminalDigest)

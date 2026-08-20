@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-043
 title: Phase 4 Gemini Token Usage Billing and Settlement
-status: accepted
+status: completed
 created_at: 2026-08-21T16:00:00+09:00
-updated_at: 2026-08-21T16:00:00+09:00
+updated_at: 2026-08-21T18:30:00+09:00
 owners:
   - gateway
 initiative: phase-4-gemini-token-usage-settlement
@@ -182,20 +182,24 @@ go test -tags=sdkconformance ./protocols/gemini -run TestOfficialGeminiLLMGenera
 
 ## 완료 조건
 
-- [ ] Gemini 전용 immutable token price와 model limit이 관리됨
-- [ ] Provider dispatch 전에 Wallet/quota/spend cap 최대 비용이 원자적으로 예약됨
-- [ ] strict native usage가 exact integer 금액으로 Capture되고 차액이 반환됨
-- [ ] cached/tool-use/thought token이 명시된 가격 규칙으로 중복 없이 계산됨
-- [ ] confirmed non-2xx만 Release되고 timeout/missing/invalid usage는 reservation을 유지함
-- [ ] replay와 reconciliation이 Provider/Ledger 중복 없이 exactly-once 수렴함
-- [ ] OpenAI token 과금과 operation/price/idempotency identity가 격리됨
-- [ ] credential과 prompt/tool/thought/output/내부 금액이 응답·로그·telemetry에 노출되지 않음
-- [ ] 공식 SDK와 전체 unit/race/integration/장애 회귀가 통과함
-- [ ] README와 멀티레포 handoff 및 검증 증거가 갱신됨
+- [x] Gemini 전용 immutable token price와 model limit이 관리됨
+- [x] Provider dispatch 전에 Wallet/quota/spend cap 최대 비용이 원자적으로 예약됨
+- [x] strict native usage가 exact integer 금액으로 Capture되고 차액이 반환됨
+- [x] cached/tool-use/thought token이 명시된 가격 규칙으로 중복 없이 계산됨
+- [x] confirmed non-2xx만 Release되고 timeout/missing/invalid usage는 reservation을 유지함
+- [x] replay와 reconciliation이 Provider/Ledger 중복 없이 exactly-once 수렴함
+- [x] OpenAI token 과금과 operation/price/idempotency identity가 격리됨
+- [x] credential과 prompt/tool/thought/output/내부 금액이 응답·로그·telemetry에 노출되지 않음
+- [x] 공식 SDK와 전체 unit/race/integration/장애 회귀가 통과함
+- [x] README와 멀티레포 handoff 및 검증 증거가 갱신됨
 
 ## 검증 증거
 
-구현 PR에서 commit, CI run, fresh DB migration, 필수 명령과 결과를 기록한다.
+- migration `000037_gemini_token_settlement.sql`을 fresh PostgreSQL database `gateway_plan043b`에 적용하고 전체 integration suite 통과
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과
+- PostgreSQL·Redis 기반 `make integration-test` 통과
+- 공식 Google Gen AI Python 및 JavaScript SDK의 BYOK·managed settlement conformance 통과
+- 구현 commit, PR과 CI run은 병합 기록에 추가한다.
 
 ## Rollback 계획
 

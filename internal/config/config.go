@@ -83,6 +83,7 @@ type Config struct {
 	GoogleTimeout                  time.Duration
 	GeminiBodyBytes                int64
 	GeminiLLMModels                []string
+	GeminiLLMModelLimits           map[string]ChatModelLimit
 	ImagesTimeout                  time.Duration
 	ImagesBodyBytes                int64
 	ChatTimeout                    time.Duration
@@ -157,6 +158,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ChatStreamIdleTimeout:      30 * time.Second,
 		ChatBodyBytes:              defaultChatBodyBytes,
 		OpenAIChatModelLimits:      map[string]ChatModelLimit{},
+		GeminiLLMModelLimits:       map[string]ChatModelLimit{},
 		OpenAIResponsesModelLimits: map[string]ChatModelLimit{},
 		ResponsesTimeout:           defaultImagesTimeout,
 		ResponsesStreamIdleTimeout: 30 * time.Second,
@@ -243,6 +245,23 @@ func Load(lookup LookupEnv) (Config, error) {
 			}
 			seen[model] = true
 			cfg.GeminiLLMModels = append(cfg.GeminiLLMModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_GEMINI_LLM_MODEL_LIMITS"); ok {
+		for _, part := range strings.Split(value, ",") {
+			fields := strings.Split(strings.TrimSpace(part), ":")
+			if len(fields) != 3 {
+				return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODEL_LIMITS: expected model:maximum_input:maximum_output")
+			}
+			input, inputErr := strconv.ParseInt(fields[1], 10, 64)
+			output, outputErr := strconv.ParseInt(fields[2], 10, 64)
+			if fields[0] == "" || inputErr != nil || outputErr != nil || input < 1 || output < 1 || input > 10_000_000 || output > 1_000_000 {
+				return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODEL_LIMITS: invalid model limit")
+			}
+			if _, exists := cfg.GeminiLLMModelLimits[fields[0]]; exists {
+				return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODEL_LIMITS: duplicate model")
+			}
+			cfg.GeminiLLMModelLimits[fields[0]] = ChatModelLimit{input, output}
 		}
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT"); ok {
@@ -521,6 +540,16 @@ func Load(lookup LookupEnv) (Config, error) {
 		for _, model := range cfg.OpenAIResponsesModels {
 			if _, ok := cfg.OpenAIResponsesModelLimits[model]; !ok {
 				return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS: every paid Responses model requires limits")
+			}
+		}
+	}
+	if cfg.BillingMode == BillingRequired && len(cfg.GeminiLLMModels) > 0 {
+		if len(cfg.GeminiLLMModelLimits) != len(cfg.GeminiLLMModels) {
+			return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODEL_LIMITS: every paid Gemini LLM model requires limits")
+		}
+		for _, model := range cfg.GeminiLLMModels {
+			if _, ok := cfg.GeminiLLMModelLimits[model]; !ok {
+				return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODEL_LIMITS: every paid Gemini LLM model requires limits")
 			}
 		}
 	}

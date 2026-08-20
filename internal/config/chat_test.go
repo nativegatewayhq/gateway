@@ -64,4 +64,14 @@ func TestGeminiLLMConfiguration(t *testing.T) {
 			t.Fatalf("accepted %q", invalid)
 		}
 	}
+	values["GATEWAY_GEMINI_LLM_MODELS"] = "gemini-2.5-pro"
+	values["GATEWAY_BILLING_MODE"] = "required"
+	if _, err = Load(lookup); err == nil {
+		t.Fatal("managed Gemini LLM accepted without limits")
+	}
+	values["GATEWAY_GEMINI_LLM_MODEL_LIMITS"] = "gemini-2.5-pro:1048576:65536"
+	cfg, err = Load(lookup)
+	if err != nil || cfg.GeminiLLMModelLimits["gemini-2.5-pro"].MaximumOutputTokens != 65536 {
+		t.Fatalf("managed cfg=%+v err=%v", cfg, err)
+	}
 }
