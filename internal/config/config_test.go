@@ -115,6 +115,32 @@ func TestLoadReplicateRequiredWebhookConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadFalRequiredWebhookConfiguration(t *testing.T) {
+	callbackSecret := base64.StdEncoding.EncodeToString([]byte("abcdef0123456789abcdef0123456789"))
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":                "postgres://gateway:test@localhost/gateway",
+		"GATEWAY_FAL_API_KEY":                 "provider-secret",
+		"GATEWAY_FAL_MODELS":                  "fal-ai/flux/dev",
+		"GATEWAY_PUBLIC_BASE_URL":             "https://gateway.example",
+		"GATEWAY_FAL_WEBHOOK_MODE":            "required",
+		"GATEWAY_FAL_WEBHOOK_CALLBACK_SECRET": callbackSecret,
+		"GATEWAY_FAL_WEBHOOK_BINDING_TTL":     "24h",
+		"GATEWAY_FAL_JWKS_CACHE_TTL":          "12h",
+		"GATEWAY_FAL_JWKS_REFRESH_COOLDOWN":   "30s",
+	}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FalWebhookMode != FalWebhookRequired || len(cfg.FalWebhookCallbackSecret) != 32 || cfg.FalWebhookBindingTTL != 24*time.Hour || cfg.FalJWKSCacheTTL != 12*time.Hour || cfg.FalJWKSURL != defaultFalJWKSURL {
+		t.Fatalf("config=%+v", cfg)
+	}
+	values["GATEWAY_PUBLIC_BASE_URL"] = "http://localhost:8080"
+	if _, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("required fal webhook accepted insecure public base")
+	}
+}
+
 func TestLoadOverrides(t *testing.T) {
 	t.Parallel()
 

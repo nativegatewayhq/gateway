@@ -4,6 +4,7 @@ package fal
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,7 +26,19 @@ type Config struct {
 	MaximumBodyBytes        int64
 }
 
-type SubmitPayload struct{ Body []byte }
+type SubmitPayload struct {
+	Body       []byte
+	WebhookURL string
+}
+
+func (payload SubmitPayload) WithWebhook(callback string) (any, error) {
+	parsed, err := url.Parse(callback)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, ErrInvalidConfig
+	}
+	payload.WebhookURL = callback
+	return payload, nil
+}
 
 type Client struct {
 	endpoint, publicBase *url.URL
@@ -65,7 +78,11 @@ func (client *Client) Submit(ctx context.Context, value joboperation.Job, payloa
 	if !ok || len(requestPayload.Body) == 0 || int64(len(requestPayload.Body)) > client.maximumBodyBytes || !validModel(value.Model) {
 		return jobs.SubmitResult{}, &jobs.ProviderError{Category: "invalid_request", Known: true, Observation: failure(http.StatusBadRequest, []byte(`{"detail":"invalid queue request"}`))}
 	}
-	response, body, err := client.call(ctx, http.MethodPost, modelPath(value.Model), value.ChannelID, bytes.NewReader(requestPayload.Body), "")
+	query := ""
+	if requestPayload.WebhookURL != "" {
+		query = url.Values{"fal_webhook": {requestPayload.WebhookURL}}.Encode()
+	}
+	response, body, err := client.call(ctx, http.MethodPost, modelPath(value.Model), value.ChannelID, bytes.NewReader(requestPayload.Body), query)
 	if err != nil {
 		return jobs.SubmitResult{}, err
 	}
@@ -128,6 +145,40 @@ func (client *Client) resultSnapshot(jobID string, status int, headers http.Head
 		return joboperation.Snapshot{}, err
 	}
 	return sanitizedSnapshot(jobID, status, headers, rewritten, client.maximumBodyBytes)
+}
+
+func (client *Client) WebhookObservation(jobID string, body []byte) (string, joboperation.Observation, error) {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil || envelope == nil {
+		return "", joboperation.Observation{}, errors.New("invalid fal webhook")
+	}
+	var providerID, status string
+	if json.Unmarshal(envelope["request_id"], &providerID) != nil || providerID == "" || len(providerID) > 500 || json.Unmarshal(envelope["status"], &status) != nil {
+		return "", joboperation.Observation{}, errors.New("invalid fal webhook")
+	}
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "OK", "COMPLETED", "SUCCEEDED":
+		var payload map[string]any
+		if json.Unmarshal(envelope["payload"], &payload) != nil || payload == nil {
+			return "", joboperation.Observation{}, errors.New("invalid fal webhook payload")
+		}
+		resultBody, err := json.Marshal(payload)
+		if err != nil {
+			return "", joboperation.Observation{}, err
+		}
+		snapshot, err := client.resultSnapshot(jobID, http.StatusOK, http.Header{"Content-Type": {"application/json"}}, resultBody)
+		if err != nil {
+			return "", joboperation.Observation{}, err
+		}
+		return providerID, joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerID, Snapshot: snapshot}, nil
+	case "ERROR", "FAILED":
+		failureBody := []byte(`{"detail":"Queue request failed"}`)
+		return providerID, joboperation.Observation{Status: joboperation.Failed, ProviderJobID: providerID, FailureCategory: "provider_error", Snapshot: joboperation.Snapshot{Status: http.StatusInternalServerError, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: failureBody, SHA256: sha256.Sum256(failureBody)}}, nil
+	case "CANCELED", "CANCELLED":
+		return providerID, joboperation.Observation{Status: joboperation.Canceled, ProviderJobID: providerID, FailureCategory: "canceled"}, nil
+	default:
+		return "", joboperation.Observation{}, errors.New("invalid fal webhook status")
+	}
 }
 
 func (client *Client) Cancel(ctx context.Context, attempt jobs.ProviderAttempt) (joboperation.Observation, error) {

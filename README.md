@@ -71,6 +71,13 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_FAL_MODELS` | unset | Comma-separated exact model-scoped IDs such as `fal-ai/flux/dev` |
 | `GATEWAY_FAL_REQUEST_TIMEOUT` | `2m` | fal submit, status, result, and cancel timeout; maximum `10m` |
 | `GATEWAY_FAL_MAX_BODY_BYTES` | `1048576` | Maximum fal native request or response body; maximum 256 MiB |
+| `GATEWAY_FAL_WEBHOOK_MODE` | `disabled` | `required` injects a Gateway-owned signed callback into every new fal Queue request |
+| `GATEWAY_FAL_WEBHOOK_CALLBACK_SECRET` | unset | Base64-encoded 32-byte deployment secret used to HMAC per-Job callback capabilities |
+| `GATEWAY_FAL_WEBHOOK_BINDING_TTL` | `168h` | Callback capability lifetime; configurable from `1h` through `720h` |
+| `GATEWAY_FAL_JWKS_URL` | `https://rest.fal.ai/.well-known/jwks.json` | Fixed fal ED25519 key-set URL; only the exact well-known path is accepted |
+| `GATEWAY_FAL_JWKS_TIMEOUT` | `5s` | Bounded JWKS request timeout; maximum `1m` |
+| `GATEWAY_FAL_JWKS_CACHE_TTL` | `24h` | Maximum successful key cache lifetime; HTTP cache headers may shorten it |
+| `GATEWAY_FAL_JWKS_REFRESH_COOLDOWN` | `1m` | Minimum interval between signature-mismatch refresh attempts |
 | `GATEWAY_PUBLIC_BASE_URL` | unset | Public HTTPS Gateway origin used for durable Prediction get/cancel URLs; loopback HTTP is accepted for local testing |
 | `GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID` | unset | Current envelope-encryption write key ID; enables the database credential control plane with the keyring settings below |
 | `GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS` | unset | Ordered comma-separated key IDs; index corresponds to `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` |
@@ -483,7 +490,16 @@ The Gateway preserves fal's model-scoped Queue routes: submit at `POST /{model}`
 
 Managed billing publishes each initial fal model price with `size=default` and `quality=default`; model-specific runtime or output-unit pricing is deferred. Replicate asynchronous prices use the same default dimensions.
 
-The official JavaScript client is supported through its documented `proxyUrl` middleware at `/fal/proxy`; the Gateway validates `x-fal-target-url` as an exact `https://queue.fal.run` target and uses it only to recover the native path, never as a fetch destination. The official Python client reads `FAL_QUEUE_RUN_HOST` at import time and can point directly at the Gateway HTTPS host. Both clients continue to send `Authorization: Key SERVICE_KEY`. See [`examples/fal`](./examples/fal). Webhooks, upload, streaming, and synchronous `fal.run` are intentionally outside this release.
+The official JavaScript client is supported through its documented `proxyUrl` middleware at `/fal/proxy`; the Gateway validates `x-fal-target-url` as an exact `https://queue.fal.run` target and uses it only to recover the native path, never as a fetch destination. The official Python client reads `FAL_QUEUE_RUN_HOST` at import time and can point directly at the Gateway HTTPS host. Both clients continue to send `Authorization: Key SERVICE_KEY`. See [`examples/fal`](./examples/fal). Upload, streaming, and synchronous `fal.run` remain outside this release.
+
+Signed callbacks can be enabled while retaining polling as the recovery path:
+
+```bash
+export GATEWAY_FAL_WEBHOOK_MODE='required'
+export GATEWAY_FAL_WEBHOOK_CALLBACK_SECRET='BASE64_32_BYTE_SECRET'
+```
+
+Required mode needs an HTTPS public base URL and outbound access to fal's fixed JWKS endpoint. The Gateway injects only its own `fal_webhook` URL, verifies the four official signature headers against the raw body with ED25519, then checks the per-Job capability and upstream request identity before committing a terminal observation. Callback retries, polling and cancellation use the same PostgreSQL CAS and Ledger settlement path. Callback tokens, signatures, fal user/request IDs and payloads are excluded from telemetry. Cache refresh or signature failures should be alerted; to roll back, set the mode to `disabled`, after which durable polling continues to reconcile existing jobs. Rotate the callback deployment secret only after its maximum binding TTL has elapsed, or keep the previous deployment available until outstanding jobs terminate.
 
 ## Verify
 

@@ -27,6 +27,7 @@ type Dependencies struct {
 	Replicate           http.Handler
 	ReplicateWebhook    http.Handler
 	Fal                 http.Handler
+	FalWebhook          http.Handler
 	ClientIPResolver    *clientip.Resolver
 	Telemetry           *telemetry.Recorder
 	TracePropagator     propagation.TextMapPropagator
@@ -74,7 +75,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, dependenci
 	}
 
 	server := &http.Server{
-		Handler:           httpserver.NewHandlerWithTelemetry(logger, dependencies.Ready, dependencies.ClientIPResolver, dependencies.Telemetry, dependencies.TracePropagator, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels, Replicate: dependencies.Replicate, ReplicateWebhook: dependencies.ReplicateWebhook, Fal: dependencies.Fal}),
+		Handler:           httpserver.NewHandlerWithTelemetry(logger, dependencies.Ready, dependencies.ClientIPResolver, dependencies.Telemetry, dependencies.TracePropagator, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels, Replicate: dependencies.Replicate, ReplicateWebhook: dependencies.ReplicateWebhook, Fal: dependencies.Fal, FalWebhook: dependencies.FalWebhook}),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

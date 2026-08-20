@@ -41,6 +41,10 @@ const (
 	defaultWebhookBindingTTL   = 7 * 24 * time.Hour
 	defaultFalTimeout          = 2 * time.Minute
 	defaultFalBodyBytes        = int64(1024 * 1024)
+	defaultFalJWKSURL          = "https://rest.fal.ai/.well-known/jwks.json"
+	defaultFalJWKSTimeout      = 5 * time.Second
+	defaultFalJWKSCacheTTL     = 24 * time.Hour
+	defaultFalJWKSRefresh      = time.Minute
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -50,6 +54,7 @@ type BillingMode string
 type RateLimitMode string
 type ProviderHealthMode string
 type ReplicateWebhookMode string
+type FalWebhookMode string
 
 const (
 	BillingDisabled          BillingMode          = "disabled"
@@ -60,6 +65,8 @@ const (
 	ProviderHealthRequired   ProviderHealthMode   = "required"
 	ReplicateWebhookDisabled ReplicateWebhookMode = "disabled"
 	ReplicateWebhookRequired ReplicateWebhookMode = "required"
+	FalWebhookDisabled       FalWebhookMode       = "disabled"
+	FalWebhookRequired       FalWebhookMode       = "required"
 )
 
 // Config contains non-provider process settings. Provider credentials remain
@@ -107,6 +114,13 @@ type Config struct {
 	FalModels                      []string
 	FalTimeout                     time.Duration
 	FalBodyBytes                   int64
+	FalWebhookMode                 FalWebhookMode
+	FalWebhookCallbackSecret       []byte
+	FalWebhookBindingTTL           time.Duration
+	FalJWKSURL                     string
+	FalJWKSTimeout                 time.Duration
+	FalJWKSCacheTTL                time.Duration
+	FalJWKSRefreshCooldown         time.Duration
 	PublicBaseURL                  string
 }
 
@@ -146,6 +160,12 @@ func Load(lookup LookupEnv) (Config, error) {
 		FalEndpoint:                "https://queue.fal.run",
 		FalTimeout:                 defaultFalTimeout,
 		FalBodyBytes:               defaultFalBodyBytes,
+		FalWebhookMode:             FalWebhookDisabled,
+		FalWebhookBindingTTL:       defaultWebhookBindingTTL,
+		FalJWKSURL:                 defaultFalJWKSURL,
+		FalJWKSTimeout:             defaultFalJWKSTimeout,
+		FalJWKSCacheTTL:            defaultFalJWKSCacheTTL,
+		FalJWKSRefreshCooldown:     defaultFalJWKSRefresh,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -479,6 +499,51 @@ func loadFal(cfg *Config, lookup LookupEnv) error {
 		}
 		cfg.FalBodyBytes = limit
 	}
+	if value, ok := lookup("GATEWAY_FAL_WEBHOOK_MODE"); ok {
+		switch FalWebhookMode(strings.ToLower(strings.TrimSpace(value))) {
+		case FalWebhookDisabled:
+			cfg.FalWebhookMode = FalWebhookDisabled
+		case FalWebhookRequired:
+			cfg.FalWebhookMode = FalWebhookRequired
+		default:
+			return fmt.Errorf("GATEWAY_FAL_WEBHOOK_MODE: must be disabled or required")
+		}
+	}
+	if value, ok := lookup("GATEWAY_FAL_WEBHOOK_CALLBACK_SECRET"); ok {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+		if err != nil || len(decoded) != 32 {
+			return fmt.Errorf("GATEWAY_FAL_WEBHOOK_CALLBACK_SECRET: must be a base64-encoded 32-byte secret")
+		}
+		cfg.FalWebhookCallbackSecret = decoded
+	}
+	if value, ok := lookup("GATEWAY_FAL_WEBHOOK_BINDING_TTL"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration < time.Hour || duration > 30*24*time.Hour {
+			return fmt.Errorf("GATEWAY_FAL_WEBHOOK_BINDING_TTL: must be between 1h and 720h")
+		}
+		cfg.FalWebhookBindingTTL = duration
+	}
+	if value, ok := lookup("GATEWAY_FAL_JWKS_URL"); ok {
+		cfg.FalJWKSURL = strings.TrimSpace(value)
+	}
+	for _, setting := range []struct {
+		key    string
+		target *time.Duration
+		min    time.Duration
+		max    time.Duration
+	}{
+		{"GATEWAY_FAL_JWKS_TIMEOUT", &cfg.FalJWKSTimeout, time.Millisecond, time.Minute},
+		{"GATEWAY_FAL_JWKS_CACHE_TTL", &cfg.FalJWKSCacheTTL, time.Minute, 24 * time.Hour},
+		{"GATEWAY_FAL_JWKS_REFRESH_COOLDOWN", &cfg.FalJWKSRefreshCooldown, time.Second, time.Hour},
+	} {
+		if value, ok := lookup(setting.key); ok {
+			duration, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil || duration < setting.min || duration > setting.max {
+				return fmt.Errorf("%s: duration is outside the allowed range", setting.key)
+			}
+			*setting.target = duration
+		}
+	}
 	for key, value := range map[string]string{"GATEWAY_FAL_QUEUE_ENDPOINT": cfg.FalEndpoint, "GATEWAY_PUBLIC_BASE_URL": cfg.PublicBaseURL} {
 		if value == "" {
 			if cfg.FalEnabled {
@@ -494,6 +559,23 @@ func loadFal(cfg *Config, lookup LookupEnv) error {
 	}
 	if cfg.FalEnabled && len(cfg.FalModels) == 0 {
 		return fmt.Errorf("GATEWAY_FAL_MODELS: must not be empty when fal is enabled")
+	}
+	if cfg.FalWebhookMode == FalWebhookRequired {
+		public, _ := url.Parse(cfg.PublicBaseURL)
+		jwks, err := url.Parse(cfg.FalJWKSURL)
+		loopback := err == nil && (jwks.Hostname() == "localhost" || jwks.Hostname() == "127.0.0.1" || jwks.Hostname() == "::1")
+		if !cfg.FalEnabled {
+			return fmt.Errorf("GATEWAY_FAL_WEBHOOK_MODE: required needs fal enabled")
+		}
+		if public == nil || public.Scheme != "https" {
+			return fmt.Errorf("GATEWAY_PUBLIC_BASE_URL: must be HTTPS when fal webhooks are required")
+		}
+		if len(cfg.FalWebhookCallbackSecret) != 32 {
+			return fmt.Errorf("GATEWAY_FAL_WEBHOOK_CALLBACK_SECRET: required when fal webhooks are required")
+		}
+		if err != nil || jwks.Host == "" || jwks.User != nil || jwks.RawQuery != "" || jwks.Fragment != "" || jwks.Path != "/.well-known/jwks.json" || (jwks.Scheme != "https" && !(jwks.Scheme == "http" && loopback)) {
+			return fmt.Errorf("GATEWAY_FAL_JWKS_URL: must be the HTTPS fal JWKS endpoint")
+		}
 	}
 	return nil
 }

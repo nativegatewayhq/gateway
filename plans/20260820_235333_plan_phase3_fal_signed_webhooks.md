@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-033
 title: Phase 3 fal Signed Webhook Reconciliation
-status: in_progress
+status: completed
 created_at: 2026-08-20T23:53:33+09:00
-updated_at: 2026-08-20T23:53:33+09:00
+updated_at: 2026-08-21T00:09:30+09:00
 owners:
   - gateway
 initiative: phase-3-fal-signed-webhooks
@@ -202,24 +202,34 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] Gateway-owned `fal_webhook`만 submit되고 client webhook은 거부됨
-- [ ] official header/message/hex ED25519 계약과 ±5분 timestamp가 검증됨
-- [ ] fixed-origin JWKS cache/rotation/refresh가 24시간 bound와 장애 정책을 지킴
-- [ ] callback capability와 Provider/channel/model/request identity가 모두 검증됨
-- [ ] success native result와 known failure/cancel이 durable하게 projection됨
-- [ ] duplicate delivery와 semantic replay가 observation/Ledger 전이를 늘리지 않음
-- [ ] webhook/poll/result/cancel race가 하나의 terminal 상태로 수렴함
-- [ ] success Capture와 failure/cancel Release가 정확히 한 번 수행됨
-- [ ] invalid/unknown/JWKS unavailable 경로가 reservation을 임의 해제하지 않음
-- [ ] callback/JWKS/identity secret이 logs, telemetry와 public snapshot에 노출되지 않음
-- [ ] webhook-disabled rollback과 polling fallback이 유지됨
-- [ ] 기존 Replicate webhook 및 모든 protocol/race/integration test가 회귀하지 않음
-- [ ] README와 Cloud/Conformance handoff가 갱신됨
-- [ ] commit, PR과 최종 CI 증거가 기록됨
+- [x] Gateway-owned `fal_webhook`만 submit되고 client webhook은 거부됨
+- [x] official header/message/hex ED25519 계약과 ±5분 timestamp가 검증됨
+- [x] fixed-origin JWKS cache/rotation/refresh가 24시간 bound와 장애 정책을 지킴
+- [x] callback capability와 Provider/channel/model/request identity가 모두 검증됨
+- [x] success native result와 known failure/cancel이 durable하게 projection됨
+- [x] duplicate delivery와 semantic replay가 observation/Ledger 전이를 늘리지 않음
+- [x] webhook/poll/result/cancel race가 하나의 terminal 상태로 수렴함
+- [x] success Capture와 failure/cancel Release가 정확히 한 번 수행됨
+- [x] invalid/unknown/JWKS unavailable 경로가 reservation을 임의 해제하지 않음
+- [x] callback/JWKS/identity secret이 logs, telemetry와 public snapshot에 노출되지 않음
+- [x] webhook-disabled rollback과 polling fallback이 유지됨
+- [x] 기존 Replicate webhook 및 모든 protocol/race/integration test가 회귀하지 않음
+- [x] README와 Cloud/Conformance handoff가 갱신됨
+- [x] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `2d9b5a4` (fal callback query, ED25519/JWKS verifier, durable replay/CAS, runtime wiring, migration, telemetry와 운영 문서).
+- Provider wire: Gateway-owned HTTPS `fal_webhook` query만 adapter가 escaped 주입하고 client 요청의 webhook 필드는 기존 native parser에서 거부됨을 검증함.
+- signature: 네 official header, strict Unix timestamp ±5분, raw body SHA-256 message와 정확한 64-byte hex ED25519 signature를 mock JWKS key로 검증함.
+- JWKS 경계: exact `/.well-known/jwks.json`, HTTPS 또는 test loopback, redirect 거부, 64 KiB body, OKP/Ed25519 32-byte key, 최대 24시간 cache와 cooldown/single-flight refresh를 구현함.
+- durable ingress: Plan 032의 per-Job keyed capability binding/delivery를 `fal`로 확장하고 request ID, Provider/channel/model 및 terminal CAS/replay 검사를 동일 PostgreSQL transaction에 적용함.
+- 결과·과금: success payload만 native public snapshot으로 저장하며 known failure/cancel은 기존 settlement intent를 통해 Capture/Release exactly-once 경로로 수렴함. unknown 또는 signature/JWKS 오류는 observation을 만들지 않음.
+- 비밀 경계: callback token은 keyed digest만 저장하고 fal request/user ID, signature, callback URL과 payload를 bounded route/log/metric label에서 제외함.
+- 로컬 검증: `make check` 통과.
+- 통합 검증: Compose PostgreSQL/Redis에서 migration, Job replay/race, Capture/Release와 Replicate/fal/OpenAI/Gemini 회귀를 포함한 `make integration-test` 통과.
+- PR: https://github.com/nativegatewayhq/gateway/pull/34
+- CI: GitHub Actions `check`(run `32384523604`) 및 `Plan policy / validate`(run `32384523652`) 통과.
 
 ## Rollback 계획
 
