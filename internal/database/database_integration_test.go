@@ -28,6 +28,10 @@ func TestAllMigrationsApplyToEmptySchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(714821306)`); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock(714821306)`)
 	_, _ = conn.Exec(ctx, `DROP SCHEMA IF EXISTS gateway_fresh_migration_test CASCADE`)
 	if _, err := conn.Exec(ctx, `CREATE SCHEMA gateway_fresh_migration_test; SET search_path TO gateway_fresh_migration_test`); err != nil {
 		t.Fatal(err)
