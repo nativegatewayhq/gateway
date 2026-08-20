@@ -138,6 +138,23 @@ An API Key and logical-model monthly policy additionally supplies `-project-id`,
 
 Quota exhaustion returns native `429` (`quota_exceeded` for OpenAI, `RESOURCE_EXHAUSTED` for Gemini), `Retry-After`, and `X-Quota-Reset` before Provider dispatch. Responses do not disclose budget amounts or remaining spend. Deployments without active policies remain unlimited, and billing-disabled BYOK mode does not consult quota tables.
 
+## Provider channel spend caps
+
+Billing-required deployments can also cap upstream cost per Provider channel for each UTC day or month. Unlike customer quotas, an exhausted channel is candidate-specific: its Billing transaction is rolled back, the Provider is not called, and priority routing evaluates the next configured candidate. If every candidate is unavailable or exhausted, clients receive the existing native provider-unavailable response without internal cost or channel-budget details.
+
+Configure an integer `USD_TICKS` cap with the operator CLI:
+
+```bash
+go run ./cmd/gateway-spend-cap \
+  -channel-id channel_00000000000000000000000000000001 \
+  -period day \
+  -limit 500000 \
+  -actor operator@example.com \
+  -reason 'daily OpenAI purchasing budget'
+```
+
+Repeating the channel/period updates the stable policy ID and appends an audit version. Disable with `-action disable -policy-id spcap_... -actor ... -reason ...`. Day and month policies may coexist and both must have capacity. Estimated Provider cost is reserved atomically with the charge, Wallet, and customer quota; actual cost is captured, known failures release it, and uncertain outcomes remain reserved until reconciliation. Channels without policies are unlimited.
+
 ## Provider credentials
 
 Provider credentials are optional until their adapters are enabled. Inject them through environment variables backed by your deployment platform's secret manager; never commit them to source files or Compose configuration.

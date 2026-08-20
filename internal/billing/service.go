@@ -20,6 +20,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 )
 
 var (
@@ -120,11 +121,18 @@ type Quota interface {
 	ReleaseInTx(context.Context, pgx.Tx, string) error
 }
 
+type SpendCap interface {
+	ReserveInTx(context.Context, pgx.Tx, spendcap.Reservation) ([]spendcap.Allocation, error)
+	CaptureInTx(context.Context, pgx.Tx, string, int64) error
+	ReleaseInTx(context.Context, pgx.Tx, string) error
+}
+
 type Service struct {
 	pool             *pgxpool.Pool
 	estimator        Estimator
 	wallet           Wallet
 	quota            Quota
+	spendCap         SpendCap
 	entropy          io.Reader
 	maxResponseBytes int64
 }
@@ -138,10 +146,14 @@ func NewServiceWithLimit(pool *pgxpool.Pool, estimator Estimator, wallet Wallet,
 }
 
 func NewServiceWithQuota(pool *pgxpool.Pool, estimator Estimator, wallet Wallet, quota Quota, maxResponseBytes int64) (*Service, error) {
+	return NewServiceWithControls(pool, estimator, wallet, quota, nil, maxResponseBytes)
+}
+
+func NewServiceWithControls(pool *pgxpool.Pool, estimator Estimator, wallet Wallet, quota Quota, spendCap SpendCap, maxResponseBytes int64) (*Service, error) {
 	if pool == nil || estimator == nil || wallet == nil || maxResponseBytes < 1 || maxResponseBytes > 256*1024*1024 {
 		return nil, ErrInvalidRequest
 	}
-	return &Service{pool: pool, estimator: estimator, wallet: wallet, quota: quota, entropy: rand.Reader, maxResponseBytes: maxResponseBytes}, nil
+	return &Service{pool: pool, estimator: estimator, wallet: wallet, quota: quota, spendCap: spendCap, entropy: rand.Reader, maxResponseBytes: maxResponseBytes}, nil
 }
 
 func (service *Service) MaximumResponseBytes() int64 { return service.maxResponseBytes }
@@ -218,6 +230,12 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 			return Charge{}, err
 		}
 	}
+	if service.spendCap != nil {
+		_, err = service.spendCap.ReserveInTx(ctx, tx, spendcap.Reservation{ChargeID: charge.ID, ChannelID: charge.ChannelID, Currency: charge.Currency, EstimatedCost: charge.EstimatedCost})
+		if err != nil {
+			return Charge{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Charge{}, err
 	}
@@ -278,7 +296,7 @@ func (service *Service) Release(ctx context.Context, chargeID string) (Charge, e
 }
 
 func (service *Service) Complete(ctx context.Context, chargeID string, success bool, snapshot ResponseSnapshot) (Charge, error) {
-	return service.complete(ctx, chargeID, success, nil, snapshot)
+	return service.complete(ctx, chargeID, success, nil, nil, snapshot)
 }
 
 // CompleteWithSale settles a successful request at an observed sale amount no
@@ -287,10 +305,18 @@ func (service *Service) CompleteWithSale(ctx context.Context, chargeID string, a
 	if actualSale <= 0 {
 		return Charge{}, ErrInvalidRequest
 	}
-	return service.complete(ctx, chargeID, true, &actualSale, snapshot)
+	return service.complete(ctx, chargeID, true, nil, &actualSale, snapshot)
 }
 
-func (service *Service) complete(ctx context.Context, chargeID string, success bool, actualSale *int64, snapshot ResponseSnapshot) (Charge, error) {
+// CompleteWithAmounts settles observed Provider cost and customer sale values.
+func (service *Service) CompleteWithAmounts(ctx context.Context, chargeID string, actualCost, actualSale int64, snapshot ResponseSnapshot) (Charge, error) {
+	if actualCost < 0 || actualSale <= 0 {
+		return Charge{}, ErrInvalidRequest
+	}
+	return service.complete(ctx, chargeID, true, &actualCost, &actualSale, snapshot)
+}
+
+func (service *Service) complete(ctx context.Context, chargeID string, success bool, actualCost, actualSale *int64, snapshot ResponseSnapshot) (Charge, error) {
 	if !validID(chargeID, "charge_") {
 		return Charge{}, ErrInvalidRequest
 	}
@@ -315,6 +341,9 @@ func (service *Service) complete(ctx context.Context, chargeID string, success b
 		return Charge{}, ErrInvalidState
 	}
 	if charge.State == target {
+		if target == "CAPTURED" && actualCost != nil && (charge.ActualCost == nil || *charge.ActualCost != *actualCost) {
+			return Charge{}, ErrRequestConflict
+		}
 		if target == "CAPTURED" && actualSale != nil && charge.CapturedSale != *actualSale {
 			return Charge{}, ErrRequestConflict
 		}
@@ -337,11 +366,22 @@ func (service *Service) complete(ctx context.Context, chargeID string, success b
 		if _, err := service.wallet.CaptureInTx(ctx, tx, charge.ReservationID, captureAmount, "image-capture:"+charge.ID); err != nil {
 			return Charge{}, err
 		}
-		actualCost := charge.EstimatedCost
-		charge.ActualCost = &actualCost
+		captureCost := charge.EstimatedCost
+		if actualCost != nil {
+			captureCost = *actualCost
+		}
+		if captureCost < 0 || captureCost > charge.EstimatedCost {
+			return Charge{}, ErrInvalidRequest
+		}
+		charge.ActualCost = &captureCost
 		charge.CapturedSale = captureAmount
 		if service.quota != nil {
 			if err := service.quota.CaptureInTx(ctx, tx, charge.ID, charge.CapturedSale); err != nil {
+				return Charge{}, err
+			}
+		}
+		if service.spendCap != nil {
+			if err := service.spendCap.CaptureInTx(ctx, tx, charge.ID, captureCost); err != nil {
 				return Charge{}, err
 			}
 		}
@@ -353,6 +393,11 @@ func (service *Service) complete(ctx context.Context, chargeID string, success b
 		charge.CapturedSale = 0
 		if service.quota != nil {
 			if err := service.quota.ReleaseInTx(ctx, tx, charge.ID); err != nil {
+				return Charge{}, err
+			}
+		}
+		if service.spendCap != nil {
+			if err := service.spendCap.ReleaseInTx(ctx, tx, charge.ID); err != nil {
 				return Charge{}, err
 			}
 		}

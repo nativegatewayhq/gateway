@@ -24,6 +24,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
@@ -50,8 +51,15 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: "channel_00000000000000000000000000000001", Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "protocol-billing-price"); err != nil {
 		t.Fatal(err)
 	}
-	chargeService, _ := chargebilling.NewService(pool, estimator, wallet)
+	chargeService, _ := chargebilling.NewServiceWithControls(pool, estimator, wallet, nil, spendcap.NewStore(pool), 32*1024*1024)
+	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: "channel_00000000000000000000000000000001", Protocol: "openai", Operation: "image.generate", Model: "logical-image", UnitCost: 40, UnitSale: 50, EffectiveFrom: time.Now().Add(-time.Hour)}, "routing-first-price"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: "channel_00000000000000000000000000000002", Protocol: "openai", Operation: "image.generate", Model: "logical-image", UnitCost: 30, UnitSale: 50, EffectiveFrom: time.Now().Add(-time.Hour)}, "routing-price"); err != nil {
+		t.Fatal(err)
+	}
+	spendPolicy, err := spendcap.NewStore(pool).SetPolicy(ctx, spendcap.PolicyInput{ChannelID: "channel_00000000000000000000000000000001", Period: spendcap.Day, Limit: 30, Actor: "integration", Reason: "fallback"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	routingRegistry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
@@ -88,6 +96,13 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	var routedChannel string
 	if err := pool.QueryRow(ctx, `SELECT channel_id FROM image_request_charges WHERE organization_id='org_protocol_billing' AND request_id='priority-routing'`).Scan(&routedChannel); err != nil || routedChannel != "channel_00000000000000000000000000000002" {
 		t.Fatalf("routed channel=%s error=%v", routedChannel, err)
+	}
+	var spendEffects int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM provider_channel_spend_buckets`).Scan(&spendEffects); err != nil || spendEffects != 0 {
+		t.Fatalf("spend effects=%d err=%v", spendEffects, err)
+	}
+	if err := spendcap.NewStore(pool).DisablePolicy(ctx, spendPolicy.ID, "integration", "routing test complete"); err != nil {
+		t.Fatal(err)
 	}
 	calls := 0
 	executor := executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
