@@ -257,9 +257,9 @@ func run(stdout, stderr io.Writer) int {
 	if len(cfg.OpenAIResponsesModels) > 0 {
 		var responsesHandler *openaiProtocol.ResponsesHandler
 		if responsesChargeBilling == nil {
-			responsesHandler = openaiProtocol.NewResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes)
+			responsesHandler = openaiProtocol.NewResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout, cfg.ResponsesStreamIdleTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes)
 		} else {
-			responsesHandler = openaiProtocol.NewBillableResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes, responsesChargeBilling)
+			responsesHandler = openaiProtocol.NewBillableResponsesHandler(logger, apiKeyAuthenticator, responsesModels, openaiProvider.NewResponses(providerCredentialRegistry, cfg.ResponsesTimeout, cfg.ResponsesStreamIdleTimeout), providerCredentialRegistry, cfg.ResponsesBodyBytes, responsesChargeBilling)
 		}
 		responsesHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIResponsesHandler = responsesHandler

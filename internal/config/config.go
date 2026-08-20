@@ -92,6 +92,7 @@ type Config struct {
 	OpenAIResponsesModels          []string
 	OpenAIResponsesModelLimits     map[string]ChatModelLimit
 	ResponsesTimeout               time.Duration
+	ResponsesStreamIdleTimeout     time.Duration
 	ResponsesBodyBytes             int64
 	ImageEditsBodyBytes            int64
 	ImageEditSpoolLimit            int
@@ -157,6 +158,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		OpenAIChatModelLimits:      map[string]ChatModelLimit{},
 		OpenAIResponsesModelLimits: map[string]ChatModelLimit{},
 		ResponsesTimeout:           defaultImagesTimeout,
+		ResponsesStreamIdleTimeout: 30 * time.Second,
 		ResponsesBodyBytes:         defaultChatBodyBytes,
 		ImageEditsBodyBytes:        defaultImageEditsBodyBytes,
 		ImageEditSpoolLimit:        8,
@@ -294,6 +296,13 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
 		}
 		cfg.ResponsesTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.ResponsesStreamIdleTimeout = duration
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES"); ok {
 		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)

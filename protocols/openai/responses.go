@@ -38,6 +38,9 @@ type ResponsesBilling interface {
 	Release(context.Context, string, billing.ResponseSnapshot) (chatbilling.Charge, error)
 	MarkReconciling(context.Context, string, string, *billing.ResponseSnapshot) error
 	MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error
+	CompleteStreamUsage(context.Context, string, chatpricing.Usage, [32]byte) (chatbilling.Charge, error)
+	MarkStreamReconcilingUsage(context.Context, string, chatpricing.Usage, [32]byte) error
+	MarkStreamReconciling(context.Context, string, string, string, string) error
 }
 type ResponsesHandler struct {
 	common           *Handler
@@ -95,10 +98,6 @@ func (h *ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(tracked, 400, "invalid_request_error", "invalid_request", "request must contain one model and valid stream option")
 		return
 	}
-	if stream {
-		writeError(tracked, 400, "invalid_request_error", "streaming_not_supported", "streaming is not supported")
-		return
-	}
 	route, err := h.models.Resolve(model)
 	if errors.Is(err, responsesoperation.ErrModelNotFound) {
 		writeError(tracked, 404, "invalid_request_error", "model_not_found", "model not found")
@@ -109,6 +108,18 @@ func (h *ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.common.authorizeModel(tracked, r, principal, "openai", responsesoperation.Create, model) {
+		return
+	}
+	if stream {
+		if _, ok := tracked.ResponseWriter.(http.Flusher); !ok {
+			writeError(tracked, http.StatusInternalServerError, "server_error", "streaming_unavailable", "streaming unavailable")
+			return
+		}
+		if h.billing != nil {
+			h.serveBillableStream(tracked, r, principal, route, body)
+		} else {
+			h.serveBYOKStream(tracked, r, route, body)
+		}
 		return
 	}
 	if h.billing != nil {
@@ -142,6 +153,154 @@ func (h *ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	copyResponseHeaders(tracked.Header(), response.Header)
 	tracked.WriteHeader(response.StatusCode)
 	_, _ = tracked.Write(responseBody)
+}
+
+func (h *ResponsesHandler) serveBYOKStream(w http.ResponseWriter, r *http.Request, route responsesoperation.Model, body []byte) {
+	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
+		writeError(w, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+		return
+	}
+	response, err := h.execute(r.Context(), route, h.executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), ContentLength: int64(len(body)), Body: bytes.NewReader(body), Streaming: true})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "server_error", "provider_unavailable", "provider unavailable")
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		responseBody, readErr := readBounded(response.Body, h.maximumBodyBytes)
+		if readErr != nil {
+			writeError(w, http.StatusBadGateway, "server_error", "provider_response_too_large", "provider response exceeded the configured limit")
+			return
+		}
+		copyResponseHeaders(w.Header(), response.Header)
+		w.WriteHeader(response.StatusCode)
+		_, _ = w.Write(responseBody)
+		return
+	}
+	mediaType, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if mediaErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		writeError(w, http.StatusBadGateway, "server_error", "invalid_provider_stream", "invalid provider stream")
+		return
+	}
+	copyStreamResponseHeaders(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	_, _ = relayResponsesStream(w, response.Body, h.maximumBodyBytes, false)
+}
+
+func (h *ResponsesHandler) serveBillableStream(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route responsesoperation.Model, body []byte) {
+	maximumOutput, err := extractResponsesOutputLimit(body)
+	if err != nil || route.MaximumInputTokens < 1 || route.MaximumOutputTokens < 1 || maximumOutput > route.MaximumOutputTokens || int64(len(body)) > route.MaximumInputTokens {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_token_limit", "paid Responses requires valid input and output token limits")
+		return
+	}
+	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
+		writeError(w, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+		return
+	}
+	key, keyErr := idempotency.Extract(r.Header)
+	if keyErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+		return
+	}
+	var fingerprint [32]byte
+	if key != "" {
+		fingerprint = idempotency.Fingerprint("openai", responsesoperation.Create, route.ID, route.ChannelID, "text/event-stream", body)
+	}
+	begin := chatbilling.BeginRequest{Operation: responsesoperation.Create, RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput, DeliveryMode: "stream"}
+	if key != "" {
+		if _, found, replayErr := h.billing.Replay(r.Context(), begin); replayErr != nil || found {
+			if replayErr == nil {
+				replayErr = chatbilling.ErrConflict
+			}
+			h.writeBillingError(w, replayErr)
+			return
+		}
+	}
+	charge, err := h.billing.Begin(r.Context(), begin)
+	if err != nil {
+		h.billingTelemetry(r.Context(), "begin", "failure")
+		h.writeBillingError(w, err)
+		return
+	}
+	h.billingTelemetry(r.Context(), "begin", "success")
+	response, executeErr := h.execute(r.Context(), route, h.executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), ContentLength: int64(len(body)), Body: bytes.NewReader(body), Streaming: true})
+	if executeErr != nil {
+		reason := "executor_connection_lost"
+		if errors.Is(executeErr, openaiProvider.ErrResponsesTimeout) {
+			reason = "executor_timeout"
+		}
+		_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, reason, "provider", "provider_error")
+		h.billingTelemetry(r.Context(), "reconciling", "success")
+		writeError(w, http.StatusBadGateway, "server_error", "provider_unavailable", "provider unavailable")
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		responseBody, readErr := readBounded(response.Body, h.maximumBodyBytes)
+		if readErr != nil {
+			_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, "response_unavailable", "provider", "provider_error")
+			writeError(w, http.StatusBadGateway, "server_error", "provider_response_too_large", "provider response exceeded the configured limit")
+			return
+		}
+		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}
+		settled, settleErr := h.billing.Release(context.WithoutCancel(r.Context()), charge.ID, snapshot)
+		if settleErr != nil {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "settlement_failed", &snapshot)
+			writeError(w, http.StatusServiceUnavailable, "server_error", "settlement_unavailable", "settlement unavailable")
+			return
+		}
+		h.billingTelemetry(r.Context(), "release", "success")
+		h.common.writeSnapshot(w, settled.Response, false)
+		return
+	}
+	mediaType, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if mediaErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, "stream_protocol_invalid", "provider", "invalid_usage")
+		writeError(w, http.StatusBadGateway, "server_error", "invalid_provider_stream", "invalid provider stream")
+		return
+	}
+	copyStreamResponseHeaders(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	streamStarted := time.Now()
+	result, relayErr := relayResponsesStream(w, response.Body, h.maximumBodyBytes, true)
+	if relayErr != nil || result.Terminal != "complete" || !result.UsageFound || result.Usage.PromptTokens > charge.MaximumInputTokens || result.Usage.CompletionTokens > charge.MaximumOutputTokens {
+		reason := "stream_protocol_invalid"
+		side, category := "provider", result.Terminal
+		if category == "" {
+			category = "missing_terminal"
+		}
+		if errors.Is(relayErr, errStreamWrite) {
+			reason, side, category = "stream_write_failed", "client", "write_failed"
+		} else if errors.Is(r.Context().Err(), context.Canceled) {
+			reason, side, category = "client_disconnect", "client", "client_disconnect"
+		} else if errors.Is(relayErr, openaiProvider.ErrResponsesStreamIdle) {
+			reason, category = "executor_timeout", "provider_error"
+		} else if relayErr != nil && !errors.Is(relayErr, errStreamProtocol) {
+			reason, category = "executor_connection_lost", "provider_error"
+		} else if result.Terminal == "complete" && !result.UsageFound {
+			reason, category = "stream_usage_missing", "missing_usage"
+		} else if result.Terminal == "complete" {
+			category = "invalid_usage"
+		}
+		_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, reason, side, category)
+		h.responsesStreamTelemetry(r.Context(), category, side, result.FirstByte, time.Since(streamStarted))
+		h.billingTelemetry(r.Context(), "reconciling", "success")
+		return
+	}
+	if _, settleErr := h.billing.CompleteStreamUsage(context.WithoutCancel(r.Context()), charge.ID, result.Usage, result.TerminalDigest); settleErr != nil {
+		_ = h.billing.MarkStreamReconcilingUsage(context.WithoutCancel(r.Context()), charge.ID, result.Usage, result.TerminalDigest)
+		h.billingTelemetry(r.Context(), "reconciling", "failure")
+		h.responsesStreamTelemetry(r.Context(), "complete", "none", result.FirstByte, time.Since(streamStarted))
+		return
+	}
+	h.billingTelemetry(r.Context(), "capture", "success")
+	h.responsesStreamTelemetry(r.Context(), "complete", "none", result.FirstByte, time.Since(streamStarted))
+}
+
+func (h *ResponsesHandler) responsesStreamTelemetry(ctx context.Context, category, side string, firstByte, duration time.Duration) {
+	if h.telemetry != nil {
+		h.telemetry.LLMStream(ctx, telemetry.LLMStreamRecord{Protocol: "openai", Operation: responsesoperation.Create, TerminalCategory: category, DisconnectSide: side, FirstByte: firstByte, Duration: duration})
+	}
 }
 
 func (h *ResponsesHandler) serveBillable(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route responsesoperation.Model, body []byte) {
@@ -279,21 +438,17 @@ func extractResponsesOutputLimit(body []byte) (int64, error) {
 }
 
 func extractResponsesUsage(body []byte) (chatpricing.Usage, error) {
-	var envelope struct {
-		Usage *struct {
-			Input        json.RawMessage `json:"input_tokens"`
-			Output       json.RawMessage `json:"output_tokens"`
-			InputDetails *struct {
-				Cached json.RawMessage `json:"cached_tokens"`
-			} `json:"input_tokens_details"`
-			OutputDetails *struct {
-				Reasoning json.RawMessage `json:"reasoning_tokens"`
-			} `json:"output_tokens_details"`
-		} `json:"usage"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	if decoder.Decode(&envelope) != nil || decoder.Decode(&struct{}{}) != io.EOF || envelope.Usage == nil {
+	fields, err := collectJSONFields(body, "usage")
+	if err != nil || len(fields["usage"]) != 1 || bytes.Equal(fields["usage"][0], []byte("null")) {
 		return chatpricing.Usage{}, errors.New("missing usage")
+	}
+	return parseResponsesUsage(fields["usage"][0])
+}
+
+func parseResponsesUsage(raw json.RawMessage) (chatpricing.Usage, error) {
+	fields, err := collectJSONFields(raw, "input_tokens", "output_tokens", "input_tokens_details", "output_tokens_details")
+	if err != nil || len(fields["input_tokens"]) != 1 || len(fields["output_tokens"]) != 1 || len(fields["input_tokens_details"]) > 1 || len(fields["output_tokens_details"]) > 1 {
+		return chatpricing.Usage{}, errors.New("invalid usage")
 	}
 	parse := func(raw json.RawMessage, required bool) (int64, error) {
 		if len(raw) == 0 && !required {
@@ -305,23 +460,39 @@ func extractResponsesUsage(body []byte) (chatpricing.Usage, error) {
 		}
 		return value, nil
 	}
-	input, err := parse(envelope.Usage.Input, true)
+	input, err := parse(fields["input_tokens"][0], true)
 	if err != nil {
 		return chatpricing.Usage{}, err
 	}
-	output, err := parse(envelope.Usage.Output, true)
+	output, err := parse(fields["output_tokens"][0], true)
 	if err != nil {
 		return chatpricing.Usage{}, err
 	}
 	cached, reasoning := int64(0), int64(0)
-	if envelope.Usage.InputDetails != nil {
-		cached, err = parse(envelope.Usage.InputDetails.Cached, false)
+	if len(fields["input_tokens_details"]) == 1 && !bytes.Equal(fields["input_tokens_details"][0], []byte("null")) {
+		details, detailsErr := collectJSONFields(fields["input_tokens_details"][0], "cached_tokens")
+		if detailsErr != nil || len(details["cached_tokens"]) > 1 {
+			return chatpricing.Usage{}, errors.New("invalid cached usage")
+		}
+		var cachedRaw json.RawMessage
+		if len(details["cached_tokens"]) == 1 {
+			cachedRaw = details["cached_tokens"][0]
+		}
+		cached, err = parse(cachedRaw, false)
 		if err != nil {
 			return chatpricing.Usage{}, err
 		}
 	}
-	if envelope.Usage.OutputDetails != nil {
-		reasoning, err = parse(envelope.Usage.OutputDetails.Reasoning, false)
+	if len(fields["output_tokens_details"]) == 1 && !bytes.Equal(fields["output_tokens_details"][0], []byte("null")) {
+		details, detailsErr := collectJSONFields(fields["output_tokens_details"][0], "reasoning_tokens")
+		if detailsErr != nil || len(details["reasoning_tokens"]) > 1 {
+			return chatpricing.Usage{}, errors.New("invalid reasoning usage")
+		}
+		var reasoningRaw json.RawMessage
+		if len(details["reasoning_tokens"]) == 1 {
+			reasoningRaw = details["reasoning_tokens"][0]
+		}
+		reasoning, err = parse(reasoningRaw, false)
 		if err != nil {
 			return chatpricing.Usage{}, err
 		}
@@ -330,6 +501,37 @@ func extractResponsesUsage(body []byte) (chatpricing.Usage, error) {
 		return chatpricing.Usage{}, errors.New("invalid usage details")
 	}
 	return chatpricing.Usage{PromptTokens: input, CachedInputTokens: cached, CompletionTokens: output}, nil
+}
+
+func collectJSONFields(raw []byte, names ...string) (map[string][]json.RawMessage, error) {
+	wanted := make(map[string]bool, len(names))
+	fields := make(map[string][]json.RawMessage, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errors.New("invalid object")
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return nil, errors.New("invalid object")
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil, errors.New("invalid object")
+		}
+		name := key.(string)
+		if wanted[name] {
+			fields[name] = append(fields[name], value)
+		}
+	}
+	if _, err = decoder.Token(); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New("invalid object")
+	}
+	return fields, nil
 }
 
 func (h *ResponsesHandler) billingTelemetry(ctx context.Context, transition, outcome string) {

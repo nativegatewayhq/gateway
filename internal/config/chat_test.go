@@ -35,10 +35,10 @@ func TestOpenAIChatConfiguration(t *testing.T) {
 }
 
 func TestResponsesConfigurationRequiresLimitsWithBilling(t *testing.T) {
-	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_OPENAI_RESPONSES_MODELS": "gpt-4.1", "GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT": "40s", "GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES": "4096"}
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_OPENAI_RESPONSES_MODELS": "gpt-4.1", "GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT": "40s", "GATEWAY_OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT": "7s", "GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES": "4096"}
 	lookup := func(key string) (string, bool) { v, ok := values[key]; return v, ok }
 	cfg, err := Load(lookup)
-	if err != nil || len(cfg.OpenAIResponsesModels) != 1 || cfg.ResponsesTimeout != 40*time.Second || cfg.ResponsesBodyBytes != 4096 {
+	if err != nil || len(cfg.OpenAIResponsesModels) != 1 || cfg.ResponsesTimeout != 40*time.Second || cfg.ResponsesStreamIdleTimeout != 7*time.Second || cfg.ResponsesBodyBytes != 4096 {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
 	values["GATEWAY_BILLING_MODE"] = "required"
