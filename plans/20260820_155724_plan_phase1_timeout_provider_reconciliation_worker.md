@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-013
 title: Phase 1 Timeout and Provider Reconciliation Worker
-status: in_progress
+status: completed
 created_at: 2026-08-20T15:57:24+09:00
-updated_at: 2026-08-20T15:57:24+09:00
+updated_at: 2026-08-20T16:11:11+09:00
 owners:
   - gateway
 initiative: phase-1-timeout-reconciliation
@@ -183,22 +183,27 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] durable reconciliation schema와 기존 row backfill이 존재함
-- [ ] handler가 known success/failure/unknown observation을 정확히 기록함
-- [ ] timeout/panic이 즉시 Release되지 않음
-- [ ] known success는 Capture, known failure는 Release로 자동 resolve됨
-- [ ] UNKNOWN은 reservation 유지 후 MANUAL_REVIEW로 전환됨
-- [ ] claim lease와 SKIP LOCKED가 중복 worker effect를 방지함
-- [ ] worker crash/restart와 commit-unknown이 멱등 복구됨
-- [ ] terminal resolve 후 Idempotency-Key replay가 동작함
-- [ ] billing required process lifecycle에 worker가 연결됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Cloud runbook handoff가 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] durable reconciliation schema와 기존 row backfill이 존재함
+- [x] handler가 known success/failure/unknown observation을 정확히 기록함
+- [x] timeout/panic이 즉시 Release되지 않음
+- [x] known success는 Capture, known failure는 Release로 자동 resolve됨
+- [x] UNKNOWN은 reservation 유지 후 MANUAL_REVIEW로 전환됨
+- [x] claim lease와 SKIP LOCKED가 중복 worker effect를 방지함
+- [x] worker crash/restart와 commit-unknown이 멱등 복구됨
+- [x] terminal resolve 후 Idempotency-Key replay가 동작함
+- [x] billing required process lifecycle에 worker가 연결됨
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Cloud runbook handoff가 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `f259a5009b8807cc9f827a699830506de5e1281a`
+- Pull Request: [#13](https://github.com/nativegatewayhq/gateway/pull/13)
+- CI: [check run 32342729902](https://github.com/nativegatewayhq/gateway/actions/runs/32342729902) 및 Plan policy validate 통과
+- 로컬 검증: `make check` 통과
+- PostgreSQL 통합 검증: `TEST_DATABASE_URL=... make integration-test` 통과
+- 통합 검증에는 known success/failure resolve와 replay, UNKNOWN reservation/manual review, lease expiry, concurrent claim, Complete 이후 crash 복구 및 단일 Ledger capture가 포함됨
 
 ## Rollback 계획
 
