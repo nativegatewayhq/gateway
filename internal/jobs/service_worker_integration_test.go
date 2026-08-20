@@ -136,6 +136,49 @@ func TestServiceSubmitsOnceAndWorkerRecoversToTerminal(t *testing.T) {
 	}
 }
 
+func TestSharedWorkerIsolatesReplicateAndFalProviders(t *testing.T) {
+	repository, owner, replicateRequest := jobRepositoryFixture(t)
+	replicateRequest.Provider = "replicate"
+	replicateRequest.Model = "owner/model:version"
+	falRequest := replicateRequest
+	falRequest.RequestID += "-fal"
+	falRequest.IdempotencyKey += "-fal"
+	falRequest.Model = "fal-ai/flux/dev"
+	falRequest.Provider = "fal"
+	falRequest.ChannelID = "channel_00000000000000000000000000000005"
+	falRequest.Fingerprint = [32]byte{2}
+	snapshot := joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"output":"done"}`)}
+	replicateProvider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "replicate-job", Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: snapshot}, pollAttempt: make(chan ProviderAttempt, 1)}
+	falProvider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "fal-job", Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Millisecond}, pollObservation: joboperation.Observation{Status: joboperation.Succeeded, Snapshot: snapshot}, pollAttempt: make(chan ProviderAttempt, 1)}
+	providers := map[string]Provider{"replicate": replicateProvider, "fal": falProvider}
+	service, err := NewService(repository, providers, jobServiceConfig(), "shared-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicateJob, err := service.Submit(context.Background(), replicateRequest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	falJob, err := service.Submit(context.Background(), falRequest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	worker, _ := NewWorker(repository, providers, nil, jobWorkerConfig(), "shared-worker")
+	if _, err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for id, expected := range map[string]string{replicateJob.ID: replicateRequest.Model, falJob.ID: falRequest.Model} {
+		stored, err := service.Get(context.Background(), owner, id)
+		if err != nil || stored.Status != joboperation.Succeeded || stored.Model != expected {
+			t.Fatalf("job=%+v expected=%s err=%v", stored, expected, err)
+		}
+	}
+	if replicateProvider.polls.Load() != 1 || falProvider.polls.Load() != 1 {
+		t.Fatalf("polls replicate=%d fal=%d", replicateProvider.polls.Load(), falProvider.polls.Load())
+	}
+}
+
 func TestKnownSubmitFailureSettlesWithoutRetryingProvider(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	failure := joboperation.Observation{Status: joboperation.Failed, FailureCategory: "rejected", Snapshot: joboperation.Snapshot{Status: 400, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"error":"rejected"}`)}}
