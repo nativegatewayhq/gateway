@@ -7,6 +7,7 @@ build:
 	go build -o bin/gateway-quota ./cmd/gateway-quota
 	go build -o bin/gateway-spend-cap ./cmd/gateway-spend-cap
 	go build -o bin/gateway-provider-credential ./cmd/gateway-provider-credential
+	go build -o bin/gateway-chat-price ./cmd/gateway-chat-price
 
 fmt:
 	gofmt -w $$(find cmd internal operations protocols providers -name '*.go' -type f)
@@ -20,7 +21,7 @@ test:
 integration-test:
 	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi
 	@if [ -z "$$TEST_REDIS_URL" ]; then echo "TEST_REDIS_URL is required"; exit 1; fi
-	TEST_DATABASE_URL="$$TEST_DATABASE_URL" TEST_REDIS_URL="$$TEST_REDIS_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./internal/billing ./internal/costquota ./internal/imagestorage ./internal/jobs ./internal/ledger ./internal/pricing ./internal/providercredentials ./internal/providerhealth ./internal/ratelimit ./internal/reconciliation ./internal/spendcap ./protocols/fal ./protocols/gemini ./protocols/openai ./protocols/replicate ./providers/fal ./providers/google ./providers/openai ./providers/replicate ./providers/xai ./cmd/gateway-key ./cmd/gateway-quota ./cmd/gateway-spend-cap ./cmd/gateway-provider-credential ./cmd/gateway
+	TEST_DATABASE_URL="$$TEST_DATABASE_URL" TEST_REDIS_URL="$$TEST_REDIS_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./internal/billing ./internal/chatbilling ./internal/chatpricing ./internal/chatreconciliation ./internal/costquota ./internal/imagestorage ./internal/jobs ./internal/ledger ./internal/pricing ./internal/providercredentials ./internal/providerhealth ./internal/ratelimit ./internal/reconciliation ./internal/spendcap ./protocols/fal ./protocols/gemini ./protocols/openai ./protocols/replicate ./providers/fal ./providers/google ./providers/openai ./providers/replicate ./providers/xai ./cmd/gateway-chat-price ./cmd/gateway-key ./cmd/gateway-quota ./cmd/gateway-spend-cap ./cmd/gateway-provider-credential ./cmd/gateway
 
 vet:
 	go vet ./...

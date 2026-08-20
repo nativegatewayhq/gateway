@@ -28,4 +28,8 @@ func TestOpenAIChatConfiguration(t *testing.T) {
 	if _, err := Load(lookup); err == nil {
 		t.Fatal("unsettled paid Chat accepted")
 	}
+	values["GATEWAY_OPENAI_CHAT_MODEL_LIMITS"] = "gpt-4.1:128000:16384"
+	if cfg, err := Load(lookup); err != nil || cfg.OpenAIChatModelLimits["gpt-4.1"].MaximumOutputTokens != 16384 {
+		t.Fatalf("paid config=%+v err=%v", cfg, err)
+	}
 }

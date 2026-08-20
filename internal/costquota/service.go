@@ -298,7 +298,7 @@ func (store *Store) ReleaseInTx(ctx context.Context, tx pgx.Tx, chargeID string)
 }
 
 func (store *Store) finish(ctx context.Context, tx pgx.Tx, chargeID string, actual int64, target string) error {
-	if tx == nil || !validID(chargeID, "charge_") || actual < 0 || (target != "captured" && target != "released") {
+	if tx == nil || !validChargeID(chargeID) || actual < 0 || (target != "captured" && target != "released") {
 		return ErrInvalidPolicy
 	}
 	rows, err := tx.Query(ctx, `SELECT policy_id,period_start,reserved_amount,state,captured_amount FROM cost_quota_allocations WHERE charge_id=$1 ORDER BY policy_id FOR UPDATE`, chargeID)
@@ -405,7 +405,7 @@ func validPolicy(input PolicyInput) bool {
 }
 
 func validReservation(request ReservationRequest) bool {
-	return validID(request.ChargeID, "charge_") && strings.HasPrefix(request.OrganizationID, "org_") && strings.HasPrefix(request.ProjectID, "project_") && request.Amount > 0 && request.Currency == ledger.Currency && validDimension(request.Protocol, request.Operation, request.Model) && request.Protocol != ""
+	return validChargeID(request.ChargeID) && strings.HasPrefix(request.OrganizationID, "org_") && strings.HasPrefix(request.ProjectID, "project_") && request.Amount > 0 && request.Currency == ledger.Currency && validDimension(request.Protocol, request.Operation, request.Model) && request.Protocol != ""
 }
 
 func exceeds(limit, captured, reserved, amount int64) bool {
@@ -416,8 +416,10 @@ func validDimension(protocol, operation, model string) bool {
 	if protocol == "" && operation == "" && model == "" {
 		return true
 	}
-	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit")) || ((protocol == "gemini" || protocol == "replicate" || protocol == "fal") && operation == "image.generate")) && validText(model, 200)
+	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit" || operation == "chat.completions")) || ((protocol == "gemini" || protocol == "replicate" || protocol == "fal") && operation == "image.generate")) && validText(model, 200)
 }
+
+func validChargeID(value string) bool { return validID(value, "charge_") || validID(value, "chc_") }
 
 func bounds(value time.Time, period Period) (time.Time, time.Time) {
 	value = value.UTC()

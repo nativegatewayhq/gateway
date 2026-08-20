@@ -17,17 +17,23 @@ var (
 )
 
 type Model struct {
-	ID            string
-	Owner         string
-	Created       int64
-	Provider      providercredentials.ProviderID
-	ProviderModel string
-	ChannelID     string
+	ID                  string
+	Owner               string
+	Created             int64
+	Provider            providercredentials.ProviderID
+	ProviderModel       string
+	ChannelID           string
+	MaximumInputTokens  int64
+	MaximumOutputTokens int64
 }
+type Limits struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 
 type Registry struct{ models map[string]Model }
 
 func NewRegistry(ids []string) (*Registry, error) {
+	return NewRegistryWithLimits(ids, nil)
+}
+func NewRegistryWithLimits(ids []string, limits map[string]Limits) (*Registry, error) {
 	registry := &Registry{models: make(map[string]Model, len(ids))}
 	for _, id := range ids {
 		if !validID(id) {
@@ -36,7 +42,16 @@ func NewRegistry(ids []string) (*Registry, error) {
 		if _, exists := registry.models[id]; exists {
 			return nil, ErrInvalidModel
 		}
-		registry.models[id] = Model{ID: id, Owner: "openai", Provider: providercredentials.OpenAI, ProviderModel: id, ChannelID: "channel_00000000000000000000000000000001"}
+		limit := limits[id]
+		if limit.MaximumInputTokens < 0 || limit.MaximumOutputTokens < 0 || (limit.MaximumInputTokens == 0) != (limit.MaximumOutputTokens == 0) {
+			return nil, ErrInvalidModel
+		}
+		registry.models[id] = Model{ID: id, Owner: "openai", Provider: providercredentials.OpenAI, ProviderModel: id, ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
+	}
+	for id := range limits {
+		if _, ok := registry.models[id]; !ok {
+			return nil, ErrInvalidModel
+		}
 	}
 	return registry, nil
 }

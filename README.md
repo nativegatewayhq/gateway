@@ -56,6 +56,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_GOOGLE_API_KEY` | unset | Optional Google upstream credential |
 | `GATEWAY_OPENAI_API_KEY` | unset | Optional OpenAI upstream credential |
 | `GATEWAY_OPENAI_CHAT_MODELS` | unset | Comma-separated exact OpenAI Chat model IDs; a non-empty value enables `POST /v1/chat/completions` |
+| `GATEWAY_OPENAI_CHAT_MODEL_LIMITS` | unset | Required in billing mode: comma-separated `model:maximum_input_tokens:maximum_output_tokens` entries |
 | `GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT` | `2m` | Non-streaming OpenAI Chat request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES` | `8388608` | Maximum Chat request and response body; maximum 32 MiB |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
@@ -148,7 +149,24 @@ Invalid configuration fails before binding a listener. Logs are structured JSON 
 
 ## OpenAI Chat Completions
 
-Set `GATEWAY_OPENAI_CHAT_MODELS` to enable the exact non-streaming models accepted by the native route. This foundation is BYOK-only: it does not mutate Wallet or Ledger state, retry, or fall back. `stream: true` is rejected until streaming and token settlement are implemented.
+Set `GATEWAY_OPENAI_CHAT_MODELS` to enable the exact non-streaming models accepted by the native route. BYOK mode preserves native pass-through behavior. In billing-required mode, every enabled model also needs a `GATEWAY_OPENAI_CHAT_MODEL_LIMITS` entry and each request must provide exactly one of `max_completion_tokens` or legacy `max_tokens`.
+
+Managed Chat pricing is immutable and expressed in `USD_TICKS` per one million tokens for input, cached input, and output. Publish it with `gateway-chat-price`; sale rates must satisfy `GATEWAY_MINIMUM_MARGIN_BPS`. Reservation uses the request byte length as a conservative input-token upper bound plus the caller's output-token bound. Final settlement uses only validated native `usage.prompt_tokens`, `prompt_tokens_details.cached_tokens`, and `completion_tokens`, applying ceiling division independently to each usage class.
+
+`Idempotency-Key` replays the stored native response without another Provider call or Ledger mutation. Confirmed non-2xx responses release the reservation. Timeout, connection loss, truncated responses, and missing or invalid usage retain funds in `RECONCILING`; the worker never repeats the Provider request and moves irrecoverable outcomes to manual review after bounded attempts.
+
+```bash
+gateway-chat-price \
+  -channel-id channel_00000000000000000000000000000001 \
+  -model gpt-4.1 \
+  -publication-key gpt-4.1-2026-08-21 \
+  -effective-from 2026-08-21T00:00:00Z \
+  -input-cost 1000000 -input-sale 1200000 \
+  -cached-input-cost 500000 -cached-input-sale 600000 \
+  -output-cost 3000000 -output-sale 3600000
+```
+
+`stream: true`, Provider fallback, and exact tokenizer-based preflight counting remain outside this phase.
 
 ```python
 from openai import OpenAI

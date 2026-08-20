@@ -12,6 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/chatbilling"
+	"github.com/nativegatewayhq/gateway/internal/chatpricing"
+	"github.com/nativegatewayhq/gateway/internal/idempotency"
+	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
@@ -26,6 +32,14 @@ type ChatRegistry interface {
 type ChatExecutor interface {
 	Complete(context.Context, openaiProvider.ChatRequest) (*http.Response, error)
 }
+type ChatBilling interface {
+	Begin(context.Context, chatbilling.BeginRequest) (chatbilling.Charge, error)
+	Replay(context.Context, chatbilling.BeginRequest) (chatbilling.Charge, bool, error)
+	CompleteUsage(context.Context, string, chatpricing.Usage, billing.ResponseSnapshot) (chatbilling.Charge, error)
+	Release(context.Context, string, billing.ResponseSnapshot) (chatbilling.Charge, error)
+	MarkReconciling(context.Context, string, string, *billing.ResponseSnapshot) error
+	MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error
+}
 
 type ChatHandler struct {
 	common           *Handler
@@ -35,6 +49,13 @@ type ChatHandler struct {
 	health           providerhealth.Gate
 	maximumBodyBytes int64
 	telemetry        *telemetry.Recorder
+	billing          ChatBilling
+}
+
+func NewBillableChatHandler(logger *slog.Logger, auth Authenticator, models ChatRegistry, executor ChatExecutor, availability ChannelProviderAvailability, health providerhealth.Gate, maximumBodyBytes int64, chargeBilling ChatBilling) *ChatHandler {
+	handler := NewChatHandler(logger, auth, models, executor, availability, health, maximumBodyBytes)
+	handler.billing = chargeBilling
+	return handler
 }
 
 func NewChatHandler(logger *slog.Logger, auth Authenticator, models ChatRegistry, executor ChatExecutor, availability ChannelProviderAvailability, health providerhealth.Gate, maximumBodyBytes int64) *ChatHandler {
@@ -109,6 +130,10 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.common.authorizeModel(tracked, r, principal, "openai", chatoperation.Completions, model) {
+		return
+	}
+	if h.billing != nil {
+		h.serveBillable(tracked, r, principal, route, body)
 		return
 	}
 	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
@@ -189,6 +214,204 @@ func extractChatEnvelope(body []byte) (string, bool, error) {
 		return "", false, errors.New("invalid envelope")
 	}
 	return model, stream, nil
+}
+
+func (h *ChatHandler) serveBillable(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route chatoperation.Model, body []byte) {
+	maximumOutput, err := extractOutputLimit(body)
+	if err != nil || route.MaximumInputTokens < 1 || route.MaximumOutputTokens < 1 || maximumOutput < 1 || maximumOutput > route.MaximumOutputTokens || int64(len(body)) > route.MaximumInputTokens {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_token_limit", "paid Chat requires valid input and output token limits")
+		return
+	}
+	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
+		writeError(w, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+		return
+	}
+	key, keyErr := idempotency.Extract(r.Header)
+	if keyErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+		return
+	}
+	var fingerprint [32]byte
+	if key != "" {
+		fingerprint = idempotency.Fingerprint("openai", chatoperation.Completions, route.ID, route.ChannelID, "application/json", body)
+	}
+	beginRequest := chatbilling.BeginRequest{RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput}
+	if key != "" {
+		replayed, found, replayErr := h.billing.Replay(r.Context(), beginRequest)
+		if replayErr != nil {
+			h.chatBillingTelemetry(r.Context(), "replay", "failure")
+			h.writeChatBillingError(w, replayErr)
+			return
+		}
+		if found {
+			h.chatBillingTelemetry(r.Context(), "replay", "replay")
+			h.common.writeSnapshot(w, replayed.Response, true)
+			return
+		}
+	}
+	permit, ok := h.acquireHealth(w, r, route.ChannelID)
+	if !ok {
+		return
+	}
+	charge, beginErr := h.billing.Begin(r.Context(), beginRequest)
+	if beginErr != nil {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		h.chatBillingTelemetry(r.Context(), "begin", "failure")
+		h.writeChatBillingError(w, beginErr)
+		return
+	}
+	h.chatBillingTelemetry(r.Context(), "begin", "success")
+	if charge.Replay {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		h.common.writeSnapshot(w, charge.Response, true)
+		return
+	}
+	response, executeErr := h.execute(r.Context(), route, h.executor, openaiProvider.ChatRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: r.Header.Get("Accept"), UserAgent: r.UserAgent(), ContentLength: int64(len(body)), Body: bytes.NewReader(body)})
+	h.observe(r, permit, response, executeErr)
+	if executeErr != nil {
+		reason := "executor_connection_lost"
+		if errors.Is(executeErr, openaiProvider.ErrChatTimeout) {
+			reason = "executor_timeout"
+		}
+		_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, reason, nil)
+		h.chatBillingTelemetry(r.Context(), "reconciling", "success")
+		switch {
+		case errors.Is(executeErr, openaiProvider.ErrChatTimeout):
+			writeError(w, http.StatusGatewayTimeout, "server_error", "provider_timeout", "provider request timed out")
+		case errors.Is(executeErr, openaiProvider.ErrChatCanceled):
+			writeError(w, 499, "server_error", "request_canceled", "request canceled")
+		default:
+			writeError(w, http.StatusBadGateway, "server_error", "provider_unavailable", "provider unavailable")
+		}
+		return
+	}
+	defer response.Body.Close()
+	responseBody, readErr := readBounded(response.Body, h.maximumBodyBytes)
+	if readErr != nil {
+		_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "response_unavailable", nil)
+		h.chatBillingTelemetry(r.Context(), "reconciling", "success")
+		writeError(w, http.StatusBadGateway, "server_error", "provider_response_too_large", "provider response exceeded the configured limit")
+		return
+	}
+	snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		settled, settleErr := h.billing.Release(context.WithoutCancel(r.Context()), charge.ID, snapshot)
+		if settleErr != nil {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "settlement_failed", &snapshot)
+			h.chatBillingTelemetry(r.Context(), "reconciling", "failure")
+			writeError(w, http.StatusServiceUnavailable, "server_error", "settlement_unavailable", "settlement unavailable")
+			return
+		}
+		h.chatBillingTelemetry(r.Context(), "release", "success")
+		h.common.writeSnapshot(w, settled.Response, false)
+		return
+	}
+	usage, usageErr := extractChatUsage(responseBody)
+	if usageErr != nil || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
+		_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "usage_invalid", &snapshot)
+		h.chatBillingTelemetry(r.Context(), "reconciling", "success")
+		copyResponseHeaders(w.Header(), response.Header)
+		w.WriteHeader(response.StatusCode)
+		_, _ = w.Write(responseBody)
+		return
+	}
+	settled, settleErr := h.billing.CompleteUsage(context.WithoutCancel(r.Context()), charge.ID, usage, snapshot)
+	if settleErr != nil {
+		_ = h.billing.MarkReconcilingUsage(context.WithoutCancel(r.Context()), charge.ID, "settlement_failed", &snapshot, usage)
+		h.chatBillingTelemetry(r.Context(), "reconciling", "failure")
+		writeError(w, http.StatusServiceUnavailable, "server_error", "settlement_unavailable", "settlement unavailable")
+		return
+	}
+	h.chatBillingTelemetry(r.Context(), "capture", "success")
+	h.common.writeSnapshot(w, settled.Response, false)
+}
+
+func (h *ChatHandler) chatBillingTelemetry(ctx context.Context, transition, outcome string) {
+	if h.telemetry != nil {
+		h.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: "openai", Operation: chatoperation.Completions, Transition: transition, Outcome: outcome})
+	}
+}
+
+func extractOutputLimit(body []byte) (int64, error) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(body, &object) != nil {
+		return 0, errors.New("invalid JSON")
+	}
+	modern, modernOK := object["max_completion_tokens"]
+	legacy, legacyOK := object["max_tokens"]
+	if modernOK == legacyOK {
+		return 0, errors.New("exactly one output limit required")
+	}
+	raw := modern
+	if legacyOK {
+		raw = legacy
+	}
+	var value int64
+	if json.Unmarshal(raw, &value) != nil || value < 1 {
+		return 0, errors.New("invalid output limit")
+	}
+	return value, nil
+}
+func extractChatUsage(body []byte) (chatpricing.Usage, error) {
+	var envelope struct {
+		Usage *struct {
+			Prompt     json.RawMessage `json:"prompt_tokens"`
+			Completion json.RawMessage `json:"completion_tokens"`
+			Details    *struct {
+				Cached json.RawMessage `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if decoder.Decode(&envelope) != nil || decoder.Decode(&struct{}{}) != io.EOF || envelope.Usage == nil {
+		return chatpricing.Usage{}, errors.New("missing usage")
+	}
+	parse := func(raw json.RawMessage, required bool) (int64, error) {
+		if len(raw) == 0 {
+			if required {
+				return 0, errors.New("missing usage field")
+			}
+			return 0, nil
+		}
+		var value int64
+		if json.Unmarshal(raw, &value) != nil || value < 0 {
+			return 0, errors.New("invalid usage")
+		}
+		return value, nil
+	}
+	prompt, err := parse(envelope.Usage.Prompt, true)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	completion, err := parse(envelope.Usage.Completion, true)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	cached := int64(0)
+	if envelope.Usage.Details != nil {
+		cached, err = parse(envelope.Usage.Details.Cached, false)
+		if err != nil {
+			return chatpricing.Usage{}, err
+		}
+	}
+	if cached > prompt {
+		return chatpricing.Usage{}, errors.New("invalid cached usage")
+	}
+	return chatpricing.Usage{PromptTokens: prompt, CachedInputTokens: cached, CompletionTokens: completion}, nil
+}
+func (h *ChatHandler) writeChatBillingError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, chatbilling.ErrConflict):
+		writeError(w, http.StatusConflict, "invalid_request_error", "idempotency_conflict", "idempotency key conflicts with an existing request")
+	case errors.Is(err, chatbilling.ErrPending):
+		writeError(w, http.StatusConflict, "invalid_request_error", "request_pending", "request is still pending")
+	case errors.Is(err, ledger.ErrInsufficientFunds):
+		writeError(w, http.StatusPaymentRequired, "insufficient_funds", "insufficient_funds", "insufficient funds")
+	case errors.Is(err, chatpricing.ErrUnavailable), errors.Is(err, chatpricing.ErrMargin):
+		writeError(w, http.StatusServiceUnavailable, "server_error", "price_unavailable", "price unavailable")
+	default:
+		writeError(w, http.StatusServiceUnavailable, "server_error", "billing_unavailable", "billing unavailable")
+	}
 }
 
 func (h *ChatHandler) acquireHealth(w http.ResponseWriter, r *http.Request, channel string) (providerhealth.Permit, bool) {

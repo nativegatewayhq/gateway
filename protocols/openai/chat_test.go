@@ -12,10 +12,47 @@ import (
 	"testing"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/chatbilling"
+	"github.com/nativegatewayhq/gateway/internal/chatpricing"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 )
+
+type chatBillingFake struct {
+	beginCalls, completeCalls, releaseCalls, reconcileCalls int
+	charge                                                  chatbilling.Charge
+	usage                                                   chatpricing.Usage
+}
+
+func (f *chatBillingFake) Begin(_ context.Context, r chatbilling.BeginRequest) (chatbilling.Charge, error) {
+	f.beginCalls++
+	f.charge = chatbilling.Charge{ID: "chc_00000000000000000000000000000001", MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens}
+	return f.charge, nil
+}
+func (f *chatBillingFake) Replay(context.Context, chatbilling.BeginRequest) (chatbilling.Charge, bool, error) {
+	return chatbilling.Charge{}, false, nil
+}
+func (f *chatBillingFake) CompleteUsage(_ context.Context, _ string, u chatpricing.Usage, s billing.ResponseSnapshot) (chatbilling.Charge, error) {
+	f.completeCalls++
+	f.usage = u
+	f.charge.Response = s
+	return f.charge, nil
+}
+func (f *chatBillingFake) Release(_ context.Context, _ string, s billing.ResponseSnapshot) (chatbilling.Charge, error) {
+	f.releaseCalls++
+	f.charge.Response = s
+	return f.charge, nil
+}
+func (f *chatBillingFake) MarkReconciling(context.Context, string, string, *billing.ResponseSnapshot) error {
+	f.reconcileCalls++
+	return nil
+}
+func (f *chatBillingFake) MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error {
+	f.reconcileCalls++
+	return nil
+}
 
 type chatExecutorFunc func(context.Context, openaiProvider.ChatRequest) (*http.Response, error)
 
@@ -115,5 +152,43 @@ func TestChatBoundsAndMapsExecutorFailures(t *testing.T) {
 	responseLarge.ServeHTTP(w, chatRequest(`{"model":"gpt-4.1"}`))
 	if w.Code != 502 {
 		t.Fatalf("large response=%d", w.Code)
+	}
+}
+
+func TestBillableChatReservesThenSettlesNativeUsage(t *testing.T) {
+	registry, err := chatoperation.NewRegistryWithLimits([]string{"gpt-4.1"}, map[string]chatoperation.Limits{"gpt-4.1": {MaximumInputTokens: 4096, MaximumOutputTokens: 1024}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	billingFake := &chatBillingFake{}
+	dispatchedAfterReserve := false
+	handler := NewBillableChatHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), registry, chatExecutorFunc(func(context.Context, openaiProvider.ChatRequest) (*http.Response, error) {
+		dispatchedAfterReserve = billingFake.beginCalls == 1
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chatcmpl_1","choices":[],"usage":{"prompt_tokens":12,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens":4}}`))}, nil
+	}), channelAvailability{"channel_00000000000000000000000000000001": true}, providerhealth.NoopGate{}, 4096, billingFake)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, chatRequest(`{"model":"gpt-4.1","messages":[],"max_completion_tokens":20}`))
+	if w.Code != 200 || !dispatchedAfterReserve || billingFake.completeCalls != 1 || billingFake.usage != (chatpricing.Usage{PromptTokens: 12, CachedInputTokens: 3, CompletionTokens: 4}) {
+		t.Fatalf("status=%d reserve=%d complete=%d usage=%+v", w.Code, billingFake.beginCalls, billingFake.completeCalls, billingFake.usage)
+	}
+}
+
+func TestBillableChatRejectsMissingOutputLimitBeforeReserve(t *testing.T) {
+	registry, _ := chatoperation.NewRegistryWithLimits([]string{"gpt-4.1"}, map[string]chatoperation.Limits{"gpt-4.1": {MaximumInputTokens: 4096, MaximumOutputTokens: 1024}})
+	billingFake := &chatBillingFake{}
+	calls := 0
+	handler := NewBillableChatHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), registry, chatExecutorFunc(func(context.Context, openaiProvider.ChatRequest) (*http.Response, error) { calls++; return nil, nil }), channelAvailability{"channel_00000000000000000000000000000001": true}, providerhealth.NoopGate{}, 4096, billingFake)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, chatRequest(`{"model":"gpt-4.1","messages":[]}`))
+	if w.Code != 400 || calls != 0 || billingFake.beginCalls != 0 {
+		t.Fatalf("status=%d provider=%d reserve=%d", w.Code, calls, billingFake.beginCalls)
+	}
+}
+
+func TestExtractChatUsageRejectsMalformedValues(t *testing.T) {
+	for _, body := range []string{`{}`, `{"usage":{"prompt_tokens":1.5,"completion_tokens":1}}`, `{"usage":{"prompt_tokens":1,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens":1}}`} {
+		if _, err := extractChatUsage([]byte(body)); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
 	}
 }
