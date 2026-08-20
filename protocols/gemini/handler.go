@@ -30,6 +30,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	geminioperation "github.com/nativegatewayhq/gateway/operations/gemini"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/google"
 )
@@ -79,6 +80,7 @@ type Handler struct {
 	health        providerhealth.Gate
 	results       ResultManager
 	telemetry     *telemetry.Recorder
+	llmModels     *geminioperation.Registry
 }
 
 func (handler *Handler) SetResultManager(manager ResultManager)    { handler.results = manager }
@@ -94,6 +96,12 @@ func NewHandlerWithHealth(logger *slog.Logger, authenticator Authenticator, exec
 		health = providerhealth.NoopGate{}
 	}
 	return &Handler{logger: logger, authenticator: authenticator, executor: executor, maxBodyBytes: maxBodyBytes, weighted: weighted, health: health}
+}
+
+func NewHandlerWithLLMModels(logger *slog.Logger, authenticator Authenticator, executor Executor, maxBodyBytes int64, health providerhealth.Gate, llmModels *geminioperation.Registry) *Handler {
+	handler := NewHandlerWithHealth(logger, authenticator, executor, maxBodyBytes, health)
+	handler.llmModels = llmModels
+	return handler
 }
 
 func NewBillableHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
@@ -115,11 +123,18 @@ func NewBillableHandlerWithAvailabilityAndHealth(logger *slog.Logger, authentica
 	return handler
 }
 
+func NewBillableHandlerWithLLMModels(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing, availability ProviderAvailability, health providerhealth.Gate, llmModels *geminioperation.Registry) *Handler {
+	handler := NewBillableHandlerWithAvailabilityAndHealth(logger, authenticator, models, executor, maxBodyBytes, chargeBilling, availability, health)
+	handler.llmModels = llmModels
+	return handler
+}
+
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	tracked := &statusWriter{ResponseWriter: writer}
 	started := time.Now()
 	model, _ := modelFromRequest(request)
 	providerModel := model
+	operation := string(imageoperation.Generate)
 	candidateID, channelID, routingPolicy := "", "", "fixed"
 	if legacyChannel, ok := providercredentials.LegacyChannel(providercredentials.Google); ok {
 		channelID = legacyChannel
@@ -147,7 +162,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		handler.logger.Info("gemini request completed",
 			"request_id", requestid.FromContext(request.Context()),
 			"protocol", "gemini",
-			"operation", "generateContent",
+			"operation", operation,
 			"provider", "google",
 			"candidate_id", candidateID,
 			"channel_id", channelID,
@@ -170,12 +185,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	model = parsedModel
+	if handler.llmModels.Contains(model) {
+		operation = geminioperation.ChatCompletions
+	}
 	principal, authenticated := handler.authenticate(tracked, request)
 	if !authenticated {
 		return
 	}
 	var candidates []imageoperation.RoutingDecision
 	if handler.billing != nil {
+		if operation == geminioperation.ChatCompletions {
+			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "managed Gemini LLM billing is not enabled")
+			return
+		}
 		if handler.models == nil {
 			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
 			return
@@ -187,7 +209,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 	}
-	if !handler.authorizeModel(tracked, request, principal, model) {
+	if !handler.authorizeModel(tracked, request, principal, model, operation) {
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -275,9 +297,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	dispatched = true
 	if handler.telemetry != nil {
-		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "gemini", Operation: string(imageoperation.Generate), Policy: routingPolicy, Outcome: "success"})
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "gemini", Operation: operation, Policy: routingPolicy, Outcome: "success"})
 	}
-	response, err := handler.executeProvider(request.Context(), google.GenerateContentRequest{
+	response, err := handler.executeProvider(request.Context(), operation, google.GenerateContentRequest{
 		Model:       providerModel,
 		ChannelID:   channelID,
 		Query:       request.URL.Query(),
@@ -334,7 +356,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		handler.writeSnapshot(tracked, completed.Response, false)
 		return
 	}
-	if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
+	if operation == string(imageoperation.Generate) && response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
 		responseBody, readErr := readBounded(response.Body, handler.results.MaximumResponseBytes())
 		if readErr != nil {
 			handler.writeSnapshot(tracked, handler.storageErrorSnapshot(), false)
@@ -359,19 +381,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
-func (handler *Handler) executeProvider(ctx context.Context, providerRequest google.GenerateContentRequest) (response *http.Response, err error) {
+func (handler *Handler) executeProvider(ctx context.Context, operation string, providerRequest google.GenerateContentRequest) (response *http.Response, err error) {
 	if handler.telemetry == nil {
 		return handler.executor.GenerateContent(ctx, providerRequest)
 	}
-	providerCtx, span, started := handler.telemetry.StartProvider(ctx, "google", "gemini", string(imageoperation.Generate))
+	providerCtx, span, started := handler.telemetry.StartProvider(ctx, "google", "gemini", operation)
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: string(imageoperation.Generate), Outcome: "failure"})
+			handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: operation, Outcome: "failure"})
 			panic(recovered)
 		}
 	}()
 	response, err = handler.executor.GenerateContent(providerCtx, providerRequest)
-	handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: string(imageoperation.Generate), Outcome: geminiProviderTelemetryOutcome(response, err)})
+	handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: operation, Outcome: geminiProviderTelemetryOutcome(response, err)})
 	return response, err
 }
 
@@ -399,8 +421,8 @@ func (handler *Handler) storageErrorSnapshot() billing.ResponseSnapshot {
 	return billing.ResponseSnapshot{Status: http.StatusBadGateway, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
 }
 
-func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, model string) bool {
-	if principal.AuthorizeModel("gemini", string(imageoperation.Generate), model) {
+func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, model, operation string) bool {
+	if principal.AuthorizeModel("gemini", operation, model) {
 		if handler.telemetry != nil {
 			handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "model_authorization", Outcome: "success"})
 		}
@@ -409,7 +431,7 @@ func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http
 	if handler.telemetry != nil {
 		handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "model_authorization", Outcome: "failure"})
 	}
-	handler.logger.Info("API key model authorization denied", "request_id", requestid.FromContext(request.Context()), "api_key_id", principal.APIKeyID, "project_id", principal.ProjectID, "protocol", "gemini", "operation", string(imageoperation.Generate), "model", model, "category", "denied")
+	handler.logger.Info("API key model authorization denied", "request_id", requestid.FromContext(request.Context()), "api_key_id", principal.APIKeyID, "project_id", principal.ProjectID, "protocol", "gemini", "operation", operation, "model", model, "category", "denied")
 	writeError(writer, http.StatusForbidden, "PERMISSION_DENIED", "API key is not permitted to use this model")
 	return false
 }

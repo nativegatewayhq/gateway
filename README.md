@@ -97,6 +97,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` | unset | Base64-encoded 32-byte master key injected by the deployment secret manager; keep previous keys while their ciphertext exists |
 | `GATEWAY_GOOGLE_REQUEST_TIMEOUT` | `2m` | Google request timeout; maximum `10m` |
 | `GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES` | `33554432` | Positive Gemini body limit up to 32 MiB |
+| `GATEWAY_GEMINI_LLM_MODELS` | unset | Comma-separated exact Gemini LLM model IDs enabled for native non-streaming `generateContent`; managed billing rejects these until token settlement is configured |
 | `GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT` | `2m` | OpenAI/xAI image request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES` | `1048576` | Positive OpenAI Images JSON body limit up to 1 MiB |
 | `GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES` | `67108864` | Image edit body limit; maximum 256 MiB |
