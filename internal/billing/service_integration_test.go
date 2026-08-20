@@ -588,6 +588,29 @@ func TestLowestCostSnapshotChangeHasNoFinancialEffects(t *testing.T) {
 	assertWalletAndCharge(t, pool, 1_000, 0, 0, "")
 }
 
+func TestWeightedRoutingEvidencePersistsWithoutPriceEvaluationTime(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	request := billableRequest("weighted-evidence")
+	request.RoutingPolicy = "weighted"
+	request.CostRank = 2
+	charge, err := service.Begin(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if charge.RoutingPolicy != "weighted" || charge.CostRank == nil || *charge.CostRank != 2 || charge.PriceEvaluatedAt != nil {
+		t.Fatalf("charge=%+v", charge)
+	}
+	var policy string
+	var rank int
+	var evaluatedAt *time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT routing_policy,cost_rank,price_evaluated_at FROM image_request_charges WHERE id=$1`, charge.ID).Scan(&policy, &rank, &evaluatedAt); err != nil || policy != "weighted" || rank != 2 || evaluatedAt != nil {
+		t.Fatalf("policy=%s rank=%d at=%v err=%v", policy, rank, evaluatedAt, err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE image_request_charges SET cost_rank=3 WHERE id=$1`, charge.ID); err == nil {
+		t.Fatal("weighted routing evidence mutation succeeded")
+	}
+}
+
 func TestReleaseAndBeginFailuresNeverCharge(t *testing.T) {
 	service, pool := billingFixture(t, 250)
 	ctx := context.Background()

@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -46,6 +47,15 @@ type billingFake struct {
 	quoteRequests []chargebilling.BeginRequest
 	beginSequence []error
 	beginCalls    int
+}
+
+func weightedEntropy(values ...uint64) imageoperation.WeightedSampler {
+	content := make([]byte, 8*len(values))
+	for index, value := range values {
+		binary.BigEndian.PutUint64(content[index*8:], value)
+	}
+	sampler, _ := imageoperation.NewWeightedSampler(bytes.NewReader(content))
+	return sampler
 }
 
 func (fake *billingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
@@ -257,6 +267,210 @@ func TestBillableImagesLowestCostFallsBackOnCapAndReevaluatesPriceRaceOnce(t *te
 			t.Fatalf("response=%d begins=%d quotes=%d", response.Code, fake.beginCalls, len(fake.quoteRequests))
 		}
 	})
+}
+
+func TestBillableJSONEditUsesWeightedRoute(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "weighted-edit", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Edit, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.Multipart}}, Policy: imageoperation.Weighted, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_a", Provider: providercredentials.OpenAI, ProviderModel: "model-a", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Weight: 1},
+		{ID: "candidate_b", Provider: providercredentials.XAI, ProviderModel: "model-b", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Weight: 9},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{}
+	handler := NewBillableEditHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			t.Fatal("wrong edit candidate")
+			return nil, nil
+		}),
+		providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(request.Body)
+			if !strings.Contains(string(body), `"model":"model-b"`) {
+				t.Fatalf("body=%s", body)
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
+		}),
+	}, 2048, 1, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+	handler.common.weighted = weightedEntropy(7)
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{"model":"weighted-edit","image":{"url":"https://example.invalid/image"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer service-secret")
+	response := httptest.NewRecorder()
+	requestid.Middleware(handler).ServeHTTP(response, request)
+	if response.Code != 200 || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000002" || fake.beginRequest.RoutingPolicy != "weighted" || fake.beginRequest.CostRank != 0 {
+		t.Fatalf("response=%d begin=%+v", response.Code, fake.beginRequest)
+	}
+
+	body, contentType := multipartEdit(t, "weighted-edit")
+	multipartFake := &billingFake{}
+	multipartHandler := NewBillableEditHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			t.Fatal("wrong multipart candidate")
+			return nil, nil
+		}),
+		providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+			providerBody, _ := io.ReadAll(request.Body)
+			if !bytes.Contains(providerBody, []byte("model-b")) {
+				t.Fatalf("multipart body missing provider model")
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
+		}),
+	}, int64(len(body)+1024), 1, multipartFake, availability{providercredentials.OpenAI, providercredentials.XAI})
+	multipartHandler.common.weighted = weightedEntropy(7)
+	multipartRequest := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body))
+	multipartRequest.Header.Set("Content-Type", contentType)
+	multipartRequest.Header.Set("Authorization", "Bearer service-secret")
+	multipartResponse := httptest.NewRecorder()
+	requestid.Middleware(multipartHandler).ServeHTTP(multipartResponse, multipartRequest)
+	if multipartResponse.Code != 200 || multipartFake.beginRequest.ChannelID != "channel_00000000000000000000000000000002" || multipartFake.beginRequest.RoutingPolicy != "weighted" {
+		t.Fatalf("multipart response=%d begin=%+v", multipartResponse.Code, multipartFake.beginRequest)
+	}
+}
+
+func TestBillableImagesWeightedRoutingRenormalizesAfterCandidateFailures(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "weighted-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Weighted, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_a", Provider: providercredentials.OpenAI, ProviderModel: "fallback-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Weight: 1},
+		{ID: "candidate_b", Provider: providercredentials.XAI, ProviderModel: "preferred-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Weight: 9},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("price unavailable", func(t *testing.T) {
+		fake := &billingFake{quoteErrors: map[string]error{"channel_00000000000000000000000000000002": pricing.ErrPriceUnavailable}}
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			}),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("unpriced candidate dispatched")
+				return nil, nil
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		handler.weighted = weightedEntropy(7, 0)
+		response := billableImageRequest(handler, `{"model":"weighted-image"}`)
+		if response.Code != 200 || len(fake.quoteRequests) != 2 || len(fake.beginChannels) != 1 || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000001" || fake.beginRequest.RoutingPolicy != "weighted" || fake.beginRequest.CostRank != 1 {
+			t.Fatalf("response=%d quotes=%d begin=%+v channels=%v", response.Code, len(fake.quoteRequests), fake.beginRequest, fake.beginChannels)
+		}
+	})
+	t.Run("spend cap", func(t *testing.T) {
+		fake := &billingFake{beginErrors: map[string]error{"channel_00000000000000000000000000000002": spendcap.ErrExceeded}}
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			}),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("capped candidate dispatched")
+				return nil, nil
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		handler.weighted = weightedEntropy(7, 0)
+		response := billableImageRequest(handler, `{"model":"weighted-image"}`)
+		if response.Code != 200 || len(fake.beginChannels) != 2 || fake.beginChannels[0] == fake.beginChannels[1] || fake.beginRequest.CostRank != 1 {
+			t.Fatalf("response=%d begin=%+v channels=%v", response.Code, fake.beginRequest, fake.beginChannels)
+		}
+	})
+	t.Run("credential filter before draw", func(t *testing.T) {
+		fake := &billingFake{}
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			}),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("credential-less candidate dispatched")
+				return nil, nil
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI})
+		handler.weighted = weightedEntropy(0)
+		response := billableImageRequest(handler, `{"model":"weighted-image"}`)
+		if response.Code != 200 || len(fake.quoteRequests) != 1 || fake.quoteRequests[0].ChannelID != "channel_00000000000000000000000000000001" {
+			t.Fatalf("response=%d quotes=%+v", response.Code, fake.quoteRequests)
+		}
+	})
+	t.Run("global billing error does not redraw", func(t *testing.T) {
+		fake := &billingFake{beginErr: ledger.ErrInsufficientFunds}
+		providerCalls := 0
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+			providercredentials.XAI:    executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		handler.weighted = weightedEntropy(7, 0)
+		response := billableImageRequest(handler, `{"model":"weighted-image"}`)
+		if response.Code != http.StatusPaymentRequired || fake.beginCalls != 1 || providerCalls != 0 {
+			t.Fatalf("response=%d begins=%d providers=%d", response.Code, fake.beginCalls, providerCalls)
+		}
+	})
+	t.Run("entropy failure fails closed", func(t *testing.T) {
+		fake := &billingFake{}
+		providerCalls := 0
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+			providercredentials.XAI:    executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		handler.weighted = weightedEntropy()
+		response := billableImageRequest(handler, `{"model":"weighted-image"}`)
+		if response.Code != http.StatusServiceUnavailable || len(fake.quoteRequests) != 0 || fake.beginCalls != 0 || providerCalls != 0 {
+			t.Fatalf("response=%d quotes=%d begins=%d providers=%d", response.Code, len(fake.quoteRequests), fake.beginCalls, providerCalls)
+		}
+	})
+	t.Run("all candidate prices unavailable", func(t *testing.T) {
+		fake := &billingFake{quoteErrors: map[string]error{
+			"channel_00000000000000000000000000000001": pricing.ErrPriceUnavailable,
+			"channel_00000000000000000000000000000002": pricing.ErrMarginViolation,
+		}}
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("provider dispatched")
+				return nil, nil
+			}),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("provider dispatched")
+				return nil, nil
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		handler.weighted = weightedEntropy(7, 0)
+		response := billableImageRequest(handler, `{"model":"weighted-image"}`)
+		if response.Code != http.StatusServiceUnavailable || len(fake.quoteRequests) != 2 || fake.beginCalls != 0 {
+			t.Fatalf("response=%d quotes=%d begins=%d", response.Code, len(fake.quoteRequests), fake.beginCalls)
+		}
+	})
+	t.Run("post dispatch failure does not redraw", func(t *testing.T) {
+		fake := &billingFake{}
+		openAICalls, xAICalls := 0, 0
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { openAICalls++; return nil, nil }),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				xAICalls++
+				return nil, openaiimages.ErrUpstream
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		handler.weighted = weightedEntropy(7, 0)
+		response := billableImageRequest(handler, `{"model":"weighted-image"}`)
+		if response.Code != http.StatusServiceUnavailable || fake.beginCalls != 1 || openAICalls != 0 || xAICalls != 1 {
+			t.Fatalf("response=%d begins=%d calls=%d/%d", response.Code, fake.beginCalls, openAICalls, xAICalls)
+		}
+	})
+}
+
+func TestBillableImagesWeightedTerminalReplayDoesNotDrawOrQuote(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "weighted-replay", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Weighted, Candidates: []imageoperation.ChannelCandidate{{ID: "candidate", Provider: providercredentials.OpenAI, ProviderModel: "provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Weight: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{replayFound: true, replayCharge: chargebilling.Charge{Response: chargebilling.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"replayed":true}`)}}}
+	handler := NewBillableImagesHandler(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+		t.Fatal("provider dispatched")
+		return nil, nil
+	})}, 1024, fake)
+	handler.weighted = weightedEntropy()
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"weighted-replay"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer service-secret")
+	request.Header.Set("Idempotency-Key", "weighted-replay-key")
+	response := httptest.NewRecorder()
+	requestid.Middleware(handler).ServeHTTP(response, request)
+	if response.Code != 200 || len(fake.quoteRequests) != 0 || fake.beginCalls != 0 || response.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("response=%d quotes=%d begins=%d", response.Code, len(fake.quoteRequests), fake.beginCalls)
+	}
 }
 
 func TestBillableJSONEditUsesLowestCostRoute(t *testing.T) {

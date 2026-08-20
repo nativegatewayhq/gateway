@@ -4,6 +4,7 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -66,10 +67,12 @@ type Handler struct {
 	models        ModelRegistry
 	billing       Billing
 	availability  ProviderAvailability
+	weighted      imageoperation.WeightedSampler
 }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, executor Executor, maxBodyBytes int64) *Handler {
-	return &Handler{logger: logger, authenticator: authenticator, executor: executor, maxBodyBytes: maxBodyBytes}
+	weighted, _ := imageoperation.NewWeightedSampler(rand.Reader)
+	return &Handler{logger: logger, authenticator: authenticator, executor: executor, maxBodyBytes: maxBodyBytes, weighted: weighted}
 }
 
 func NewBillableHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
@@ -327,6 +330,9 @@ type geminiBillableCandidateAttempt struct {
 }
 
 func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+	if len(candidates) > 0 && candidates[0].Policy == imageoperation.Weighted {
+		return handler.selectWeightedCandidate(writer, request, candidates, base)
+	}
 	lowestCost := len(candidates) > 0 && candidates[0].Policy == imageoperation.LowestCost
 	maximumEvaluations := 1
 	if lowestCost {
@@ -401,6 +407,70 @@ func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, r
 	}
 	handler.writeBillingError(writer, request, billing.ErrPriceSnapshotChanged)
 	return imageoperation.RoutingDecision{}, nil, 0, false
+}
+
+func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+	remaining := make([]imageoperation.RoutingDecision, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Provider != providercredentials.Google || handler.executor == nil {
+			handler.logCandidateSkip(request, candidate, "provider_unavailable")
+			continue
+		}
+		if !geminiProviderConfigured(request.Context(), handler.availability, candidate) {
+			handler.logCredentialSkip(request, candidate)
+			continue
+		}
+		remaining = append(remaining, candidate)
+	}
+	for rank := 0; len(remaining) > 0; rank++ {
+		candidate, err := handler.weighted.Pick(remaining)
+		if err != nil {
+			handler.writeBillingError(writer, request, err)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		remaining = removeWeightedCandidate(remaining, candidate.CandidateID)
+		attempt := base
+		attempt.ChannelID = candidate.ChannelID
+		attempt.RoutingPolicy = string(imageoperation.Weighted)
+		attempt.CostRank = rank
+		if _, err := handler.billing.Quote(request.Context(), attempt); err != nil {
+			if errors.Is(err, pricing.ErrPriceUnavailable) || errors.Is(err, pricing.ErrMarginViolation) {
+				handler.logCandidateSkip(request, candidate, "price_unavailable")
+				continue
+			}
+			handler.writeBillingError(writer, request, err)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		started, err := handler.billing.Begin(request.Context(), attempt)
+		if err != nil {
+			if errors.Is(err, spendcap.ErrExceeded) {
+				handler.logSpendCapSkip(request, candidate, err)
+				continue
+			}
+			if errors.Is(err, pricing.ErrPriceUnavailable) || errors.Is(err, pricing.ErrMarginViolation) {
+				handler.logCandidateSkip(request, candidate, "price_race_unavailable")
+				continue
+			}
+			handler.writeBillingError(writer, request, err)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		if started.Replay {
+			handler.writeSnapshot(writer, started.Response, true)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		return candidate, &started, rank, true
+	}
+	writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+	return imageoperation.RoutingDecision{}, nil, 0, false
+}
+
+func removeWeightedCandidate(candidates []imageoperation.RoutingDecision, candidateID string) []imageoperation.RoutingDecision {
+	for index := range candidates {
+		if candidates[index].CandidateID == candidateID {
+			return append(candidates[:index:index], candidates[index+1:]...)
+		}
+	}
+	return candidates
 }
 
 func (handler *Handler) prepareBillableAttempts(request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) ([]geminiBillableCandidateAttempt, error) {

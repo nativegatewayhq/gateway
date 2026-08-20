@@ -3,6 +3,7 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -39,6 +40,15 @@ type geminiBillingFake struct {
 	replayCalls   int
 	quotes        map[string]pricing.Estimate
 	quoteRequests []chargebilling.BeginRequest
+}
+
+func geminiWeightedEntropy(values ...uint64) imageoperation.WeightedSampler {
+	content := make([]byte, 8*len(values))
+	for index, value := range values {
+		binary.BigEndian.PutUint64(content[index*8:], value)
+	}
+	sampler, _ := imageoperation.NewWeightedSampler(bytes.NewReader(content))
+	return sampler
 }
 
 func (fake *geminiBillingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
@@ -172,6 +182,27 @@ func TestBillableGeminiUsesLowestCostBoundQuote(t *testing.T) {
 	}
 	if len(fake.quoteRequests) != 2 || !fake.quoteRequests[0].EvaluationAt.Equal(fake.quoteRequests[1].EvaluationAt) {
 		t.Fatalf("quotes=%+v", fake.quoteRequests)
+	}
+}
+
+func TestBillableGeminiWeightedRoutingRenormalizesAfterPriceFailure(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "gemini", Model: "weighted-gemini", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Weighted, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_a", Provider: providercredentials.Google, ProviderModel: "fallback-model", ChannelID: "channel_00000000000000000000000000000003", Enabled: true, Weight: 1},
+		{ID: "candidate_b", Provider: providercredentials.Google, ProviderModel: "preferred-model", ChannelID: "channel_00000000000000000000000000000004", Enabled: true, Weight: 9},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &geminiBillingFake{quoteErrors: map[string]error{"channel_00000000000000000000000000000004": pricing.ErrPriceUnavailable}}
+	executor := &stubExecutor{response: &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}}
+	handler := NewBillableHandlerWithAvailability(slog.Default(), &stubAuthenticator{principal: apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test"}}, registry, executor, 4096, fake, geminiChannelAvailability{"channel_00000000000000000000000000000003": true, "channel_00000000000000000000000000000004": true})
+	handler.weighted = geminiWeightedEntropy(7, 0)
+	request := geminiRequest(strings.NewReader(`{"contents":[]}`))
+	request.URL.Path = "/v1beta/models/weighted-gemini:generateContent"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || executor.request.Model != "fallback-model" || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000003" || fake.beginRequest.RoutingPolicy != "weighted" || fake.beginRequest.CostRank != 1 || len(fake.quoteRequests) != 2 {
+		t.Fatalf("response=%d executor=%+v begin=%+v quotes=%d", response.Code, executor.request, fake.beginRequest, len(fake.quoteRequests))
 	}
 }
 

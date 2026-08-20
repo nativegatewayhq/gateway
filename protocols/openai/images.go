@@ -4,6 +4,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -62,6 +63,7 @@ type Handler struct {
 	maxBodyBytes  int64
 	billing       Billing
 	availability  ProviderAvailability
+	weighted      imageoperation.WeightedSampler
 }
 
 func NewBillableImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
@@ -80,7 +82,8 @@ func NewImagesHandler(logger *slog.Logger, authenticator Authenticator, models M
 	for provider, executor := range executors {
 		cloned[provider] = executor
 	}
-	return &Handler{logger: logger, authenticator: authenticator, models: models, executors: cloned, maxBodyBytes: maxBodyBytes}
+	weighted, _ := imageoperation.NewWeightedSampler(rand.Reader)
+	return &Handler{logger: logger, authenticator: authenticator, models: models, executors: cloned, maxBodyBytes: maxBodyBytes, weighted: weighted}
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -338,6 +341,9 @@ type billableCandidateAttempt struct {
 }
 
 func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+	if len(candidates) > 0 && candidates[0].Policy == imageoperation.Weighted {
+		return handler.selectWeightedCandidate(writer, request, candidates, base)
+	}
 	lowestCost := len(candidates) > 0 && candidates[0].Policy == imageoperation.LowestCost
 	maximumEvaluations := 1
 	if lowestCost {
@@ -412,6 +418,70 @@ func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, r
 	}
 	handler.writeBillingError(writer, request, billing.ErrPriceSnapshotChanged)
 	return imageoperation.RoutingDecision{}, nil, 0, false
+}
+
+func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
+	remaining := make([]imageoperation.RoutingDecision, 0, len(candidates))
+	for _, candidate := range candidates {
+		if handler.executors[candidate.Provider] == nil {
+			handler.logCandidateSkip(request, candidate, "executor_unavailable")
+			continue
+		}
+		if !providerConfigured(request.Context(), handler.availability, candidate) {
+			handler.logCredentialSkip(request, candidate)
+			continue
+		}
+		remaining = append(remaining, candidate)
+	}
+	for rank := 0; len(remaining) > 0; rank++ {
+		candidate, err := handler.weighted.Pick(remaining)
+		if err != nil {
+			handler.writeBillingError(writer, request, err)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		remaining = removeCandidate(remaining, candidate.CandidateID)
+		attempt := base
+		attempt.ChannelID = candidate.ChannelID
+		attempt.RoutingPolicy = string(imageoperation.Weighted)
+		attempt.CostRank = rank
+		if _, err := handler.billing.Quote(request.Context(), attempt); err != nil {
+			if errors.Is(err, pricing.ErrPriceUnavailable) || errors.Is(err, pricing.ErrMarginViolation) {
+				handler.logCandidateSkip(request, candidate, "price_unavailable")
+				continue
+			}
+			handler.writeBillingError(writer, request, err)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		started, err := handler.billing.Begin(request.Context(), attempt)
+		if err != nil {
+			if errors.Is(err, spendcap.ErrExceeded) {
+				handler.logSpendCapSkip(request, candidate, err)
+				continue
+			}
+			if errors.Is(err, pricing.ErrPriceUnavailable) || errors.Is(err, pricing.ErrMarginViolation) {
+				handler.logCandidateSkip(request, candidate, "price_race_unavailable")
+				continue
+			}
+			handler.writeBillingError(writer, request, err)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		if started.Replay {
+			handler.writeSnapshot(writer, started.Response, true)
+			return imageoperation.RoutingDecision{}, nil, 0, false
+		}
+		return candidate, &started, rank, true
+	}
+	writeError(writer, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+	return imageoperation.RoutingDecision{}, nil, 0, false
+}
+
+func removeCandidate(candidates []imageoperation.RoutingDecision, candidateID string) []imageoperation.RoutingDecision {
+	for index := range candidates {
+		if candidates[index].CandidateID == candidateID {
+			return append(candidates[:index:index], candidates[index+1:]...)
+		}
+	}
+	return candidates
 }
 
 func (handler *Handler) prepareBillableAttempts(request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) ([]billableCandidateAttempt, error) {

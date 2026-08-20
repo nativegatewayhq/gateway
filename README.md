@@ -166,6 +166,14 @@ The selected price ID, cost, sale, currency, channel, evaluation timestamp, poli
 
 Route publishers must prepare every candidate's active credential, exact channel price, minimum margin, and optional spend cap before enabling `lowest_cost`. Client responses and routing skip logs do not expose prices, margins, credentials, request content, balances, or remaining limits.
 
+## Weighted image routing
+
+An image model route may instead use `weighted` with a positive integer weight on every enabled candidate. The Gateway removes candidates without a configured executor or active channel credential before drawing, canonicalizes candidates by ID, and uses cryptographic rejection sampling so integer intervals are not affected by modulo bias. Weight configuration is bounded to 128 candidates, `1,000,000,000` per candidate, and `4,000,000,000` total.
+
+After a draw, an unavailable exact price, minimum-margin violation, or exhausted Provider channel spend cap removes that candidate. The remaining weights are re-normalized and another candidate is drawn; no candidate is attempted twice. Wallet, customer quota, database, idempotency, and entropy failures stop globally, and no redraw occurs after Billing reservation or Provider dispatch. Terminal idempotency replay returns the stored native response without consuming entropy or evaluating current route state.
+
+Weighted charges preserve the selected channel and price snapshot plus `routing_policy=weighted` and the bounded attempt rank. Client responses and logs never expose configured weights, random draws, prices, margins, credentials, request content, balances, or remaining limits. Route publishers must validate every candidate's credential, exact price, margin, and optional spend cap before rollout.
+
 ## Provider credentials
 
 Provider credentials are optional until their adapters are enabled. Inject them through environment variables backed by your deployment platform's secret manager; never commit them to source files or Compose configuration.
