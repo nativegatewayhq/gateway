@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-041
 title: Phase 4 OpenAI Responses SSE Streaming and Disconnect Settlement
-status: in_progress
+status: completed
 created_at: 2026-08-21T12:30:00+09:00
-updated_at: 2026-08-21T12:45:00+09:00
+updated_at: 2026-08-21T14:00:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-streaming-settlement
@@ -194,22 +194,30 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponses
 
 ## 완료 조건
 
-- [ ] 공식 OpenAI Python/JavaScript SDK가 native Responses SSE event를 소비함
-- [ ] Provider dispatch 전에 Wallet/quota/spend cap 최대 비용이 원자적으로 예약됨
-- [ ] valid `response.completed` usage가 exact token 금액으로 exactly-once Capture됨
-- [ ] failed/incomplete/error/disconnect/unknown outcome이 자동 Release되지 않음
-- [ ] recoverable settlement failure가 worker로 복구되고 나머지는 manual review로 수렴함
-- [ ] streaming idempotency가 Provider redispatch와 Ledger 중복을 방지함
-- [ ] relay가 native SSE bytes를 변형하지 않고 bounded backpressure로 동작함
-- [ ] header 전송 후 오류와 cancellation이 wire/resource를 안전하게 종료함
-- [ ] secret, prompt, output, tool/reasoning event와 high-cardinality identity가 로그·telemetry에 없음
-- [ ] 전체 unit/race/integration/공식 SDK/장애 회귀가 통과함
-- [ ] README와 Dashboard/Cloud/Conformance handoff가 갱신됨
-- [ ] 재현 가능한 검증 증거가 기록됨
+- [x] 공식 OpenAI Python/JavaScript SDK가 native Responses SSE event를 소비함
+- [x] Provider dispatch 전에 Wallet/quota/spend cap 최대 비용이 원자적으로 예약됨
+- [x] valid `response.completed` usage가 exact token 금액으로 exactly-once Capture됨
+- [x] failed/incomplete/error/disconnect/unknown outcome이 자동 Release되지 않음
+- [x] recoverable settlement failure가 worker로 복구되고 나머지는 manual review로 수렴함
+- [x] streaming idempotency가 Provider redispatch와 Ledger 중복을 방지함
+- [x] relay가 native SSE bytes를 변형하지 않고 bounded backpressure로 동작함
+- [x] header 전송 후 오류와 cancellation이 wire/resource를 안전하게 종료함
+- [x] secret, prompt, output, tool/reasoning event와 high-cardinality identity가 로그·telemetry에 없음
+- [x] 전체 unit/race/integration/공식 SDK/장애 회귀가 통과함
+- [x] README와 Dashboard/Cloud/Conformance handoff가 갱신됨
+- [x] 재현 가능한 검증 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit `cbb3134`, PR [#50](https://github.com/nativegatewayhq/gateway/pull/50)
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check`
+  - gofmt, vet, 전체 race unit test와 모든 Gateway binary build 통과
+- fresh PostgreSQL `gateway_plan041`과 Redis에서 `make integration-test`
+  - migration 000035, Responses stream Capture/evidence, worker retry, Wallet/Ledger, quota/spend-cap 및 전체 integration 통과
+- `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIResponsesStreamingSDKs -count=1`
+  - OpenAI Python sync/async 및 JavaScript Responses streaming SDK 통과
+- CRLF native wire 보존, strict sequence/terminal/usage, failed/incomplete/error, write failure와 Provider idle timeout 회귀 통과
+- Dashboard, Cloud와 Conformance에는 stream delivery mode, bounded terminal category, idle timeout과 SDK fixture 계약을 `affected_repos` handoff로 남겼다.
 
 ## Rollback 계획
 
