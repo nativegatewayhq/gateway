@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-032
 title: Phase 3 Replicate Signed Webhook Reconciliation
-status: in_progress
+status: completed
 created_at: 2026-08-20T23:12:25+09:00
-updated_at: 2026-08-20T23:36:21+09:00
+updated_at: 2026-08-20T23:40:02+09:00
 owners:
   - gateway
 initiative: phase-3-replicate-signed-webhooks
@@ -208,7 +208,7 @@ make integration-test
 - [x] webhook-disabled rolling rollback이 기존 Replicate 동작을 보존함
 - [x] 기존 fal/OpenAI/Gemini protocol과 전체 race/integration test가 회귀하지 않음
 - [x] 운영 문서와 Cloud/Conformance handoff가 갱신됨
-- [ ] commit, PR과 최종 CI 증거가 기록됨
+- [x] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
@@ -220,7 +220,8 @@ make integration-test
 - 과금: signed webhook `SUCCEEDED`의 Capture 1회 및 `FAILED`/`CANCELED`의 Release 1회를 실제 Wallet, Ledger와 settlement lease에서 검증함.
 - 로컬 검증: `make check` 통과.
 - 통합 검증: Compose PostgreSQL/Redis에서 migration, Job, billing, Replicate/fal/OpenAI/Gemini 회귀를 포함한 `make integration-test` 통과.
-- PR 및 CI: PR 생성 후 기록 예정.
+- PR: https://github.com/nativegatewayhq/gateway/pull/32
+- CI: GitHub Actions `check`(run `32381415828`) 및 `Plan policy / validate`(run `32381416110`) 통과.
 
 ## Rollback 계획
 
