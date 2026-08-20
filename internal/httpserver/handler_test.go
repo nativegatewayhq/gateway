@@ -88,6 +88,24 @@ func TestOpenAIModelsRouteIsMounted(t *testing.T) {
 	}
 }
 
+func TestReplicatePredictionRoutesAreMounted(t *testing.T) {
+	t.Parallel()
+	predictions := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusAccepted) })
+	handler := NewHandler(discardLogger(), nil, Routes{Replicate: predictions})
+	for _, item := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/v1/predictions"},
+		{http.MethodGet, "/v1/predictions/job_00000000000000000000000000000000"},
+		{http.MethodPost, "/v1/predictions/job_00000000000000000000000000000000/cancel"},
+	} {
+		if response := serveRequest(t, handler, item.method, item.path, ""); response.Code != http.StatusAccepted {
+			t.Fatalf("%s %s status = %d", item.method, item.path, response.Code)
+		}
+	}
+}
+
 func TestReadinessFailure(t *testing.T) {
 	t.Parallel()
 

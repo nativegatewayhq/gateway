@@ -61,8 +61,8 @@ func TestRegistryRejectsInvalidManifest(t *testing.T) {
 	duplicateChannel.Model = "other-model"
 	duplicateChannel.FixedCandidateID = "candidate_other"
 	duplicateChannel.Candidates = []ChannelCandidate{{ID: "candidate_other", Provider: providercredentials.OpenAI, ProviderModel: "other-model", ChannelID: valid.Candidates[0].ChannelID, Enabled: true}}
-	if _, err := NewRegistry(valid, duplicateChannel); !errors.Is(err, ErrInvalidModel) {
-		t.Fatalf("duplicate channel=%v", err)
+	if registry, err := NewRegistry(valid, duplicateChannel); err != nil || len(registry.List()) != 2 {
+		t.Fatalf("shared channel across models=%v", err)
 	}
 	for _, invalid := range []ModelRoute{
 		{},
@@ -73,6 +73,23 @@ func TestRegistryRejectsInvalidManifest(t *testing.T) {
 	} {
 		if _, err := NewRegistry(invalid); !errors.Is(err, ErrInvalidModel) {
 			t.Fatalf("invalid accepted: %+v, %v", invalid, err)
+		}
+	}
+}
+
+func TestConfiguredReplicateModelsShareBuiltInChannel(t *testing.T) {
+	registry, err := DefaultRegistryWithReplicate([]string{"owner/model:version-a", "owner/model:version-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := registry.ListProtocol("replicate")
+	if len(models) != 2 {
+		t.Fatalf("models=%+v", models)
+	}
+	for _, model := range models {
+		route, err := registry.ResolveProtocol("replicate", model.Model, Generate, JSON)
+		if err != nil || route.Provider != providercredentials.Replicate {
+			t.Fatalf("route=%+v err=%v", route, err)
 		}
 	}
 }

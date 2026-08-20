@@ -34,6 +34,8 @@ const (
 	defaultReconcileBackoff    = 5 * time.Second
 	defaultReconcileMaxBackoff = time.Hour
 	defaultRateLimitTimeout    = 100 * time.Millisecond
+	defaultReplicateTimeout    = 2 * time.Minute
+	defaultReplicateBodyBytes  = int64(1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -82,6 +84,12 @@ type Config struct {
 	ImageStorage         imagestorage.Config
 	Telemetry            telemetry.Config
 	TrustedProxyPrefixes []netip.Prefix
+	ReplicateEnabled     bool
+	ReplicateEndpoint    string
+	ReplicateModels      []string
+	ReplicateTimeout     time.Duration
+	ReplicateBodyBytes   int64
+	PublicBaseURL        string
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -111,6 +119,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		ProviderHealth:       providerhealth.DefaultConfig(),
 		ImageStorage:         imagestorage.DefaultConfig(),
 		Telemetry:            telemetry.DefaultConfig(),
+		ReplicateEndpoint:    "https://api.replicate.com",
+		ReplicateTimeout:     defaultReplicateTimeout,
+		ReplicateBodyBytes:   defaultReplicateBodyBytes,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -231,6 +242,9 @@ func Load(lookup LookupEnv) (Config, error) {
 	if err := loadTelemetry(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
+	if err := loadReplicate(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
 	if value, ok := lookup("GATEWAY_TRUSTED_PROXY_CIDRS"); ok {
 		parts := strings.Split(value, ",")
 		if len(parts) > 128 {
@@ -274,6 +288,64 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadReplicate(cfg *Config, lookup LookupEnv) error {
+	_, cfg.ReplicateEnabled = lookup("GATEWAY_REPLICATE_API_TOKEN")
+	if value, ok := lookup("GATEWAY_REPLICATE_API_ENDPOINT"); ok {
+		cfg.ReplicateEndpoint = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("GATEWAY_PUBLIC_BASE_URL"); ok {
+		cfg.PublicBaseURL = strings.TrimSuffix(strings.TrimSpace(value), "/")
+	}
+	if value, ok := lookup("GATEWAY_REPLICATE_MODELS"); ok {
+		seen := map[string]struct{}{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 {
+				return fmt.Errorf("GATEWAY_REPLICATE_MODELS: must contain bounded comma-separated exact versions")
+			}
+			if _, exists := seen[model]; exists {
+				continue
+			}
+			seen[model] = struct{}{}
+			cfg.ReplicateModels = append(cfg.ReplicateModels, model)
+		}
+		if len(cfg.ReplicateModels) > 64 {
+			return fmt.Errorf("GATEWAY_REPLICATE_MODELS: must contain no more than 64 versions")
+		}
+	}
+	if value, ok := lookup("GATEWAY_REPLICATE_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return fmt.Errorf("GATEWAY_REPLICATE_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.ReplicateTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_REPLICATE_MAX_BODY_BYTES"); ok {
+		limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || limit < 1 || limit > 256*1024*1024 {
+			return fmt.Errorf("GATEWAY_REPLICATE_MAX_BODY_BYTES: must be between 1 and 268435456")
+		}
+		cfg.ReplicateBodyBytes = limit
+	}
+	for key, value := range map[string]string{"GATEWAY_REPLICATE_API_ENDPOINT": cfg.ReplicateEndpoint, "GATEWAY_PUBLIC_BASE_URL": cfg.PublicBaseURL} {
+		if value == "" {
+			if cfg.ReplicateEnabled {
+				return fmt.Errorf("%s: must not be empty when Replicate is enabled", key)
+			}
+			continue
+		}
+		parsed, err := url.Parse(value)
+		loopback := err == nil && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1")
+		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback)) {
+			return fmt.Errorf("%s: must be an HTTPS or loopback HTTP origin", key)
+		}
+	}
+	if cfg.ReplicateEnabled && len(cfg.ReplicateModels) == 0 {
+		return fmt.Errorf("GATEWAY_REPLICATE_MODELS: must not be empty when Replicate is enabled")
+	}
+	return nil
 }
 
 func loadTelemetry(cfg *Config, lookup LookupEnv) error {

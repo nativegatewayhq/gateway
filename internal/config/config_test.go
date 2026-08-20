@@ -61,6 +61,25 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Telemetry.Mode != "disabled" || cfg.Telemetry.ServiceName != "native-ai-gateway" || cfg.Telemetry.SampleRatio != 0.1 {
 		t.Errorf("telemetry config=%+v", cfg.Telemetry)
 	}
+	if cfg.ReplicateEnabled || cfg.ReplicateEndpoint != "https://api.replicate.com" || cfg.ReplicateTimeout != 2*time.Minute || cfg.ReplicateBodyBytes != 1<<20 {
+		t.Errorf("replicate config=%+v", cfg)
+	}
+}
+
+func TestLoadReplicateConfigurationAndSecretSafeFailures(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway:test@localhost/gateway", "GATEWAY_REPLICATE_API_TOKEN": "provider-secret", "GATEWAY_REPLICATE_API_ENDPOINT": "https://api.replicate.example", "GATEWAY_PUBLIC_BASE_URL": "https://gateway.example", "GATEWAY_REPLICATE_MODELS": "owner/model:version-a, owner/model:version-b", "GATEWAY_REPLICATE_REQUEST_TIMEOUT": "90s", "GATEWAY_REPLICATE_MAX_BODY_BYTES": "2097152"}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ReplicateEnabled || len(cfg.ReplicateModels) != 2 || cfg.ReplicateTimeout != 90*time.Second || cfg.ReplicateBodyBytes != 2097152 {
+		t.Fatalf("config=%+v", cfg)
+	}
+	delete(values, "GATEWAY_PUBLIC_BASE_URL")
+	_, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err == nil || strings.Contains(err.Error(), "provider-secret") {
+		t.Fatalf("error=%v", err)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {

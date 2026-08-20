@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
+	"github.com/nativegatewayhq/gateway/internal/jobs"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/observability"
@@ -29,8 +31,10 @@ import (
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
+	replicateProtocol "github.com/nativegatewayhq/gateway/protocols/replicate"
 	"github.com/nativegatewayhq/gateway/providers/google"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
+	replicateProvider "github.com/nativegatewayhq/gateway/providers/replicate"
 	"github.com/nativegatewayhq/gateway/providers/xai"
 )
 
@@ -149,7 +153,11 @@ func run(stdout, stderr io.Writer) int {
 		return nil
 	}
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
-	imageModels := imageoperation.DefaultRegistry()
+	imageModels, err := imageoperation.DefaultRegistryWithReplicate(cfg.ReplicateModels)
+	if err != nil {
+		logger.Error("gateway model registry initialization failed")
+		return 1
+	}
 	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
@@ -157,6 +165,7 @@ func run(stdout, stderr io.Writer) int {
 		providercredentials.XAI:    xAIExecutor,
 	}
 	var chargeBilling openaiProtocol.Billing
+	var billingService *chargebilling.Service
 	var reconciliationWorker *reconciliation.Worker
 	if cfg.BillingMode == config.BillingRequired {
 		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
@@ -164,7 +173,8 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway pricing initialization failed")
 			return 1
 		}
-		billingService, billingErr := chargebilling.NewServiceWithControls(pool, priceEstimator, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool), cfg.ReplayBodyBytes)
+		var billingErr error
+		billingService, billingErr = chargebilling.NewServiceWithControls(pool, priceEstimator, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool), cfg.ReplayBodyBytes)
 		if billingErr != nil {
 			logger.Error("gateway billing initialization failed")
 			return 1
@@ -209,6 +219,35 @@ func run(stdout, stderr io.Writer) int {
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
+	var replicateHandler http.Handler
+	var asyncWorker *jobs.Worker
+	if cfg.ReplicateEnabled {
+		replicateAdapter, replicateErr := replicateProvider.New(replicateProvider.Config{Endpoint: cfg.ReplicateEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.ReplicateTimeout, MaximumBodyBytes: cfg.ReplicateBodyBytes}, providerCredentialRegistry)
+		if replicateErr != nil {
+			logger.Error("gateway Replicate provider initialization failed")
+			return 1
+		}
+		jobRepository, repositoryErr := jobs.NewRepository(pool, cfg.ReplayBodyBytes)
+		if repositoryErr != nil {
+			logger.Error("gateway Job repository initialization failed")
+			return 1
+		}
+		jobService, serviceErr := jobs.NewService(jobRepository, map[string]jobs.Provider{"replicate": replicateAdapter}, jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval}, "gateway-submit")
+		if serviceErr != nil {
+			logger.Error("gateway Job service initialization failed")
+			return 1
+		}
+		jobService.SetTelemetry(telemetryRuntime.Recorder)
+		workerConfig := jobs.WorkerConfig{Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval, BaseBackoff: cfg.ReconcileBackoff, MaximumBackoff: cfg.ReconcileMaxBackoff, BatchSize: cfg.ReconcileBatchSize, MaximumAttempts: cfg.ReconcileMaxAttempts}
+		asyncWorker, serviceErr = jobs.NewWorker(jobRepository, map[string]jobs.Provider{"replicate": replicateAdapter}, billingService, workerConfig, "gateway-job-worker")
+		if serviceErr != nil {
+			logger.Error("gateway Job worker initialization failed")
+			return 1
+		}
+		asyncWorker.SetTelemetry(telemetryRuntime.Recorder)
+		replicateHandler = replicateProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.ReplicateBodyBytes, cfg.PublicBaseURL)
+		readinessChecks = append(readinessChecks, jobRepository.Ready)
+	}
 	clientIPResolver, resolverErr := clientip.New(cfg.TrustedProxyPrefixes)
 	if resolverErr != nil {
 		logger.Error("gateway client IP resolver initialization failed")
@@ -217,15 +256,33 @@ func run(stdout, stderr io.Writer) int {
 
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
+	workerCount := 0
+	workerFinished := make(chan struct{}, 2)
 	if reconciliationWorker != nil {
+		workerCount++
 		go func() {
-			defer close(workerDone)
+			defer func() { workerFinished <- struct{}{} }()
 			reconciliationWorker.Run(workerCtx, func(err error) {
 				logger.Warn("reconciliation cycle failed", "category", "worker_cycle_failed")
 			})
 		}()
-	} else {
+	}
+	if asyncWorker != nil {
+		workerCount++
+		go func() {
+			defer func() { workerFinished <- struct{}{} }()
+			asyncWorker.Run(workerCtx, func(error) { logger.Warn("asynchronous Job cycle failed", "category", "worker_cycle_failed") })
+		}()
+	}
+	if workerCount == 0 {
 		close(workerDone)
+	} else {
+		go func() {
+			for range workerCount {
+				<-workerFinished
+			}
+			close(workerDone)
+		}()
 	}
 	err = app.Run(ctx, cfg, logger, app.Dependencies{
 		Ready:               ready,
@@ -234,6 +291,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIImages:        openAIImagesHandler,
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
+		Replicate:           replicateHandler,
 		ClientIPResolver:    clientIPResolver,
 		Telemetry:           telemetryRuntime.Recorder,
 		TracePropagator:     telemetryRuntime.Propagator,
