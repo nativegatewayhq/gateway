@@ -212,7 +212,7 @@ make integration-test
 
 ## 검증 증거
 
-- 구현 commit: `9ec9db5` (signed ingress, HMAC-keyed callback capability, additive migration, durable replay/CAS, runtime wiring, telemetry와 운영 문서).
+- 구현 commits: `9ec9db5` (signed ingress, HMAC-keyed callback capability, additive migration, durable replay/CAS, runtime wiring, telemetry와 운영 문서), `f3db3a8` (병렬 integration package의 fresh-schema migration advisory-lock 직렬화).
 - signature: exact raw body, `webhook-id`/`webhook-timestamp`/space-delimited `v1` signatures, active/previous `whsec_` secret, stale/future timestamp 및 duplicate header rejection을 단위 테스트로 검증함.
 - callback 경계: HTTPS public base, server-owned `completed` filter, per-Job random token의 keyed digest만 저장, client webhook 거부와 public response/log/metric route redaction을 검증함.
 - durable ingress: early delivery 503 retry, expired/wrong token, Provider/channel/Prediction mismatch, delivery replay와 append-only schema를 실제 PostgreSQL에서 검증함.
@@ -221,7 +221,7 @@ make integration-test
 - 로컬 검증: `make check` 통과.
 - 통합 검증: Compose PostgreSQL/Redis에서 migration, Job, billing, Replicate/fal/OpenAI/Gemini 회귀를 포함한 `make integration-test` 통과.
 - PR: https://github.com/nativegatewayhq/gateway/pull/32
-- CI: GitHub Actions `check`(run `32381415828`) 및 `Plan policy / validate`(run `32381416110`) 통과.
+- CI: GitHub Actions `check`(run `32382118800`) 및 `Plan policy / validate`(run `32382118758`) 통과.
 
 ## Rollback 계획
 
