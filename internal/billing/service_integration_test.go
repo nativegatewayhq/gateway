@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
@@ -60,7 +61,9 @@ func billingFixture(t *testing.T, balance int64) (*Service, *pgxpool.Pool) {
 	t.Helper()
 	pool := billingPool(t)
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `INSERT INTO organizations(id,name,slug) VALUES('org_billing','Billing','billing'); INSERT INTO projects(id,organization_id,name,slug) VALUES('project_billing','org_billing','Billing project','billing')`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO organizations(id,name,slug) VALUES('org_billing','Billing','billing');
+		INSERT INTO projects(id,organization_id,name,slug) VALUES('project_billing','org_billing','Billing project','billing');
+		INSERT INTO service_api_keys(id,name,key_digest,key_prefix,project_id) VALUES('key_billing','Billing key',decode(repeat('11',32),'hex'),'ngw_sk_test','project_billing')`); err != nil {
 		t.Fatal(err)
 	}
 	wallet := ledger.NewService(pool)
@@ -74,7 +77,7 @@ func billingFixture(t *testing.T, balance int64) (*Service, *pgxpool.Pool) {
 	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: openAIChannel, Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "billing-price"); err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(pool, estimator, wallet)
+	service, err := NewServiceWithQuota(pool, estimator, wallet, costquota.NewStore(pool), 32*1024*1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +85,220 @@ func billingFixture(t *testing.T, balance int64) (*Service, *pgxpool.Pool) {
 }
 
 func billableRequest(requestID string) BeginRequest {
-	return BeginRequest{RequestID: requestID, OrganizationID: "org_billing", ProjectID: "project_billing", Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", ChannelID: openAIChannel, Quantity: 2}
+	return BeginRequest{RequestID: requestID, OrganizationID: "org_billing", ProjectID: "project_billing", APIKeyID: "key_billing", Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", ChannelID: openAIChannel, Quantity: 2}
+}
+
+func TestHierarchicalQuotaReserveCaptureAndRollback(t *testing.T) {
+	service, pool := billingFixture(t, 10_000)
+	store := costquota.NewStore(pool)
+	ctx := context.Background()
+	policies := []costquota.PolicyInput{
+		{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Day, Limit: 500},
+		{ScopeType: costquota.Project, OrganizationID: "org_billing", ProjectID: "project_billing", Period: costquota.Day, Limit: 250},
+		{ScopeType: costquota.APIKey, OrganizationID: "org_billing", ProjectID: "project_billing", APIKeyID: "key_billing", Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", Period: costquota.Month, Limit: 250},
+	}
+	var organizationPolicyID string
+	for index := range policies {
+		policies[index].Actor, policies[index].Reason = "integration", "quota test"
+		policy, err := store.SetPolicy(ctx, policies[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policies[index].ScopeType == costquota.Organization {
+			organizationPolicyID = policy.ID
+		}
+	}
+	charge, err := service.Begin(ctx, billableRequest("quota-capture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Capture(ctx, charge.ID); err != nil {
+		t.Fatal(err)
+	}
+	denied := billableRequest("quota-denied")
+	denied.Quantity = 1
+	if _, err := service.Begin(ctx, denied); !errors.Is(err, costquota.ErrExceeded) {
+		t.Fatalf("quota error=%v", err)
+	} else {
+		var limited *costquota.LimitError
+		if !errors.As(err, &limited) || limited.ResetAt.After(time.Now().UTC().Add(48*time.Hour)) {
+			t.Fatalf("limit metadata=%+v", limited)
+		}
+	}
+	var available, reserved int64
+	if err := pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_billing'`).Scan(&available, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	if available != 9_800 || reserved != 0 {
+		t.Fatalf("wallet=%d/%d", available, reserved)
+	}
+	var chargeCount, ledgerCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM image_request_charges`).Scan(&chargeCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries`).Scan(&ledgerCount); err != nil {
+		t.Fatal(err)
+	}
+	if chargeCount != 1 || ledgerCount != 3 {
+		t.Fatalf("effects charges=%d ledger=%d", chargeCount, ledgerCount)
+	}
+	var allocationCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM cost_quota_allocations WHERE charge_id=$1 AND state='captured'`, charge.ID).Scan(&allocationCount); err != nil || allocationCount != 3 {
+		t.Fatalf("allocations=%d err=%v", allocationCount, err)
+	}
+	usage, err := store.Usage(ctx, organizationPolicyID, time.Now())
+	if err != nil || usage.Captured != 200 || usage.Reserved != 0 || usage.Limit != 500 {
+		t.Fatalf("usage=%+v err=%v", usage, err)
+	}
+}
+
+func TestConcurrentQuotaNeverExceedsLimit(t *testing.T) {
+	service, pool := billingFixture(t, 10_000)
+	store := costquota.NewStore(pool)
+	if _, err := store.SetPolicy(context.Background(), costquota.PolicyInput{ScopeType: costquota.Project, OrganizationID: "org_billing", ProjectID: "project_billing", Period: costquota.Day, Limit: 300, Actor: "integration", Reason: "concurrency"}); err != nil {
+		t.Fatal(err)
+	}
+	secondEstimator, _ := pricing.NewService(pool, 0)
+	secondService, _ := NewServiceWithQuota(pool, secondEstimator, ledger.NewService(pool), costquota.NewStore(pool), 32*1024*1024)
+	services := []*Service{service, secondService}
+	var group sync.WaitGroup
+	results := make(chan error, 8)
+	for index := 0; index < 8; index++ {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			request := billableRequest(fmt.Sprintf("quota-concurrent-%d", index))
+			request.Quantity = 1
+			_, err := services[index%len(services)].Begin(context.Background(), request)
+			results <- err
+		}(index)
+	}
+	group.Wait()
+	close(results)
+	succeeded, limited := 0, 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+		} else if errors.Is(err, costquota.ErrExceeded) {
+			limited++
+		} else {
+			t.Fatalf("unexpected error=%v", err)
+		}
+	}
+	if succeeded != 3 || limited != 5 {
+		t.Fatalf("succeeded=%d limited=%d", succeeded, limited)
+	}
+	var bucketReserved int64
+	if err := pool.QueryRow(context.Background(), `SELECT reserved FROM cost_quota_buckets`).Scan(&bucketReserved); err != nil || bucketReserved != 300 {
+		t.Fatalf("bucket=%d err=%v", bucketReserved, err)
+	}
+}
+
+func TestQuotaReleaseRestoresCapacity(t *testing.T) {
+	service, pool := billingFixture(t, 10_000)
+	store := costquota.NewStore(pool)
+	if _, err := store.SetPolicy(context.Background(), costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Day, Limit: 200, Actor: "integration", Reason: "release"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.Begin(context.Background(), billableRequest("quota-release-first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Release(context.Background(), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Begin(context.Background(), billableRequest("quota-release-second")); err != nil {
+		t.Fatal(err)
+	}
+	var reserved, captured int64
+	if err := pool.QueryRow(context.Background(), `SELECT reserved,captured FROM cost_quota_buckets`).Scan(&reserved, &captured); err != nil || reserved != 200 || captured != 0 {
+		t.Fatalf("bucket=%d/%d err=%v", reserved, captured, err)
+	}
+}
+
+func TestQuotaAndWalletReleaseEstimateDifference(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	if _, err := costquota.NewStore(pool).SetPolicy(context.Background(), costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Day, Limit: 200, Actor: "integration", Reason: "actual sale"}); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(context.Background(), billableRequest("quota-sale-difference"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := service.CompleteWithSale(context.Background(), charge.ID, 150, ResponseSnapshot{Status: 200, Headers: map[string][]string{}, Body: []byte(`{}`)})
+	if err != nil || completed.CapturedSale != 150 {
+		t.Fatalf("charge=%+v err=%v", completed, err)
+	}
+	var available, reserved, captured int64
+	if err := pool.QueryRow(context.Background(), `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_billing'`).Scan(&available, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT captured FROM cost_quota_buckets`).Scan(&captured); err != nil {
+		t.Fatal(err)
+	}
+	if available != 850 || reserved != 0 || captured != 150 {
+		t.Fatalf("wallet=%d/%d quota=%d", available, reserved, captured)
+	}
+	if _, err := service.CompleteWithSale(context.Background(), charge.ID, 150, ResponseSnapshot{Status: 200, Headers: map[string][]string{}, Body: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompleteWithSale(context.Background(), charge.ID, 149, ResponseSnapshot{Status: 200, Headers: map[string][]string{}, Body: []byte(`{}`)}); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("different actual retry=%v", err)
+	}
+}
+
+func TestQuotaSettlementSurvivesServiceRestart(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	if _, err := costquota.NewStore(pool).SetPolicy(context.Background(), costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Month, Limit: 500, Actor: "integration", Reason: "restart"}); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(context.Background(), billableRequest("quota-restart"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	estimator, _ := pricing.NewService(pool, 0)
+	restarted, err := NewServiceWithQuota(pool, estimator, ledger.NewService(pool), costquota.NewStore(pool), 32*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.Capture(context.Background(), charge.ID); err != nil {
+		t.Fatal(err)
+	}
+	var reserved, captured int64
+	if err := pool.QueryRow(context.Background(), `SELECT reserved,captured FROM cost_quota_buckets`).Scan(&reserved, &captured); err != nil || reserved != 0 || captured != 200 {
+		t.Fatalf("bucket=%d/%d err=%v", reserved, captured, err)
+	}
+}
+
+func TestQuotaPolicyAuditUpdateDisableAndOwnership(t *testing.T) {
+	_, pool := billingFixture(t, 1_000)
+	store := costquota.NewStore(pool)
+	input := costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Month, Limit: 500, Actor: "operator", Reason: "create"}
+	created, err := store.SetPolicy(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Limit, input.Reason = 700, "raise budget"
+	updated, err := store.SetPolicy(context.Background(), input)
+	if err != nil || updated.ID != created.ID || updated.Version != 2 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	invalid := input
+	invalid.ScopeType = costquota.Project
+	invalid.ProjectID = "project_other"
+	if _, err := store.SetPolicy(context.Background(), invalid); !errors.Is(err, costquota.ErrInvalidPolicy) {
+		t.Fatalf("ownership error=%v", err)
+	}
+	if err := store.DisablePolicy(context.Background(), created.ID, "operator", "retired"); err != nil {
+		t.Fatal(err)
+	}
+	var events int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM cost_quota_policy_events WHERE policy_id=$1`, created.ID).Scan(&events); err != nil || events != 3 {
+		t.Fatalf("events=%d err=%v", events, err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE cost_quota_policy_events SET reason='tampered' WHERE policy_id=$1`, created.ID); err == nil {
+		t.Fatal("audit event mutation succeeded")
+	}
 }
 
 func TestBeginAndCaptureAreAtomicAndIdempotent(t *testing.T) {
@@ -149,6 +365,9 @@ func TestReleaseAndBeginFailuresNeverCharge(t *testing.T) {
 func TestRequestConflictAndReconcilingSettlement(t *testing.T) {
 	service, pool := billingFixture(t, 1_000)
 	ctx := context.Background()
+	if _, err := costquota.NewStore(pool).SetPolicy(ctx, costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Day, Limit: 500, Actor: "integration", Reason: "reconciliation"}); err != nil {
+		t.Fatal(err)
+	}
 	charge, err := service.Begin(ctx, billableRequest("request-reconcile"))
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +382,10 @@ func TestRequestConflictAndReconcilingSettlement(t *testing.T) {
 	}
 	if _, err := service.Release(ctx, charge.ID); err != nil {
 		t.Fatal(err)
+	}
+	var quotaReserved int64
+	if err := pool.QueryRow(ctx, `SELECT reserved FROM cost_quota_buckets`).Scan(&quotaReserved); err != nil || quotaReserved != 0 {
+		t.Fatalf("quota reserved=%d err=%v", quotaReserved, err)
 	}
 	assertWalletAndCharge(t, pool, 1_000, 0, 1, "RELEASED")
 	if _, err := pool.Exec(ctx, `UPDATE image_request_charges SET reserved_sale=1 WHERE id=$1`, charge.ID); err == nil {
@@ -185,6 +408,9 @@ func TestBeginRollsBackWalletWhenChargeCreationFails(t *testing.T) {
 func TestIdempotencyReplayConflictAndSafeSnapshot(t *testing.T) {
 	service, pool := billingFixture(t, 1_000)
 	ctx := context.Background()
+	if _, err := costquota.NewStore(pool).SetPolicy(ctx, costquota.PolicyInput{ScopeType: costquota.Project, OrganizationID: "org_billing", ProjectID: "project_billing", Period: costquota.Month, Limit: 500, Actor: "integration", Reason: "idempotency"}); err != nil {
+		t.Fatal(err)
+	}
 	request := billableRequest("original-request")
 	request.IdempotencyKey = "client-idempotency-key"
 	request.RequestFingerprint = [32]byte{1, 2, 3}
@@ -213,6 +439,10 @@ func TestIdempotencyReplayConflictAndSafeSnapshot(t *testing.T) {
 	}
 	if !replayed.Replay || replayed.ID != charge.ID || replayed.Response.Status != 201 || string(replayed.Response.Body) != `{"native":"response"}` || replayed.Response.Headers["Retry-After"][0] != "2" {
 		t.Fatalf("replay=%+v", replayed)
+	}
+	var quotaAllocations int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM cost_quota_allocations WHERE charge_id=$1`, charge.ID).Scan(&quotaAllocations); err != nil || quotaAllocations != 1 {
+		t.Fatalf("quota allocations=%d err=%v", quotaAllocations, err)
 	}
 	routedRetry := retryRequest
 	routedRetry.ChannelID = "channel_00000000000000000000000000000002"

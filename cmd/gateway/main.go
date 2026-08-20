@@ -13,6 +13,7 @@ import (
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/config"
+	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
@@ -103,7 +104,7 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway pricing initialization failed")
 			return 1
 		}
-		billingService, billingErr := chargebilling.NewServiceWithLimit(pool, priceEstimator, ledger.NewService(pool), cfg.ReplayBodyBytes)
+		billingService, billingErr := chargebilling.NewServiceWithQuota(pool, priceEstimator, ledger.NewService(pool), costquota.NewStore(pool), cfg.ReplayBodyBytes)
 		if billingErr != nil {
 			logger.Error("gateway billing initialization failed")
 			return 1

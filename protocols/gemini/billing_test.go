@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
@@ -67,7 +70,7 @@ func (fake *geminiBillingFake) MarkReconciling(_ context.Context, _ string, obse
 func (*geminiBillingFake) MaximumResponseBytes() int64 { return 1024 }
 
 func billableGeminiHandler(fake *geminiBillingFake, executor *stubExecutor) *Handler {
-	return NewBillableHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), &stubAuthenticator{principal: apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test"}}, imageoperation.DefaultRegistry(), executor, 4096, fake)
+	return NewBillableHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), &stubAuthenticator{principal: apikey.Principal{APIKeyID: "key_test", OrganizationID: "org_test", ProjectID: "project_test"}}, imageoperation.DefaultRegistry(), executor, 4096, fake)
 }
 
 func TestBillableGeminiCapturesNativeResponse(t *testing.T) {
@@ -81,7 +84,7 @@ func TestBillableGeminiCapturesNativeResponse(t *testing.T) {
 	if response.Code != 200 || response.Body.String() != `{"image":true}` || response.Header().Get("X-Goog-Request-Id") != "google-1" || response.Header().Get("Set-Cookie") != "" {
 		t.Fatalf("response=%d %s headers=%v", response.Code, response.Body.String(), response.Header())
 	}
-	if fake.beginRequest.Protocol != "gemini" || fake.beginRequest.Operation != "image.generate" || fake.beginRequest.Model != "gemini-image" || fake.beginRequest.Size != "16:9" || fake.beginRequest.Quality != "2K" || fake.beginRequest.Quantity != 1 || fake.beginRequest.IdempotencyKey != "gemini-key" || fake.beginRequest.RequestFingerprint == ([32]byte{}) {
+	if fake.beginRequest.APIKeyID != "key_test" || fake.beginRequest.Protocol != "gemini" || fake.beginRequest.Operation != "image.generate" || fake.beginRequest.Model != "gemini-image" || fake.beginRequest.Size != "16:9" || fake.beginRequest.Quality != "2K" || fake.beginRequest.Quantity != 1 || fake.beginRequest.IdempotencyKey != "gemini-key" || fake.beginRequest.RequestFingerprint == ([32]byte{}) {
 		t.Fatalf("begin=%+v", fake.beginRequest)
 	}
 	if !fake.completeOK || strings.Join(fake.events, ",") != "begin,complete" || executor.calls != 1 {
@@ -207,6 +210,17 @@ func TestBillableGeminiCredentialUnavailableReleases(t *testing.T) {
 	billableGeminiHandler(fake, executor).ServeHTTP(response, geminiRequest(strings.NewReader(`{"contents":[]}`)))
 	if response.Code != http.StatusServiceUnavailable || fake.completeOK || strings.Join(fake.events, ",") != "begin,complete" {
 		t.Fatalf("response=%d events=%v", response.Code, fake.events)
+	}
+}
+
+func TestBillableGeminiMapsCostQuotaBeforeProvider(t *testing.T) {
+	reset := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	fake := &geminiBillingFake{beginErr: &costquota.LimitError{ScopeType: costquota.APIKey, ResetAt: reset}}
+	executor := &stubExecutor{}
+	response := httptest.NewRecorder()
+	billableGeminiHandler(fake, executor).ServeHTTP(response, geminiRequest(strings.NewReader(`{"contents":[]}`)))
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "RESOURCE_EXHAUSTED") || response.Header().Get("X-Quota-Reset") != strconv.FormatInt(reset.Unix(), 10) || executor.calls != 0 {
+		t.Fatalf("response=%d body=%s headers=%v calls=%d", response.Code, response.Body.String(), response.Header(), executor.calls)
 	}
 }
 

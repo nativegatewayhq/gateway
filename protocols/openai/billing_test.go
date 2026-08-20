@@ -1,18 +1,21 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
@@ -86,7 +89,7 @@ func (fake *billingFake) MaximumResponseBytes() int64 {
 
 func billingAuth() Authenticator {
 	return authFunc(func(context.Context, string) (apikey.Principal, error) {
-		return apikey.Principal{OrganizationID: "org_billing", ProjectID: "project_billing"}, nil
+		return apikey.Principal{APIKeyID: "key_billing", OrganizationID: "org_billing", ProjectID: "project_billing"}, nil
 	})
 }
 
@@ -106,7 +109,7 @@ func TestBillableImagesCapturesSuccessBeforeReturningNativeBody(t *testing.T) {
 		t.Fatalf("events=%v", fake.events)
 	}
 	request := fake.beginRequest
-	if request.OrganizationID != "org_billing" || request.ProjectID != "project_billing" || request.RequestID != "client-request" || request.ChannelID != "channel_00000000000000000000000000000001" || request.Quantity != 2 || request.Size != "1024x1024" || request.Quality != "high" {
+	if request.OrganizationID != "org_billing" || request.ProjectID != "project_billing" || request.APIKeyID != "key_billing" || request.RequestID != "client-request" || request.ChannelID != "channel_00000000000000000000000000000001" || request.Quantity != 2 || request.Size != "1024x1024" || request.Quality != "high" {
 		t.Fatalf("begin request=%+v", request)
 	}
 }
@@ -306,6 +309,23 @@ func TestBillableImagesFailsBeforeProviderAndReconcilesSettlement(t *testing.T) 
 	response := billableImageRequest(handler, `{"model":"gpt-image-1"}`)
 	if response.Code != 503 || strings.Contains(response.Body.String(), "provider-success") || strings.Join(fake.events, ",") != "begin,capture,reconciling" {
 		t.Fatalf("settlement failure=%d events=%v body=%s", response.Code, fake.events, response.Body.String())
+	}
+}
+
+func TestBillableImagesMapsCostQuotaBeforeProvider(t *testing.T) {
+	providerCalls := 0
+	var logs bytes.Buffer
+	reset := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	fake := &billingFake{beginErr: &costquota.LimitError{ScopeType: costquota.Project, Period: costquota.Day, ResetAt: reset, APIKeyID: "key_billing", ProjectID: "project_billing"}}
+	handler := NewBillableImagesHandler(slog.New(slog.NewTextHandler(&logs, nil)), billingAuth(), testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+	}, 1024, fake)
+	response := billableImageRequest(handler, `{"model":"gpt-image-1"}`)
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "quota_exceeded") || response.Header().Get("X-Quota-Reset") != strconv.FormatInt(reset.Unix(), 10) || providerCalls != 0 {
+		t.Fatalf("response=%d body=%s headers=%v calls=%d", response.Code, response.Body.String(), response.Header(), providerCalls)
+	}
+	if strings.Contains(response.Body.String(), "key_billing") || strings.Contains(response.Body.String(), "project_billing") || strings.Contains(response.Body.String(), "project") || !strings.Contains(logs.String(), "category=quota_exceeded") || !strings.Contains(logs.String(), "scope_type=project") {
+		t.Fatalf("unsafe response/log body=%s logs=%s", response.Body.String(), logs.String())
 	}
 }
 

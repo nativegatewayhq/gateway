@@ -118,6 +118,26 @@ Omitting `--allow-cidr` allows all source networks for backward compatibility. A
 
 By default the Gateway uses the direct TCP peer and ignores all forwarding headers. Behind an ingress, configure only the ingress egress networks, for example `GATEWAY_TRUSTED_PROXY_CIDRS=10.20.0.0/16`. Requests from those trusted peers must contain exactly one of RFC 7239 `Forwarded` or `X-Forwarded-For`; the Gateway strips trusted hops right-to-left. Missing, malformed, or ambiguous chains fail closed for restricted Keys while health endpoints and unrestricted Keys remain available. Never set this value to arbitrary client networks or `0.0.0.0/0`.
 
+## Hierarchical cost quotas
+
+Billing-required deployments can apply UTC calendar-day or calendar-month sale-cost limits to an organization, project, API Key, or exact logical model. Policies are additive: every matching organization, project, Key, and model policy must have capacity. A request reserves its maximum sale price in every matching bucket in the same PostgreSQL transaction as its Wallet reservation and charge; success captures it, known failure releases it, and unknown Provider outcomes retain it until reconciliation.
+
+Use the operator CLI with integer `USD_TICKS` amounts. An organization-wide daily policy is:
+
+```bash
+go run ./cmd/gateway-quota \
+  -scope organization \
+  -organization-id org_example \
+  -period day \
+  -limit 1000000 \
+  -actor operator@example.com \
+  -reason 'daily managed-service budget'
+```
+
+An API Key and logical-model monthly policy additionally supplies `-project-id`, `-api-key-id`, `-protocol`, `-operation`, and `-model`. Repeat the same dimension to update its limit; the returned `quota_...` ID remains stable and an append-only audit event records the new version. Disable it with `-action disable -policy-id quota_... -actor ... -reason ...`.
+
+Quota exhaustion returns native `429` (`quota_exceeded` for OpenAI, `RESOURCE_EXHAUSTED` for Gemini), `Retry-After`, and `X-Quota-Reset` before Provider dispatch. Responses do not disclose budget amounts or remaining spend. Deployments without active policies remain unlimited, and billing-disabled BYOK mode does not consult quota tables.
+
 ## Provider credentials
 
 Provider credentials are optional until their adapters are enabled. Inject them through environment variables backed by your deployment platform's secret manager; never commit them to source files or Compose configuration.
