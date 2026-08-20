@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-022
 title: Phase 1 Provider Channel Spend Caps
-status: in_progress
+status: completed
 created_at: 2026-08-20T18:37:44+09:00
-updated_at: 2026-08-20T18:37:44+09:00
+updated_at: 2026-08-20T18:56:30+09:00
 owners:
   - gateway
 initiative: phase-1-provider-spend-controls
@@ -184,23 +184,31 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] policy 없는 channel이 unlimited로 동일하게 동작함
-- [ ] day/month channel cost cap이 UTC 기준으로 적용됨
-- [ ] 동시 요청에서도 reserved+captured가 limit을 초과하지 않음
-- [ ] Wallet, user quota와 channel cap reserve/rollback이 원자적임
-- [ ] exhausted candidate가 dispatch 없이 skip되고 다음 candidate로 fallback함
-- [ ] 모든 candidate 소진 시 Provider 호출과 금전 effect가 없음
-- [ ] actual cost 차액, failure와 reconciliation 정산이 정확히 한 번 수행됨
-- [ ] idempotency replay와 process restart가 cap을 중복 소비하지 않음
-- [ ] 정책 CLI, append-only audit, ownership과 usage 조회가 검증됨
-- [ ] 내부 원가·limit·credential·request content가 response/log에 노출되지 않음
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] policy 없는 channel이 unlimited로 동일하게 동작함
+- [x] day/month channel cost cap이 UTC 기준으로 적용됨
+- [x] 동시 요청에서도 reserved+captured가 limit을 초과하지 않음
+- [x] Wallet, user quota와 channel cap reserve/rollback이 원자적임
+- [x] exhausted candidate가 dispatch 없이 skip되고 다음 candidate로 fallback함
+- [x] 모든 candidate 소진 시 Provider 호출과 금전 effect가 없음
+- [x] actual cost 차액, failure와 reconciliation 정산이 정확히 한 번 수행됨
+- [x] idempotency replay와 process restart가 cap을 중복 소비하지 않음
+- [x] 정책 CLI, append-only audit, ownership과 usage 조회가 검증됨
+- [x] 내부 원가·limit·credential·request content가 response/log에 노출되지 않음
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `4eac31c`
+- PR: `https://github.com/nativegatewayhq/gateway/pull/21`
+- 로컬 release gate: `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과
+- 로컬 통합 검증: PostgreSQL `127.0.0.1:55433`, Redis `127.0.0.1:56379`를 사용한 `make integration-test` 통과
+- cap 원자성: UTC day/month 정책과 2개 Billing service의 8개 동시 요청에서 limit 이내 3개만 예약됨을 실제 PostgreSQL에서 검증
+- 정산: actual cost 차액, capture/release, idempotent retry, unknown reconciliation과 process restart 후 bucket/Wallet/quota 일치 검증
+- fallback: OpenAI/Gemini 첫 channel 소진 시 두 번째 channel dispatch, 전체 소진 시 Provider 0회와 native provider-unavailable 검증
+- 운영·보안: `gateway-spend-cap` lifecycle, append-only audit, ownership/usage 조회 및 response/log redaction 검증
+- GitHub Actions: `check` pass (`32356165223`), `validate` pass (`32356209384`)
 
 ## Rollback 계획
 
