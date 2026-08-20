@@ -4,7 +4,7 @@ An open-source multimodal AI API gateway that preserves official provider SDKs a
 
 ## Status
 
-Phase 0 authentication foundation. The process exposes Gateway-owned health endpoints and uses PostgreSQL for service API key authentication. Provider-native APIs, billing, and routing are intentionally not implemented yet.
+Phase 0 native protocol validation. The process exposes health endpoints, PostgreSQL-backed service API key authentication, and the non-streaming Gemini `generateContent` facade. Billing, routing, and other provider APIs are intentionally not implemented yet.
 
 ## Development workflow
 
@@ -55,6 +55,8 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_GOOGLE_API_KEY` | unset | Optional Google upstream credential |
 | `GATEWAY_OPENAI_API_KEY` | unset | Optional OpenAI upstream credential |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
+| `GATEWAY_GOOGLE_REQUEST_TIMEOUT` | `2m` | Google request timeout; maximum `10m` |
+| `GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES` | `33554432` | Positive Gemini body limit up to 32 MiB |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
@@ -69,6 +71,43 @@ export GATEWAY_XAI_API_KEY='...'
 ```
 
 Provider credentials are held in an opaque, provider-scoped registry. They are not placed in the general process configuration and are never returned through an API. Outbound request preparation clones the request, removes inbound `Authorization`, API-key headers, cookies, and sensitive query parameters, then applies only the credential scoped to the selected provider. Missing credentials and provider-scope mismatches fail before any network request.
+
+## Gemini native API
+
+The Gateway supports the non-streaming Gemini Developer API route:
+
+```text
+POST /v1beta/models/{model}:generateContent
+```
+
+Configure a Google provider credential, then use a service API key with the official Google Gen AI SDK:
+
+```bash
+export GATEWAY_GOOGLE_API_KEY='your-google-provider-key'
+```
+
+```python
+from google import genai
+from google.genai import types
+
+client = genai.Client(
+    api_key="SERVICE_API_KEY",
+    http_options=types.HttpOptions(
+        base_url="http://127.0.0.1:8080",
+        api_version="v1beta",
+    ),
+)
+
+response = client.models.generate_content(
+    model="gemini-image-model",
+    contents="Draw a cat astronaut",
+    config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
+)
+```
+
+The Gateway authenticates the service key, removes it from the outbound request, and applies only `GATEWAY_GOOGLE_API_KEY` to the fixed Google origin. Google success and error JSON bodies are passed through without schema conversion. Redirects and automatic retries are disabled.
+
+Streaming, model listing, file upload, billing, managed image storage, and cross-provider conversion are not included in this phase. Official Python and JavaScript SDK version compatibility will be maintained in the separate conformance repository.
 
 ## Create a service API key
 

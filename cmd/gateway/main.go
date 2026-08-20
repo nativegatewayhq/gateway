@@ -8,11 +8,14 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/app"
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/observability"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/protocols/gemini"
+	"github.com/nativegatewayhq/gateway/providers/google"
 )
 
 func main() {
@@ -44,10 +47,14 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway database migration failed")
 		return 1
 	}
+	apiKeyAuthenticator := apikey.NewService(apikey.NewPostgresStore(pool))
+	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
+	geminiHandler := gemini.NewHandler(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes)
 
 	if err := app.Run(ctx, cfg, logger, app.Dependencies{
 		Ready:               pool.Ping,
 		ProviderCredentials: providerCredentialRegistry,
+		Gemini:              geminiHandler,
 	}); err != nil {
 		logger.Error("gateway stopped with error", "error", err.Error())
 		return 1

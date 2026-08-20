@@ -37,6 +37,22 @@ func TestHealthEndpoints(t *testing.T) {
 	}
 }
 
+func TestGeminiRouteIsMountedWithoutProtectingHealth(t *testing.T) {
+	t.Parallel()
+	gemini := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+	})
+	handler := NewHandler(discardLogger(), nil, Routes{Gemini: gemini})
+	response := serveRequest(t, handler, http.MethodPost, "/v1beta/models/gemini-image:generateContent", "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("Gemini status = %d", response.Code)
+	}
+	health := serveRequest(t, handler, http.MethodGet, "/health/live", "")
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d", health.Code)
+	}
+}
+
 func TestReadinessFailure(t *testing.T) {
 	t.Parallel()
 

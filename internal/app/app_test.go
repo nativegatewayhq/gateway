@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +33,10 @@ func TestRunFailsWhenPortIsInUse(t *testing.T) {
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
-	err = Run(context.Background(), cfg, observability.NewLogger(&bytes.Buffer{}, slog.LevelInfo), Dependencies{ProviderCredentials: registry})
+	err = Run(context.Background(), cfg, observability.NewLogger(&bytes.Buffer{}, slog.LevelInfo), Dependencies{
+		ProviderCredentials: registry,
+		Gemini:              http.NotFoundHandler(),
+	})
 	if err == nil || !strings.Contains(err.Error(), "listen failed") {
 		t.Fatalf("Run() error = %v, want listen error", err)
 	}
