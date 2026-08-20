@@ -93,3 +93,27 @@ func TestAnthropicConfigurationRequiresLimitsWithBilling(t *testing.T) {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
 }
+
+func TestOpenAIChatRoutesJSONDerivesModelsAndLimits(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":            "postgres://test",
+		"GATEWAY_BILLING_MODE":            "required",
+		"GATEWAY_OPENAI_CHAT_ROUTES_JSON": `[{"model":"logical-chat","owner":"gateway","policy":"priority","maximum_input_tokens":4096,"maximum_output_tokens":512,"candidates":[{"id":"candidate_openai","provider":"openai","provider_model":"gpt-4.1","channel_id":"channel_00000000000000000000000000000001","enabled":true,"streaming":true,"tools":true,"json_mode":true}]}]`,
+	}
+	lookup := func(key string) (string, bool) { value, ok := values[key]; return value, ok }
+	cfg, err := Load(lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.OpenAIChatRoutes) != 1 || len(cfg.OpenAIChatModels) != 1 || cfg.OpenAIChatModels[0] != "logical-chat" || cfg.OpenAIChatModelLimits["logical-chat"].MaximumOutputTokens != 512 {
+		t.Fatalf("routes=%+v models=%v", cfg.OpenAIChatRoutes, cfg.OpenAIChatModels)
+	}
+}
+
+func TestOpenAIChatRoutesJSONRejectsLegacyCombination(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_OPENAI_CHAT_MODELS": "gpt-4.1", "GATEWAY_OPENAI_CHAT_ROUTES_JSON": `[{"model":"logical"}]`}
+	lookup := func(key string) (string, bool) { value, ok := values[key]; return value, ok }
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("combined route configuration accepted")
+	}
+}

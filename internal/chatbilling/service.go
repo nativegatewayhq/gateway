@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,6 +37,9 @@ type BeginRequest struct {
 	DeliveryMode                                                                     string
 	Fingerprint                                                                      [32]byte
 	MaximumInputTokens, MaximumOutputTokens                                          int64
+	CandidateID, Provider, ProviderModel, RoutingPolicy                              string
+	RouteRank                                                                        int
+	PriceEvaluatedAt                                                                 time.Time
 }
 type Charge struct {
 	ID, RequestID, OrganizationID, ProjectID, APIKeyID, Model, ChannelID, PriceID, Currency, ReservationID, State, IdempotencyKey string
@@ -49,6 +53,9 @@ type Charge struct {
 	DeliveryMode                                                                                                                  string
 	StreamCompleted                                                                                                               bool
 	Protocol, Operation                                                                                                           string
+	CandidateID, Provider, ProviderModel, RoutingPolicy                                                                           string
+	RouteRank                                                                                                                     int
+	PriceEvaluatedAt                                                                                                              time.Time
 }
 type Estimator interface {
 	EstimateInTx(context.Context, pgx.Tx, chatpricing.Request) (chatpricing.Estimate, error)
@@ -86,6 +93,28 @@ func NewWithControls(pool *pgxpool.Pool, estimator Estimator, wallet Wallet, quo
 		return nil, ErrInvalid
 	}
 	return &Service{pool: pool, estimator: estimator, wallet: wallet, quota: quota, spendCap: spendCap, entropy: rand.Reader, maximumResponseBytes: maximumResponseBytes}, nil
+}
+
+func (s *Service) Quote(ctx context.Context, r BeginRequest) (chatpricing.Estimate, error) {
+	if r.Protocol == "" {
+		r.Protocol = "openai"
+	}
+	if r.Operation == "" {
+		r.Operation = "chat.completions"
+	}
+	if r.PriceEvaluatedAt.IsZero() {
+		r.PriceEvaluatedAt = time.Now().UTC()
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return chatpricing.Estimate{}, err
+	}
+	defer tx.Rollback(ctx)
+	estimate, err := s.estimator.EstimateInTx(ctx, tx, chatpricing.Request{ChannelID: r.ChannelID, Protocol: r.Protocol, Operation: r.Operation, Model: r.Model, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens, At: r.PriceEvaluatedAt})
+	if err != nil {
+		return chatpricing.Estimate{}, err
+	}
+	return estimate, tx.Commit(ctx)
 }
 func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 	if r.Operation == "" {
@@ -129,7 +158,7 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 		existing.Replay = true
 		return existing, nil
 	}
-	estimate, err := s.estimator.EstimateInTx(ctx, tx, chatpricing.Request{ChannelID: r.ChannelID, Protocol: r.Protocol, Operation: r.Operation, Model: r.Model, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens})
+	estimate, err := s.estimator.EstimateInTx(ctx, tx, chatpricing.Request{ChannelID: r.ChannelID, Protocol: r.Protocol, Operation: r.Operation, Model: r.Model, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens, At: r.PriceEvaluatedAt})
 	if err != nil {
 		return Charge{}, err
 	}
@@ -150,13 +179,13 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 	if err != nil {
 		return Charge{}, err
 	}
-	charge := Charge{ID: id, Protocol: r.Protocol, Operation: r.Operation, RequestID: r.RequestID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID, APIKeyID: r.APIKeyID, Model: r.Model, ChannelID: r.ChannelID, PriceID: estimate.Price.ID, Currency: estimate.Price.Currency, ReservationID: reservation.Reservation.ID, State: "RESERVED", IdempotencyKey: r.IdempotencyKey, Fingerprint: r.Fingerprint, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens, EstimatedCost: estimate.EstimatedCost, ReservedSale: estimate.MaximumSale, Rates: estimate.Price.Rates, DeliveryMode: r.DeliveryMode}
+	charge := Charge{ID: id, Protocol: r.Protocol, Operation: r.Operation, RequestID: r.RequestID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID, APIKeyID: r.APIKeyID, Model: r.Model, ChannelID: r.ChannelID, PriceID: estimate.Price.ID, Currency: estimate.Price.Currency, ReservationID: reservation.Reservation.ID, State: "RESERVED", IdempotencyKey: r.IdempotencyKey, Fingerprint: r.Fingerprint, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens, EstimatedCost: estimate.EstimatedCost, ReservedSale: estimate.MaximumSale, Rates: estimate.Price.Rates, DeliveryMode: r.DeliveryMode, CandidateID: r.CandidateID, Provider: r.Provider, ProviderModel: r.ProviderModel, RoutingPolicy: r.RoutingPolicy, RouteRank: r.RouteRank, PriceEvaluatedAt: r.PriceEvaluatedAt}
 	var key, fingerprint any
 	if r.IdempotencyKey != "" {
 		key = r.IdempotencyKey
 		fingerprint = r.Fingerprint[:]
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_request_charges(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,channel_id,price_id,maximum_input_tokens,maximum_output_tokens,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint,delivery_mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'RESERVED',$17,$18,$19)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.APIKeyID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.MaximumInputTokens, charge.MaximumOutputTokens, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, key, fingerprint, charge.DeliveryMode)
+	_, err = tx.Exec(ctx, `INSERT INTO chat_request_charges(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,channel_id,price_id,maximum_input_tokens,maximum_output_tokens,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint,delivery_mode,candidate_id,provider,provider_model,routing_policy,route_rank,price_evaluated_at,route_evidence_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'RESERVED',$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.APIKeyID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.MaximumInputTokens, charge.MaximumOutputTokens, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, key, fingerprint, charge.DeliveryMode, nullableRoute(charge.CandidateID), nullableRoute(charge.Provider), nullableRoute(charge.ProviderModel), nullableRoute(charge.RoutingPolicy), nullableRouteRank(charge.CandidateID, charge.RouteRank), nullableTime(charge.PriceEvaluatedAt), nullableRouteVersion(charge.CandidateID))
 	if err != nil {
 		return Charge{}, err
 	}
@@ -548,14 +577,14 @@ func (s *Service) snapshot(v billing.ResponseSnapshot) (billing.ResponseSnapshot
 	return c, h, sha256.Sum256(c.Body), nil
 }
 
-const chargeSelect = `SELECT c.id,c.protocol,c.operation,c.request_id,c.organization_id,c.project_id,c.api_key_id,c.model,c.channel_id,c.price_id,c.currency,c.reservation_id,c.state,c.idempotency_key,c.request_fingerprint,c.maximum_input_tokens,c.maximum_output_tokens,c.estimated_cost,c.reserved_sale,c.actual_cost,c.captured_sale,c.response_snapshot_version,c.response_status,c.response_headers,c.response_body,c.delivery_mode,c.stream_completed,p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.cache_write_cost_per_million,p.cache_write_sale_per_million,p.output_cost_per_million,p.output_sale_per_million FROM chat_request_charges c JOIN chat_token_prices p ON p.id=c.price_id`
+const chargeSelect = `SELECT c.id,c.protocol,c.operation,c.request_id,c.organization_id,c.project_id,c.api_key_id,c.model,c.channel_id,c.price_id,c.currency,c.reservation_id,c.state,c.idempotency_key,c.request_fingerprint,c.maximum_input_tokens,c.maximum_output_tokens,c.estimated_cost,c.reserved_sale,c.actual_cost,c.captured_sale,c.response_snapshot_version,c.response_status,c.response_headers,c.response_body,c.delivery_mode,c.stream_completed,COALESCE(c.candidate_id,''),COALESCE(c.provider,''),COALESCE(c.provider_model,''),COALESCE(c.routing_policy,''),COALESCE(c.route_rank,0),COALESCE(c.price_evaluated_at,'epoch'::timestamptz),p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.cache_write_cost_per_million,p.cache_write_sale_per_million,p.output_cost_per_million,p.output_sale_per_million FROM chat_request_charges c JOIN chat_token_prices p ON p.id=c.price_id`
 
 func scan(row pgx.Row) (Charge, bool, error) {
 	var c Charge
 	var key *string
 	var fp, headers, body []byte
 	var status *int
-	err := row.Scan(&c.ID, &c.Protocol, &c.Operation, &c.RequestID, &c.OrganizationID, &c.ProjectID, &c.APIKeyID, &c.Model, &c.ChannelID, &c.PriceID, &c.Currency, &c.ReservationID, &c.State, &key, &fp, &c.MaximumInputTokens, &c.MaximumOutputTokens, &c.EstimatedCost, &c.ReservedSale, &c.ActualCost, &c.CapturedSale, &c.SnapshotVersion, &status, &headers, &body, &c.DeliveryMode, &c.StreamCompleted, &c.Rates.InputCost, &c.Rates.InputSale, &c.Rates.CachedInputCost, &c.Rates.CachedInputSale, &c.Rates.CacheWriteCost, &c.Rates.CacheWriteSale, &c.Rates.OutputCost, &c.Rates.OutputSale)
+	err := row.Scan(&c.ID, &c.Protocol, &c.Operation, &c.RequestID, &c.OrganizationID, &c.ProjectID, &c.APIKeyID, &c.Model, &c.ChannelID, &c.PriceID, &c.Currency, &c.ReservationID, &c.State, &key, &fp, &c.MaximumInputTokens, &c.MaximumOutputTokens, &c.EstimatedCost, &c.ReservedSale, &c.ActualCost, &c.CapturedSale, &c.SnapshotVersion, &status, &headers, &body, &c.DeliveryMode, &c.StreamCompleted, &c.CandidateID, &c.Provider, &c.ProviderModel, &c.RoutingPolicy, &c.RouteRank, &c.PriceEvaluatedAt, &c.Rates.InputCost, &c.Rates.InputSale, &c.Rates.CachedInputCost, &c.Rates.CachedInputSale, &c.Rates.CacheWriteCost, &c.Rates.CacheWriteSale, &c.Rates.OutputCost, &c.Rates.OutputSale)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Charge{}, false, nil
 	}
@@ -590,14 +619,47 @@ func loadID(ctx context.Context, tx pgx.Tx, id string, lock bool) (Charge, bool,
 }
 func validBegin(r BeginRequest) bool {
 	has := r.Fingerprint != ([32]byte{})
-	return ((r.Protocol == "openai" && (r.Operation == "chat.completions" || r.Operation == "responses.create")) || (r.Protocol == "gemini" && r.Operation == "chat.completions") || (r.Protocol == "anthropic" && r.Operation == "messages.create")) && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
+	routeValid := (r.CandidateID == "" && r.Provider == "" && r.ProviderModel == "" && r.RoutingPolicy == "" && r.RouteRank == 0 && r.PriceEvaluatedAt.IsZero()) || (validRouteText(r.CandidateID, 200) && (r.Provider == "openai" || r.Provider == "xai") && validRouteText(r.ProviderModel, 200) && (r.RoutingPolicy == "fixed" || r.RoutingPolicy == "priority" || r.RoutingPolicy == "weighted" || r.RoutingPolicy == "lowest_cost") && r.RouteRank >= 0 && !r.PriceEvaluatedAt.IsZero())
+	return routeValid && ((r.Protocol == "openai" && (r.Operation == "chat.completions" || r.Operation == "responses.create")) || (r.Protocol == "gemini" && r.Operation == "chat.completions") || (r.Protocol == "anthropic" && r.Operation == "messages.create")) && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
 }
 func sameRequest(c Charge, r BeginRequest) bool {
 	identity := c.RequestID == r.RequestID
 	if r.IdempotencyKey != "" {
 		identity = c.IdempotencyKey == r.IdempotencyKey && bytes.Equal(c.Fingerprint[:], r.Fingerprint[:])
 	}
-	return identity && c.Protocol == r.Protocol && c.Operation == r.Operation && c.OrganizationID == r.OrganizationID && c.ProjectID == r.ProjectID && c.APIKeyID == r.APIKeyID && c.Model == r.Model && c.ChannelID == r.ChannelID && c.MaximumInputTokens == r.MaximumInputTokens && c.MaximumOutputTokens == r.MaximumOutputTokens && c.DeliveryMode == r.DeliveryMode
+	channelMatches := c.ChannelID == r.ChannelID
+	if r.IdempotencyKey != "" {
+		channelMatches = true
+	}
+	return identity && channelMatches && c.Protocol == r.Protocol && c.Operation == r.Operation && c.OrganizationID == r.OrganizationID && c.ProjectID == r.ProjectID && c.APIKeyID == r.APIKeyID && c.Model == r.Model && c.MaximumInputTokens == r.MaximumInputTokens && c.MaximumOutputTokens == r.MaximumOutputTokens && c.DeliveryMode == r.DeliveryMode
+}
+
+func nullableRoute(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+func nullableRouteRank(candidate string, rank int) any {
+	if candidate == "" {
+		return nil
+	}
+	return rank
+}
+func nullableRouteVersion(candidate string) any {
+	if candidate == "" {
+		return nil
+	}
+	return "openai-chat-route-v1"
+}
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
+}
+func validRouteText(value string, maximum int) bool {
+	return value != "" && len(value) <= maximum && strings.TrimSpace(value) == value
 }
 func sameSnapshot(a, b billing.ResponseSnapshot) bool {
 	return a.Status == b.Status && bytes.Equal(a.Body, b.Body)

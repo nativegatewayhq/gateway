@@ -137,6 +137,22 @@ func TestModelsHandlerMergesAuthorizedChatModels(t *testing.T) {
 	}
 }
 
+func TestModelsHandlerListsLogicalChatWhenAnyCandidateIsConfigured(t *testing.T) {
+	chat, err := chatoperation.NewRouteRegistry([]chatoperation.Route{{Model: "logical-chat", Owner: "gateway", Policy: chatoperation.Priority, Candidates: []chatoperation.Candidate{{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "gpt", ChannelID: "channel_00000000000000000000000000000001", Enabled: true}, {ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok", ChannelID: "channel_00000000000000000000000000000002", Enabled: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewModelsHandlerWithChat(slog.Default(), acceptingAuth(t), nil, chat, channelAvailability{"channel_00000000000000000000000000000002": true})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "logical-chat" {
+		t.Fatalf("list=%+v", list)
+	}
+}
+
 func modelsRequest(handler http.Handler, method string, authenticate bool) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, "/v1/models", nil)
 	if authenticate {

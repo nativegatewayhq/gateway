@@ -186,6 +186,27 @@ func run(stdout, stderr io.Writer) int {
 		chatLimits[model] = chatoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
 	}
 	chatModels, err := chatoperation.NewRegistryWithLimits(cfg.OpenAIChatModels, chatLimits)
+	if len(cfg.OpenAIChatRoutes) > 0 {
+		routes := make([]chatoperation.Route, 0, len(cfg.OpenAIChatRoutes))
+		for _, configured := range cfg.OpenAIChatRoutes {
+			candidates := make([]chatoperation.Candidate, 0, len(configured.Candidates))
+			for _, candidate := range configured.Candidates {
+				provider, providerErr := providercredentials.ParseProviderID(candidate.Provider)
+				if providerErr != nil {
+					err = providerErr
+					break
+				}
+				candidates = append(candidates, chatoperation.Candidate{ID: candidate.ID, Provider: provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Priority: candidate.Priority, Weight: candidate.Weight, Enabled: candidate.Enabled, Capabilities: chatoperation.Capabilities{Streaming: candidate.Streaming, Tools: candidate.Tools, JSONMode: candidate.JSONMode}})
+			}
+			if err != nil {
+				break
+			}
+			routes = append(routes, chatoperation.Route{Model: configured.Model, Owner: configured.Owner, Policy: chatoperation.Policy(configured.Policy), FixedCandidateID: configured.FixedCandidateID, MaximumInputTokens: configured.MaximumInputTokens, MaximumOutputTokens: configured.MaximumOutputTokens, Candidates: candidates})
+		}
+		if err == nil {
+			chatModels, err = chatoperation.NewRouteRegistry(routes)
+		}
+	}
 	if err != nil {
 		logger.Error("gateway chat model registry initialization failed")
 		return 1
@@ -270,11 +291,15 @@ func run(stdout, stderr io.Writer) int {
 		}
 	}
 	if len(cfg.OpenAIChatModels) > 0 {
+		chatExecutors := map[providercredentials.ProviderID]openaiProtocol.ChatExecutor{
+			providercredentials.OpenAI: openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout, cfg.ChatStreamIdleTimeout),
+			providercredentials.XAI:    xai.NewChat(providerCredentialRegistry, cfg.ChatTimeout, cfg.ChatStreamIdleTimeout),
+		}
 		var chatHandler *openaiProtocol.ChatHandler
 		if chatChargeBilling == nil {
-			chatHandler = openaiProtocol.NewChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout, cfg.ChatStreamIdleTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes)
+			chatHandler = openaiProtocol.NewRoutedChatHandler(logger, apiKeyAuthenticator, chatModels, chatExecutors, providerCredentialRegistry, healthGate, cfg.ChatBodyBytes)
 		} else {
-			chatHandler = openaiProtocol.NewBillableChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout, cfg.ChatStreamIdleTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes, chatChargeBilling)
+			chatHandler = openaiProtocol.NewBillableRoutedChatHandler(logger, apiKeyAuthenticator, chatModels, chatExecutors, providerCredentialRegistry, healthGate, cfg.ChatBodyBytes, chatChargeBilling)
 		}
 		chatHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIChatHandler = chatHandler

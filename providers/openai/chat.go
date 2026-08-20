@@ -28,6 +28,7 @@ type ChatRequest struct {
 }
 type ChatExecutor struct {
 	origin            *url.URL
+	provider          providercredentials.ProviderID
 	client            *http.Client
 	credentials       *providercredentials.Registry
 	timeout           time.Duration
@@ -35,15 +36,27 @@ type ChatExecutor struct {
 }
 
 func NewChat(credentials *providercredentials.Registry, timeout time.Duration, streamIdle ...time.Duration) *ChatExecutor {
+	return NewChatForProvider(providercredentials.OpenAI, credentials, timeout, streamIdle...)
+}
+func NewChatForProvider(provider providercredentials.ProviderID, credentials *providercredentials.Registry, timeout time.Duration, streamIdle ...time.Duration) *ChatExecutor {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, ForceAttemptHTTP2: true, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: timeout, ExpectContinueTimeout: time.Second}
-	executor := NewChatWithClient(credentials, timeout, &http.Client{Transport: transport})
+	executor := NewChatWithClientForProvider(provider, credentials, timeout, &http.Client{Transport: transport})
 	if len(streamIdle) > 0 {
 		executor.streamIdleTimeout = streamIdle[0]
 	}
 	return executor
 }
 func NewChatWithClient(credentials *providercredentials.Registry, timeout time.Duration, client *http.Client) *ChatExecutor {
-	origin, err := url.Parse("https://api.openai.com")
+	return NewChatWithClientForProvider(providercredentials.OpenAI, credentials, timeout, client)
+}
+func NewChatWithClientForProvider(provider providercredentials.ProviderID, credentials *providercredentials.Registry, timeout time.Duration, client *http.Client) *ChatExecutor {
+	originText := "https://api.openai.com"
+	if provider == providercredentials.XAI {
+		originText = "https://api.x.ai"
+	} else if provider != providercredentials.OpenAI {
+		panic("invalid OpenAI-protocol Chat provider")
+	}
+	origin, err := url.Parse(originText)
 	if err != nil || origin.Scheme != "https" || origin.Host == "" {
 		panic("invalid trusted OpenAI origin")
 	}
@@ -52,7 +65,7 @@ func NewChatWithClient(credentials *providercredentials.Registry, timeout time.D
 	}
 	copy := *client
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &ChatExecutor{origin: origin, client: &copy, credentials: credentials, timeout: timeout, streamIdleTimeout: 30 * time.Second}
+	return &ChatExecutor{origin: origin, provider: provider, client: &copy, credentials: credentials, timeout: timeout, streamIdleTimeout: 30 * time.Second}
 }
 func (e *ChatExecutor) Complete(ctx context.Context, input ChatRequest) (*http.Response, error) {
 	if e == nil || e.origin == nil || e.timeout <= 0 {
@@ -81,7 +94,7 @@ func (e *ChatExecutor) Complete(ctx context.Context, input ChatRequest) (*http.R
 	if input.UserAgent != "" {
 		request.Header.Set("User-Agent", input.UserAgent)
 	}
-	request, err = providercredentials.PrepareOutboundChannel(request, input.ChannelID, providercredentials.OpenAI, e.credentials)
+	request, err = providercredentials.PrepareOutboundChannel(request, input.ChannelID, e.provider, e.credentials)
 	if err != nil {
 		cancel()
 		return nil, err

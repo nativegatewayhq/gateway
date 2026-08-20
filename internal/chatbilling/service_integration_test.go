@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,6 +98,113 @@ func TestReserveUsageSettlementAndReplayAreExactlyOnce(t *testing.T) {
 	_ = pool.QueryRow(ctx, `SELECT count(*) FROM chat_usage_evidence WHERE charge_id=$1`, charge.ID).Scan(&evidence)
 	if captures != 1 || evidence != 1 {
 		t.Fatalf("captures=%d evidence=%d", captures, evidence)
+	}
+}
+
+func TestRoutedChargePersistsImmutableEvidenceAndReplayKeepsOriginalRoute(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	_, err := prices.Publish(ctx, chatpricing.Price{ChannelID: "channel_00000000000000000000000000000002", Model: "logical-chat", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 500_000, InputSale: 1_000_000, CachedInputCost: 250_000, CachedInputSale: 500_000, OutputCost: 2_000_000, OutputSale: 3_000_000}}, "xai-route-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := BeginRequest{RequestID: "routed-chat", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "logical-chat", ChannelID: "channel_00000000000000000000000000000002", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "routed-idempotency", Fingerprint: [32]byte{42}, CandidateID: "candidate_xai", Provider: "xai", ProviderModel: "grok-provider", RoutingPolicy: "lowest_cost", RouteRank: 0, PriceEvaluatedAt: time.Now().UTC()}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := billing.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"usage":{"prompt_tokens":2,"completion_tokens":1}}`)}
+	if _, err = service.CompleteUsage(ctx, charge.ID, chatpricing.Usage{PromptTokens: 2, CompletionTokens: 1}, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	var candidate, provider, providerModel, policy, version string
+	var rank int
+	if err = pool.QueryRow(ctx, `SELECT candidate_id,provider,provider_model,routing_policy,route_rank,route_evidence_version FROM chat_request_charges WHERE id=$1`, charge.ID).Scan(&candidate, &provider, &providerModel, &policy, &rank, &version); err != nil {
+		t.Fatal(err)
+	}
+	if candidate != "candidate_xai" || provider != "xai" || providerModel != "grok-provider" || policy != "lowest_cost" || rank != 0 || version != "openai-chat-route-v1" {
+		t.Fatalf("route=%s/%s/%s/%s/%d/%s", candidate, provider, providerModel, policy, rank, version)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE chat_request_charges SET candidate_id='candidate_changed' WHERE id=$1`, charge.ID); err == nil {
+		t.Fatal("route evidence mutated")
+	}
+	replayRequest := request
+	replayRequest.RequestID = "different-request-id"
+	replayRequest.ChannelID = "channel_00000000000000000000000000000001"
+	replayRequest.CandidateID, replayRequest.Provider, replayRequest.ProviderModel, replayRequest.RoutingPolicy = "candidate_openai", "openai", "gpt-provider", "priority"
+	replay, found, err := service.Replay(ctx, replayRequest)
+	if err != nil || !found || replay.ChannelID != request.ChannelID || replay.CandidateID != request.CandidateID {
+		t.Fatalf("replay=%+v found=%v err=%v", replay, found, err)
+	}
+}
+
+func TestConcurrentRoutedIdempotencyCreatesOneChargeAndReservation(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	request := BeginRequest{RequestID: "concurrent-route", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "gpt-4.1", ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "concurrent-route-key", Fingerprint: [32]byte{71}, CandidateID: "candidate_openai", Provider: "openai", ProviderModel: "gpt-4.1", RoutingPolicy: "priority", PriceEvaluatedAt: time.Now().UTC()}
+	const workers = 12
+	errorsSeen := make(chan error, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func() { defer wait.Done(); _, err := service.Begin(context.Background(), request); errorsSeen <- err }()
+	}
+	wait.Wait()
+	close(errorsSeen)
+	success, pending := 0, 0
+	for err := range errorsSeen {
+		if err == nil {
+			success++
+		} else if errors.Is(err, ErrPending) {
+			pending++
+		} else {
+			t.Fatalf("unexpected begin error: %v", err)
+		}
+	}
+	var charges, reservations int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM chat_request_charges WHERE organization_id='org_chat' AND idempotency_key='concurrent-route-key'`).Scan(&charges); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM wallet_reservations r JOIN chat_request_charges c ON c.reservation_id=r.id WHERE c.idempotency_key='concurrent-route-key'`).Scan(&reservations); err != nil {
+		t.Fatal(err)
+	}
+	if success != 1 || pending != workers-1 || charges != 1 || reservations != 1 {
+		t.Fatalf("success=%d pending=%d charges=%d reservations=%d", success, pending, charges, reservations)
+	}
+}
+
+func TestSpendCapCandidateFailureRollsBackBeforeNextRouteReservation(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	rates := chatpricing.Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 500_000, CachedInputSale: 1_000_000, OutputCost: 3_000_000, OutputSale: 4_000_000}
+	if _, err := prices.Publish(ctx, chatpricing.Price{ChannelID: "channel_00000000000000000000000000000001", Model: "logical-fallback", EffectiveFrom: time.Now().Add(-time.Hour), Rates: rates}, "logical-openai-price"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prices.Publish(ctx, chatpricing.Price{ChannelID: "channel_00000000000000000000000000000002", Model: "logical-fallback", EffectiveFrom: time.Now().Add(-time.Hour), Rates: rates}, "logical-xai-price"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spendcap.NewStore(pool).SetPolicy(ctx, spendcap.PolicyInput{ChannelID: "channel_00000000000000000000000000000002", Period: spendcap.Day, Limit: 1, Actor: "integration", Reason: "fallback test"}); err != nil {
+		t.Fatal(err)
+	}
+	base := BeginRequest{RequestID: "spend-fallback-xai", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "logical-fallback", ChannelID: "channel_00000000000000000000000000000002", MaximumInputTokens: 100, MaximumOutputTokens: 50, CandidateID: "candidate_xai", Provider: "xai", ProviderModel: "grok", RoutingPolicy: "priority", PriceEvaluatedAt: time.Now().UTC()}
+	if _, err := service.Begin(ctx, base); !errors.Is(err, spendcap.ErrExceeded) {
+		t.Fatalf("xai begin error=%v", err)
+	}
+	base.RequestID, base.ChannelID, base.CandidateID, base.Provider, base.ProviderModel, base.RouteRank = "spend-fallback-openai", "channel_00000000000000000000000000000001", "candidate_openai", "openai", "gpt", 1
+	charge, err := service.Begin(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var charges, reservations int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM chat_request_charges WHERE model='logical-fallback'`).Scan(&charges); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM wallet_reservations WHERE id=$1`, charge.ReservationID).Scan(&reservations); err != nil {
+		t.Fatal(err)
+	}
+	if charges != 1 || reservations != 1 || charge.ChannelID != base.ChannelID || charge.RouteRank != 1 {
+		t.Fatalf("charges=%d reservations=%d charge=%+v", charges, reservations, charge)
 	}
 }
 
