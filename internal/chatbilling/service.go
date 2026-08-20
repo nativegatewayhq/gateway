@@ -185,7 +185,7 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 		key = r.IdempotencyKey
 		fingerprint = r.Fingerprint[:]
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_request_charges(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,channel_id,price_id,maximum_input_tokens,maximum_output_tokens,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint,delivery_mode,candidate_id,provider,provider_model,routing_policy,route_rank,price_evaluated_at,route_evidence_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'RESERVED',$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.APIKeyID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.MaximumInputTokens, charge.MaximumOutputTokens, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, key, fingerprint, charge.DeliveryMode, nullableRoute(charge.CandidateID), nullableRoute(charge.Provider), nullableRoute(charge.ProviderModel), nullableRoute(charge.RoutingPolicy), nullableRouteRank(charge.CandidateID, charge.RouteRank), nullableTime(charge.PriceEvaluatedAt), nullableRouteVersion(charge.CandidateID))
+	_, err = tx.Exec(ctx, `INSERT INTO chat_request_charges(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,channel_id,price_id,maximum_input_tokens,maximum_output_tokens,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint,delivery_mode,candidate_id,provider,provider_model,routing_policy,route_rank,price_evaluated_at,route_evidence_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'RESERVED',$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.APIKeyID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.MaximumInputTokens, charge.MaximumOutputTokens, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, key, fingerprint, charge.DeliveryMode, nullableRoute(charge.CandidateID), nullableRoute(charge.Provider), nullableRoute(charge.ProviderModel), nullableRoute(charge.RoutingPolicy), nullableRouteRank(charge.CandidateID, charge.RouteRank), nullableTime(charge.PriceEvaluatedAt), nullableRouteVersion(charge.CandidateID, charge.Operation))
 	if err != nil {
 		return Charge{}, err
 	}
@@ -646,9 +646,12 @@ func nullableRouteRank(candidate string, rank int) any {
 	}
 	return rank
 }
-func nullableRouteVersion(candidate string) any {
+func nullableRouteVersion(candidate, operation string) any {
 	if candidate == "" {
 		return nil
+	}
+	if operation == "responses.create" {
+		return "openai-responses-route-v1"
 	}
 	return "openai-chat-route-v1"
 }

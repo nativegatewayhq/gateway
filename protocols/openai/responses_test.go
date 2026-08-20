@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/chatbilling"
 	"github.com/nativegatewayhq/gateway/internal/chatpricing"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 )
@@ -25,6 +29,12 @@ func (f responsesExecutorFunc) Create(ctx context.Context, r openaiProvider.Resp
 
 type responsesBillingFake struct {
 	begin       chatbilling.BeginRequest
+	begins      []chatbilling.BeginRequest
+	beginErrors map[string]error
+	quoteCosts  map[string]int64
+	replay      chatbilling.Charge
+	replayFound bool
+	replayErr   error
 	charge      chatbilling.Charge
 	usage       chatpricing.Usage
 	released    bool
@@ -33,11 +43,19 @@ type responsesBillingFake struct {
 
 func (f *responsesBillingFake) Begin(_ context.Context, request chatbilling.BeginRequest) (chatbilling.Charge, error) {
 	f.begin = request
+	f.begins = append(f.begins, request)
+	if err := f.beginErrors[request.ChannelID]; err != nil {
+		return chatbilling.Charge{}, err
+	}
 	f.charge = chatbilling.Charge{ID: "chc_00000000000000000000000000000001", Operation: request.Operation, MaximumInputTokens: request.MaximumInputTokens, MaximumOutputTokens: request.MaximumOutputTokens, State: "RESERVED"}
 	return f.charge, nil
 }
+func (f *responsesBillingFake) Quote(_ context.Context, request chatbilling.BeginRequest) (chatpricing.Estimate, error) {
+	cost := f.quoteCosts[request.ChannelID]
+	return chatpricing.Estimate{EstimatedCost: cost, MaximumSale: 1, Price: chatpricing.Price{ChannelID: request.ChannelID}}, nil
+}
 func (f *responsesBillingFake) Replay(context.Context, chatbilling.BeginRequest) (chatbilling.Charge, bool, error) {
-	return chatbilling.Charge{}, false, nil
+	return f.replay, f.replayFound, f.replayErr
 }
 func (f *responsesBillingFake) CompleteUsage(_ context.Context, _ string, usage chatpricing.Usage, snapshot billing.ResponseSnapshot) (chatbilling.Charge, error) {
 	f.usage = usage
@@ -191,5 +209,132 @@ func TestBillableResponsesClientWriteFailureHoldsReservation(t *testing.T) {
 	handler.ServeHTTP(&disconnectWriter{}, chatRequest(`{"model":"gpt-4.1","input":"hello","stream":true,"max_output_tokens":20}`))
 	if chargeBilling.reconciling != "stream_write_failed:write_failed" || chargeBilling.released {
 		t.Fatalf("reconciliation=%q released=%v", chargeBilling.reconciling, chargeBilling.released)
+	}
+}
+
+func TestRoutedResponsesSelectsCapabilityAndRewritesOnlyModel(t *testing.T) {
+	registry, err := responsesoperation.NewRouteRegistry([]responsesoperation.Route{{Model: "logical-responses", Owner: "gateway", Policy: responsesoperation.Priority, Candidates: []responsesoperation.Candidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "gpt-provider", ChannelID: "channel_00000000000000000000000000000001", Priority: 1, Enabled: true, Capabilities: responsesoperation.Capabilities{Streaming: true, WebSearch: true}},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok-provider", ChannelID: "channel_00000000000000000000000000000002", Priority: 0, Enabled: true, Capabilities: responsesoperation.Capabilities{Streaming: true, XSearch: true}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openAICalls, xAICalls := 0, 0
+	handler := NewRoutedResponsesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), registry, map[providercredentials.ProviderID]ResponsesExecutor{
+		providercredentials.OpenAI: responsesExecutorFunc(func(context.Context, openaiProvider.ResponsesRequest) (*http.Response, error) {
+			openAICalls++
+			return nil, errors.New("unexpected")
+		}),
+		providercredentials.XAI: responsesExecutorFunc(func(_ context.Context, request openaiProvider.ResponsesRequest) (*http.Response, error) {
+			xAICalls++
+			forwarded, _ := io.ReadAll(request.Body)
+			if string(forwarded) != `{"model":"grok-provider","tools":[{"type":"x_search"}],"future":{"opaque":1}}` {
+				t.Fatalf("forwarded=%s", forwarded)
+			}
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"resp_xai"}`))}, nil
+		}),
+	}, channelAvailability{"channel_00000000000000000000000000000001": true, "channel_00000000000000000000000000000002": true}, providerhealth.NoopGate{}, 4096)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, chatRequest(`{"model":"logical-responses","tools":[{"type":"x_search"}],"future":{"opaque":1}}`))
+	if w.Code != 200 || openAICalls != 0 || xAICalls != 1 {
+		t.Fatalf("status=%d openai=%d xai=%d body=%s", w.Code, openAICalls, xAICalls, w.Body.String())
+	}
+}
+
+func TestResponsesRejectsUnknownAndStatefulCapabilitiesBeforeDispatch(t *testing.T) {
+	registry, _ := responsesoperation.NewRegistry([]string{"gpt-4.1"})
+	calls := 0
+	handler := NewResponsesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), registry, responsesExecutorFunc(func(context.Context, openaiProvider.ResponsesRequest) (*http.Response, error) {
+		calls++
+		return nil, errors.New("unexpected")
+	}), channelAvailability{"channel_00000000000000000000000000000001": true}, 4096)
+	for _, body := range []string{`{"model":"gpt-4.1","tools":[{"type":"unknown_tool"}]}`, `{"model":"gpt-4.1","previous_response_id":"resp_123"}`, `{"model":"gpt-4.1","background":true}`} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, chatRequest(body))
+		if w.Code != 400 {
+			t.Fatalf("body=%s status=%d response=%s", body, w.Code, w.Body.String())
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("calls=%d", calls)
+	}
+}
+
+func TestBillableResponsesFallsBackBeforeDispatchAndPersistsFinalRoute(t *testing.T) {
+	registry, err := responsesoperation.NewRouteRegistry([]responsesoperation.Route{{Model: "logical-responses", Owner: "gateway", Policy: responsesoperation.Priority, MaximumInputTokens: 4096, MaximumOutputTokens: 100, Candidates: []responsesoperation.Candidate{
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok-provider", ChannelID: "channel_00000000000000000000000000000002", Priority: 0, Enabled: true},
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "gpt-provider", ChannelID: "channel_00000000000000000000000000000001", Priority: 1, Enabled: true},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	billingFake := &responsesBillingFake{beginErrors: map[string]error{"channel_00000000000000000000000000000002": spendcap.ErrExceeded}}
+	xAICalls, openAICalls := 0, 0
+	executors := map[providercredentials.ProviderID]ResponsesExecutor{
+		providercredentials.XAI: responsesExecutorFunc(func(context.Context, openaiProvider.ResponsesRequest) (*http.Response, error) {
+			xAICalls++
+			return nil, errors.New("unexpected dispatch")
+		}),
+		providercredentials.OpenAI: responsesExecutorFunc(func(_ context.Context, request openaiProvider.ResponsesRequest) (*http.Response, error) {
+			openAICalls++
+			forwarded, _ := io.ReadAll(request.Body)
+			if !bytes.Contains(forwarded, []byte(`"model":"gpt-provider"`)) {
+				t.Fatalf("forwarded=%s", forwarded)
+			}
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"resp","usage":{"input_tokens":1,"output_tokens":1}}`))}, nil
+		}),
+	}
+	handler := NewBillableRoutedResponsesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), registry, executors, channelAvailability{"channel_00000000000000000000000000000001": true, "channel_00000000000000000000000000000002": true}, providerhealth.NoopGate{}, 4096, billingFake)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, chatRequest(`{"model":"logical-responses","input":"hello","max_output_tokens":20}`))
+	if w.Code != 200 || xAICalls != 0 || openAICalls != 1 || len(billingFake.begins) != 2 || billingFake.begin.CandidateID != "candidate_openai" || billingFake.begin.RouteRank != 1 {
+		t.Fatalf("status=%d calls=%d/%d begins=%+v", w.Code, xAICalls, openAICalls, billingFake.begins)
+	}
+}
+
+func TestResponsesNeverFallsBackAfterProviderDispatch(t *testing.T) {
+	registry, err := responsesoperation.NewRouteRegistry([]responsesoperation.Route{{Model: "logical-responses", Owner: "gateway", Policy: responsesoperation.Priority, Candidates: []responsesoperation.Candidate{
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok-provider", ChannelID: "channel_00000000000000000000000000000002", Priority: 0, Enabled: true},
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "gpt-provider", ChannelID: "channel_00000000000000000000000000000001", Priority: 1, Enabled: true},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openAICalls := 0
+	handler := NewRoutedResponsesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), registry, map[providercredentials.ProviderID]ResponsesExecutor{
+		providercredentials.XAI: responsesExecutorFunc(func(context.Context, openaiProvider.ResponsesRequest) (*http.Response, error) {
+			return &http.Response{StatusCode: 500, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"failed"}}`))}, nil
+		}),
+		providercredentials.OpenAI: responsesExecutorFunc(func(context.Context, openaiProvider.ResponsesRequest) (*http.Response, error) {
+			openAICalls++
+			return nil, errors.New("must not dispatch")
+		}),
+	}, channelAvailability{"channel_00000000000000000000000000000001": true, "channel_00000000000000000000000000000002": true}, providerhealth.NoopGate{}, 4096)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, chatRequest(`{"model":"logical-responses"}`))
+	if w.Code != 500 || openAICalls != 0 {
+		t.Fatalf("status=%d fallback_calls=%d", w.Code, openAICalls)
+	}
+}
+
+func TestResponsesReplayPrecedesCurrentRouteState(t *testing.T) {
+	snapshot := billing.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"id":"original-route"}`)}
+	billingFake := &responsesBillingFake{replayFound: true, replay: chatbilling.Charge{Response: snapshot}}
+	handler := NewBillableRoutedResponsesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), nil, nil, nil, providerhealth.NoopGate{}, 4096, billingFake)
+	request := chatRequest(`{"model":"retired-logical","input":"hello","max_output_tokens":20}`)
+	request.Header.Set("Idempotency-Key", "original-response-route")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, request)
+	if w.Code != 200 || w.Body.String() != string(snapshot.Body) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestResponsesRequirementsExtractAllNativeCapabilities(t *testing.T) {
+	body := []byte(`{"model":"logical","stream":true,"store":true,"tools":[{"type":"function"},{"type":"web_search_preview"},{"type":"x_search"},{"type":"code_interpreter"},{"type":"image_generation"}],"text":{"format":{"type":"json_schema"}}}`)
+	requirements, err := extractResponsesRequirements(body, true)
+	if err != nil || !requirements.Streaming || !requirements.StoredResponse || !requirements.FunctionTools || !requirements.WebSearch || !requirements.XSearch || !requirements.CodeInterpreter || !requirements.ImageGeneration || !requirements.JSONMode {
+		t.Fatalf("requirements=%+v err=%v", requirements, err)
 	}
 }

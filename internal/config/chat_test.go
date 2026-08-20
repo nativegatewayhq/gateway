@@ -117,3 +117,20 @@ func TestOpenAIChatRoutesJSONRejectsLegacyCombination(t *testing.T) {
 		t.Fatal("combined route configuration accepted")
 	}
 }
+
+func TestOpenAIResponsesRoutesJSONDerivesModelsAndCapabilities(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":                 "postgres://test",
+		"GATEWAY_BILLING_MODE":                 "required",
+		"GATEWAY_OPENAI_RESPONSES_ROUTES_JSON": `[{"model":"logical-responses","owner":"gateway","policy":"priority","maximum_input_tokens":4096,"maximum_output_tokens":512,"candidates":[{"id":"candidate_xai","provider":"xai","provider_model":"grok-4","channel_id":"channel_00000000000000000000000000000002","enabled":true,"streaming":true,"function_tools":true,"x_search":true}]}]`,
+	}
+	lookup := func(key string) (string, bool) { value, ok := values[key]; return value, ok }
+	cfg, err := Load(lookup)
+	if err != nil || len(cfg.OpenAIResponsesRoutes) != 1 || cfg.OpenAIResponsesModels[0] != "logical-responses" || !cfg.OpenAIResponsesRoutes[0].Candidates[0].XSearch || cfg.OpenAIResponsesModelLimits["logical-responses"].MaximumOutputTokens != 512 {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+	values["GATEWAY_OPENAI_RESPONSES_MODELS"] = "gpt-4.1"
+	if _, err = Load(lookup); err == nil {
+		t.Fatal("combined Responses routes and legacy models accepted")
+	}
+}

@@ -19,7 +19,9 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
@@ -27,6 +29,10 @@ import (
 
 type ResponsesRegistry interface {
 	Resolve(string) (responsesoperation.Model, error)
+}
+type RoutedResponsesRegistry interface {
+	ResponsesRegistry
+	Candidates(string, responsesoperation.Requirements) ([]responsesoperation.Model, error)
 }
 type ResponsesExecutor interface {
 	Create(context.Context, openaiProvider.ResponsesRequest) (*http.Response, error)
@@ -42,21 +48,43 @@ type ResponsesBilling interface {
 	MarkStreamReconcilingUsage(context.Context, string, chatpricing.Usage, [32]byte) error
 	MarkStreamReconciling(context.Context, string, string, string, string) error
 }
+type ResponsesQuoter interface {
+	Quote(context.Context, chatbilling.BeginRequest) (chatpricing.Estimate, error)
+}
 type ResponsesHandler struct {
 	common           *Handler
 	models           ResponsesRegistry
-	executor         ResponsesExecutor
+	executors        map[providercredentials.ProviderID]ResponsesExecutor
 	availability     ChannelProviderAvailability
+	health           providerhealth.Gate
 	maximumBodyBytes int64
 	telemetry        *telemetry.Recorder
 	billing          ResponsesBilling
+	weighted         *responsesoperation.WeightedSampler
 }
 
 func NewResponsesHandler(logger *slog.Logger, auth Authenticator, models ResponsesRegistry, executor ResponsesExecutor, availability ChannelProviderAvailability, maximum int64) *ResponsesHandler {
-	return &ResponsesHandler{common: NewImagesHandler(logger, auth, nil, nil, 1), models: models, executor: executor, availability: availability, maximumBodyBytes: maximum}
+	return NewRoutedResponsesHandler(logger, auth, models, map[providercredentials.ProviderID]ResponsesExecutor{providercredentials.OpenAI: executor}, availability, providerhealth.NoopGate{}, maximum)
 }
 func NewBillableResponsesHandler(logger *slog.Logger, auth Authenticator, models ResponsesRegistry, executor ResponsesExecutor, availability ChannelProviderAvailability, maximum int64, chargeBilling ResponsesBilling) *ResponsesHandler {
 	handler := NewResponsesHandler(logger, auth, models, executor, availability, maximum)
+	handler.billing = chargeBilling
+	return handler
+}
+func NewRoutedResponsesHandler(logger *slog.Logger, auth Authenticator, models ResponsesRegistry, executors map[providercredentials.ProviderID]ResponsesExecutor, availability ChannelProviderAvailability, health providerhealth.Gate, maximum int64) *ResponsesHandler {
+	if health == nil {
+		health = providerhealth.NoopGate{}
+	}
+	copyExecutors := make(map[providercredentials.ProviderID]ResponsesExecutor, len(executors))
+	for provider, executor := range executors {
+		if executor != nil {
+			copyExecutors[provider] = executor
+		}
+	}
+	return &ResponsesHandler{common: NewImagesHandler(logger, auth, nil, nil, 1), models: models, executors: copyExecutors, availability: availability, health: health, maximumBodyBytes: maximum, weighted: responsesoperation.DefaultWeightedSampler()}
+}
+func NewBillableRoutedResponsesHandler(logger *slog.Logger, auth Authenticator, models ResponsesRegistry, executors map[providercredentials.ProviderID]ResponsesExecutor, availability ChannelProviderAvailability, health providerhealth.Gate, maximum int64, chargeBilling ResponsesBilling) *ResponsesHandler {
+	handler := NewRoutedResponsesHandler(logger, auth, models, executors, availability, health, maximum)
 	handler.billing = chargeBilling
 	return handler
 }
@@ -98,17 +126,42 @@ func (h *ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(tracked, 400, "invalid_request_error", "invalid_request", "request must contain one model and valid stream option")
 		return
 	}
-	route, err := h.models.Resolve(model)
+	if !h.common.authorizeModel(tracked, r, principal, "openai", responsesoperation.Create, model) {
+		return
+	}
+	if h.billing != nil && h.handleEarlyResponsesReplay(tracked, r, principal, model, stream, body) {
+		return
+	}
+	requirements, err := extractResponsesRequirements(body, stream)
+	if err != nil {
+		writeError(tracked, http.StatusBadRequest, "invalid_request_error", "unsupported_capability", "request requires an unsupported capability")
+		return
+	}
+	candidates, err := h.responsesCandidates(model, requirements)
 	if errors.Is(err, responsesoperation.ErrModelNotFound) {
 		writeError(tracked, 404, "invalid_request_error", "model_not_found", "model not found")
 		return
 	}
-	if err != nil || h.executor == nil {
+	if err != nil {
+		if errors.Is(err, responsesoperation.ErrUnsupported) {
+			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "unsupported_capability", "request requires an unsupported capability")
+		} else {
+			writeError(tracked, 503, "server_error", "provider_unavailable", "provider unavailable")
+		}
+		return
+	}
+	candidates = h.preflightResponsesCandidates(r, candidates)
+	if len(candidates) == 0 {
 		writeError(tracked, 503, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
-	if !h.common.authorizeModel(tracked, r, principal, "openai", responsesoperation.Create, model) {
-		return
+	if candidates[0].Policy == responsesoperation.Weighted {
+		selected, sampleErr := h.weighted.Pick(candidates)
+		if sampleErr != nil {
+			writeError(tracked, 503, "server_error", "provider_unavailable", "provider unavailable")
+			return
+		}
+		candidates = moveResponsesCandidateFirst(candidates, selected.CandidateID)
 	}
 	if stream {
 		if _, ok := tracked.ResponseWriter.(http.Flusher); !ok {
@@ -116,21 +169,34 @@ func (h *ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if h.billing != nil {
-			h.serveBillableStream(tracked, r, principal, route, body)
+			h.serveBillableStreamCandidates(tracked, r, principal, candidates, body)
 		} else {
-			h.serveBYOKStream(tracked, r, route, body)
+			route, executor, permit, selectErr := h.selectResponsesCandidate(r, candidates)
+			if selectErr != nil {
+				writeError(tracked, 503, "server_error", "provider_unavailable", "provider unavailable")
+				return
+			}
+			h.serveBYOKStream(tracked, r, route, executor, permit, body)
 		}
 		return
 	}
 	if h.billing != nil {
-		h.serveBillable(tracked, r, principal, route, body)
+		h.serveBillableCandidates(tracked, r, principal, candidates, body)
 		return
 	}
-	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
+	route, executor, permit, selectErr := h.selectResponsesCandidate(r, candidates)
+	if selectErr != nil {
 		writeError(tracked, 503, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
-	response, err := h.execute(r.Context(), route, h.executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: r.Header.Get("Accept"), UserAgent: r.UserAgent(), ContentLength: int64(len(body)), Body: bytes.NewReader(body)})
+	providerBody, rewriteErr := rewriteTopLevelModel(body, route.ProviderModel)
+	if rewriteErr != nil {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		writeError(tracked, 400, "invalid_request_error", "invalid_request", "invalid model field")
+		return
+	}
+	response, err := h.execute(r.Context(), route, executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: r.Header.Get("Accept"), UserAgent: r.UserAgent(), ContentLength: int64(len(providerBody)), Body: bytes.NewReader(providerBody)})
+	h.observeResponses(r, permit, response, err)
 	if err != nil {
 		switch {
 		case errors.Is(err, providercredentials.ErrCredentialUnavailable):
@@ -155,12 +221,246 @@ func (h *ResponsesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = tracked.Write(responseBody)
 }
 
-func (h *ResponsesHandler) serveBYOKStream(w http.ResponseWriter, r *http.Request, route responsesoperation.Model, body []byte) {
-	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
-		writeError(w, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+func (h *ResponsesHandler) serveBillableCandidates(w http.ResponseWriter, r *http.Request, principal apikey.Principal, candidates []responsesoperation.Model, body []byte) {
+	maximumOutput, err := extractResponsesOutputLimit(body)
+	if err != nil {
+		writeError(w, 400, "invalid_request_error", "invalid_token_limit", "paid Responses requires valid input and output token limits")
 		return
 	}
-	response, err := h.execute(r.Context(), route, h.executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), ContentLength: int64(len(body)), Body: bytes.NewReader(body), Streaming: true})
+	ordered, evaluatedAt := h.orderResponsesCandidates(r.Context(), candidates, int64(len(body)), maximumOutput)
+	if len(ordered) == 0 {
+		writeError(w, 503, "server_error", "price_unavailable", "price unavailable")
+		return
+	}
+	key, keyErr := idempotency.Extract(r.Header)
+	if keyErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+		return
+	}
+	var fingerprint [32]byte
+	if key != "" {
+		fingerprint = idempotency.Fingerprint("openai", responsesoperation.Create, ordered[0].ID, "logical-route", "application/json", body)
+	}
+	route, executor, charge, permit, err := h.beginResponsesCandidate(r, principal, ordered, key, fingerprint, int64(len(body)), maximumOutput, "non_stream", evaluatedAt)
+	if err != nil {
+		h.writeBillingError(w, err)
+		return
+	}
+	h.serveBillable(w, r, route, executor, charge, permit, body)
+}
+
+func (h *ResponsesHandler) serveBillableStreamCandidates(w http.ResponseWriter, r *http.Request, principal apikey.Principal, candidates []responsesoperation.Model, body []byte) {
+	maximumOutput, err := extractResponsesOutputLimit(body)
+	if err != nil {
+		writeError(w, 400, "invalid_request_error", "invalid_token_limit", "paid Responses requires valid input and output token limits")
+		return
+	}
+	ordered, evaluatedAt := h.orderResponsesCandidates(r.Context(), candidates, int64(len(body)), maximumOutput)
+	if len(ordered) == 0 {
+		writeError(w, 503, "server_error", "price_unavailable", "price unavailable")
+		return
+	}
+	key, keyErr := idempotency.Extract(r.Header)
+	if keyErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+		return
+	}
+	var fingerprint [32]byte
+	if key != "" {
+		fingerprint = idempotency.Fingerprint("openai", responsesoperation.Create, ordered[0].ID, "logical-route", "text/event-stream", body)
+	}
+	route, executor, charge, permit, err := h.beginResponsesCandidate(r, principal, ordered, key, fingerprint, int64(len(body)), maximumOutput, "stream", evaluatedAt)
+	if err != nil {
+		h.writeBillingError(w, err)
+		return
+	}
+	h.serveBillableStream(w, r, route, executor, charge, permit, body)
+}
+
+func (h *ResponsesHandler) beginResponsesCandidate(r *http.Request, principal apikey.Principal, candidates []responsesoperation.Model, key string, fingerprint [32]byte, maximumInput, maximumOutput int64, delivery string, evaluatedAt time.Time) (responsesoperation.Model, ResponsesExecutor, chatbilling.Charge, providerhealth.Permit, error) {
+	lastErr := error(chatpricing.ErrUnavailable)
+	remaining := append([]responsesoperation.Model(nil), candidates...)
+	for rank := 0; len(remaining) > 0; rank++ {
+		route := remaining[0]
+		remaining = remaining[1:]
+		permit, err := h.acquireResponsesHealth(r, route.ChannelID)
+		if err != nil {
+			lastErr = err
+			remaining = h.resampleResponses(route.Policy, remaining)
+			continue
+		}
+		begin := routedResponsesBeginRequest(r, principal, route, key, fingerprint, maximumInput, maximumOutput, delivery, rank)
+		begin.PriceEvaluatedAt = evaluatedAt
+		charge, err := h.billing.Begin(r.Context(), begin)
+		if err == nil {
+			h.responsesRouteTelemetry(r.Context(), route, "success", "")
+			return route, h.executors[route.Provider], charge, permit, nil
+		}
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		lastErr = err
+		if !errors.Is(err, spendcap.ErrExceeded) && !errors.Is(err, chatpricing.ErrUnavailable) && !errors.Is(err, chatpricing.ErrMargin) {
+			return responsesoperation.Model{}, nil, chatbilling.Charge{}, providerhealth.Permit{}, err
+		}
+		remaining = h.resampleResponses(route.Policy, remaining)
+	}
+	return responsesoperation.Model{}, nil, chatbilling.Charge{}, providerhealth.Permit{}, lastErr
+}
+
+func (h *ResponsesHandler) resampleResponses(policy responsesoperation.Policy, remaining []responsesoperation.Model) []responsesoperation.Model {
+	if policy != responsesoperation.Weighted || len(remaining) < 2 {
+		return remaining
+	}
+	selected, err := h.weighted.Pick(remaining)
+	if err != nil {
+		return nil
+	}
+	return moveResponsesCandidateFirst(remaining, selected.CandidateID)
+}
+
+func (h *ResponsesHandler) responsesCandidates(model string, requirements responsesoperation.Requirements) ([]responsesoperation.Model, error) {
+	if h.models == nil {
+		return nil, responsesoperation.ErrModelNotFound
+	}
+	if routed, ok := h.models.(RoutedResponsesRegistry); ok {
+		return routed.Candidates(model, requirements)
+	}
+	route, err := h.models.Resolve(model)
+	if err != nil {
+		return nil, err
+	}
+	return []responsesoperation.Model{route}, nil
+}
+
+func (h *ResponsesHandler) preflightResponsesCandidates(r *http.Request, candidates []responsesoperation.Model) []responsesoperation.Model {
+	result := make([]responsesoperation.Model, 0, len(candidates))
+	for _, candidate := range candidates {
+		if h.executors[candidate.Provider] == nil || h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), candidate.ChannelID, candidate.Provider) {
+			h.responsesRouteTelemetry(r.Context(), candidate, "failure", "unavailable")
+			continue
+		}
+		snapshot, err := h.health.Inspect(r.Context(), candidate.ChannelID)
+		if err != nil || snapshot.State == providerhealth.Open {
+			h.responsesRouteTelemetry(r.Context(), candidate, "failure", "circuit_unavailable")
+			continue
+		}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func (h *ResponsesHandler) orderResponsesCandidates(ctx context.Context, candidates []responsesoperation.Model, maximumInput, maximumOutput int64) ([]responsesoperation.Model, time.Time) {
+	evaluatedAt := time.Now().UTC()
+	quoter, canQuote := h.billing.(ResponsesQuoter)
+	available := make([]responsesoperation.Model, 0, len(candidates))
+	quotes := make(map[string]chatpricing.Estimate, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.MaximumInputTokens < maximumInput || candidate.MaximumOutputTokens < maximumOutput {
+			continue
+		}
+		if !canQuote {
+			available = append(available, candidate)
+			continue
+		}
+		quote, err := quoter.Quote(ctx, chatbilling.BeginRequest{Protocol: "openai", Operation: responsesoperation.Create, Model: candidate.ID, ChannelID: candidate.ChannelID, MaximumInputTokens: maximumInput, MaximumOutputTokens: maximumOutput, PriceEvaluatedAt: evaluatedAt})
+		if err != nil {
+			continue
+		}
+		quotes[candidate.CandidateID], available = quote, append(available, candidate)
+	}
+	if len(available) > 0 && available[0].Policy == responsesoperation.LowestCost {
+		ordered, err := responsesoperation.OrderLowestCost(available, quotes)
+		if err != nil {
+			return nil, evaluatedAt
+		}
+		available = ordered
+	}
+	return available, evaluatedAt
+}
+
+func (h *ResponsesHandler) selectResponsesCandidate(r *http.Request, candidates []responsesoperation.Model) (responsesoperation.Model, ResponsesExecutor, providerhealth.Permit, error) {
+	remaining := append([]responsesoperation.Model(nil), candidates...)
+	for len(remaining) > 0 {
+		route := remaining[0]
+		remaining = remaining[1:]
+		permit, err := h.acquireResponsesHealth(r, route.ChannelID)
+		if err == nil {
+			h.responsesRouteTelemetry(r.Context(), route, "success", "")
+			return route, h.executors[route.Provider], permit, nil
+		}
+		if route.Policy == responsesoperation.Weighted && len(remaining) > 1 {
+			selected, sampleErr := h.weighted.Pick(remaining)
+			if sampleErr != nil {
+				break
+			}
+			remaining = moveResponsesCandidateFirst(remaining, selected.CandidateID)
+		}
+	}
+	return responsesoperation.Model{}, nil, providerhealth.Permit{}, errors.New("provider unavailable")
+}
+
+func (h *ResponsesHandler) acquireResponsesHealth(r *http.Request, channel string) (providerhealth.Permit, error) {
+	snapshot, err := h.health.Inspect(r.Context(), channel)
+	if err != nil || snapshot.State == providerhealth.Open {
+		return providerhealth.Permit{}, errors.New("circuit unavailable")
+	}
+	if snapshot.State == providerhealth.HalfOpen {
+		return h.health.ClaimProbe(r.Context(), channel, requestid.FromContext(r.Context()))
+	}
+	return providerhealth.Permit{ChannelID: channel}, nil
+}
+
+func (h *ResponsesHandler) observeResponses(r *http.Request, permit providerhealth.Permit, response *http.Response, err error) {
+	outcome := providerhealth.Neutral
+	switch {
+	case errors.Is(err, openaiProvider.ErrResponsesTimeout):
+		outcome = providerhealth.Timeout
+	case err != nil:
+		outcome = providerhealth.Connection
+	case response.StatusCode == 429:
+		outcome = providerhealth.RateLimited
+	case response.StatusCode >= 500:
+		outcome = providerhealth.ServerError
+	case response.StatusCode >= 200 && response.StatusCode < 400:
+		outcome = providerhealth.Success
+	}
+	_, _ = h.health.Observe(context.WithoutCancel(r.Context()), providerhealth.Observation{ChannelID: permit.ChannelID, ObservationID: requestid.FromContext(r.Context()), Outcome: outcome, Permit: permit})
+}
+
+func (h *ResponsesHandler) responsesRouteTelemetry(ctx context.Context, route responsesoperation.Model, outcome, rejection string) {
+	if h.telemetry != nil {
+		h.telemetry.Route(ctx, telemetry.RouteRecord{Protocol: "openai", Operation: responsesoperation.Create, Policy: string(route.Policy), Outcome: outcome, Rejection: rejection})
+	}
+}
+
+func moveResponsesCandidateFirst(candidates []responsesoperation.Model, id string) []responsesoperation.Model {
+	result := make([]responsesoperation.Model, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.CandidateID == id {
+			result = append(result, candidate)
+			break
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.CandidateID != id {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
+func routedResponsesBeginRequest(r *http.Request, principal apikey.Principal, route responsesoperation.Model, key string, fingerprint [32]byte, maximumInput, maximumOutput int64, delivery string, rank int) chatbilling.BeginRequest {
+	return chatbilling.BeginRequest{RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "openai", Operation: responsesoperation.Create, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: maximumInput, MaximumOutputTokens: maximumOutput, DeliveryMode: delivery, CandidateID: route.CandidateID, Provider: string(route.Provider), ProviderModel: route.ProviderModel, RoutingPolicy: string(route.Policy), RouteRank: rank}
+}
+
+func (h *ResponsesHandler) serveBYOKStream(w http.ResponseWriter, r *http.Request, route responsesoperation.Model, executor ResponsesExecutor, permit providerhealth.Permit, body []byte) {
+	providerBody, rewriteErr := rewriteTopLevelModel(body, route.ProviderModel)
+	if rewriteErr != nil {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		writeError(w, 400, "invalid_request_error", "invalid_request", "invalid model field")
+		return
+	}
+	response, err := h.execute(r.Context(), route, executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), ContentLength: int64(len(providerBody)), Body: bytes.NewReader(providerBody), Streaming: true})
+	h.observeResponses(r, permit, response, err)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "server_error", "provider_unavailable", "provider unavailable")
 		return
@@ -187,43 +487,23 @@ func (h *ResponsesHandler) serveBYOKStream(w http.ResponseWriter, r *http.Reques
 	_, _ = relayResponsesStream(w, response.Body, h.maximumBodyBytes, false)
 }
 
-func (h *ResponsesHandler) serveBillableStream(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route responsesoperation.Model, body []byte) {
+func (h *ResponsesHandler) serveBillableStream(w http.ResponseWriter, r *http.Request, route responsesoperation.Model, executor ResponsesExecutor, charge chatbilling.Charge, permit providerhealth.Permit, body []byte) {
 	maximumOutput, err := extractResponsesOutputLimit(body)
 	if err != nil || route.MaximumInputTokens < 1 || route.MaximumOutputTokens < 1 || maximumOutput > route.MaximumOutputTokens || int64(len(body)) > route.MaximumInputTokens {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		_, _ = h.billing.Release(context.WithoutCancel(r.Context()), charge.ID, billing.ResponseSnapshot{Status: http.StatusBadRequest, Body: []byte(`{"error":{"message":"invalid token limit","type":"invalid_request_error","code":"invalid_token_limit"}}`)})
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_token_limit", "paid Responses requires valid input and output token limits")
 		return
 	}
-	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
-		writeError(w, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
-		return
-	}
-	key, keyErr := idempotency.Extract(r.Header)
-	if keyErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
-		return
-	}
-	var fingerprint [32]byte
-	if key != "" {
-		fingerprint = idempotency.Fingerprint("openai", responsesoperation.Create, route.ID, route.ChannelID, "text/event-stream", body)
-	}
-	begin := chatbilling.BeginRequest{Operation: responsesoperation.Create, RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput, DeliveryMode: "stream"}
-	if key != "" {
-		if _, found, replayErr := h.billing.Replay(r.Context(), begin); replayErr != nil || found {
-			if replayErr == nil {
-				replayErr = chatbilling.ErrConflict
-			}
-			h.writeBillingError(w, replayErr)
-			return
-		}
-	}
-	charge, err := h.billing.Begin(r.Context(), begin)
-	if err != nil {
-		h.billingTelemetry(r.Context(), "begin", "failure")
-		h.writeBillingError(w, err)
-		return
-	}
 	h.billingTelemetry(r.Context(), "begin", "success")
-	response, executeErr := h.execute(r.Context(), route, h.executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), ContentLength: int64(len(body)), Body: bytes.NewReader(body), Streaming: true})
+	providerBody, rewriteErr := rewriteTopLevelModel(body, route.ProviderModel)
+	if rewriteErr != nil {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, "stream_protocol_invalid", "gateway", "invalid_request")
+		return
+	}
+	response, executeErr := h.execute(r.Context(), route, executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), ContentLength: int64(len(providerBody)), Body: bytes.NewReader(providerBody), Streaming: true})
+	h.observeResponses(r, permit, response, executeErr)
 	if executeErr != nil {
 		reason := "executor_connection_lost"
 		if errors.Is(executeErr, openaiProvider.ErrResponsesTimeout) {
@@ -303,51 +583,28 @@ func (h *ResponsesHandler) responsesStreamTelemetry(ctx context.Context, categor
 	}
 }
 
-func (h *ResponsesHandler) serveBillable(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route responsesoperation.Model, body []byte) {
+func (h *ResponsesHandler) serveBillable(w http.ResponseWriter, r *http.Request, route responsesoperation.Model, executor ResponsesExecutor, charge chatbilling.Charge, permit providerhealth.Permit, body []byte) {
 	maximumOutput, err := extractResponsesOutputLimit(body)
 	if err != nil || route.MaximumInputTokens < 1 || route.MaximumOutputTokens < 1 || maximumOutput > route.MaximumOutputTokens || int64(len(body)) > route.MaximumInputTokens {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		_, _ = h.billing.Release(context.WithoutCancel(r.Context()), charge.ID, billing.ResponseSnapshot{Status: http.StatusBadRequest, Body: []byte(`{"error":{"message":"invalid token limit","type":"invalid_request_error","code":"invalid_token_limit"}}`)})
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_token_limit", "paid Responses requires valid input and output token limits")
-		return
-	}
-	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
-		writeError(w, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
-		return
-	}
-	key, keyErr := idempotency.Extract(r.Header)
-	if keyErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
-		return
-	}
-	var fingerprint [32]byte
-	if key != "" {
-		fingerprint = idempotency.Fingerprint("openai", responsesoperation.Create, route.ID, route.ChannelID, "application/json", body)
-	}
-	begin := chatbilling.BeginRequest{Operation: responsesoperation.Create, RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput}
-	if key != "" {
-		replayed, found, replayErr := h.billing.Replay(r.Context(), begin)
-		if replayErr != nil {
-			h.billingTelemetry(r.Context(), "replay", "failure")
-			h.writeBillingError(w, replayErr)
-			return
-		}
-		if found {
-			h.billingTelemetry(r.Context(), "replay", "replay")
-			h.common.writeSnapshot(w, replayed.Response, true)
-			return
-		}
-	}
-	charge, err := h.billing.Begin(r.Context(), begin)
-	if err != nil {
-		h.billingTelemetry(r.Context(), "begin", "failure")
-		h.writeBillingError(w, err)
 		return
 	}
 	h.billingTelemetry(r.Context(), "begin", "success")
 	if charge.Replay {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
 		h.common.writeSnapshot(w, charge.Response, true)
 		return
 	}
-	response, executeErr := h.execute(r.Context(), route, h.executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: r.Header.Get("Accept"), UserAgent: r.UserAgent(), ContentLength: int64(len(body)), Body: bytes.NewReader(body)})
+	providerBody, rewriteErr := rewriteTopLevelModel(body, route.ProviderModel)
+	if rewriteErr != nil {
+		_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "usage_invalid", nil)
+		return
+	}
+	response, executeErr := h.execute(r.Context(), route, executor, openaiProvider.ResponsesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: r.Header.Get("Accept"), UserAgent: r.UserAgent(), ContentLength: int64(len(providerBody)), Body: bytes.NewReader(providerBody)})
+	h.observeResponses(r, permit, response, executeErr)
 	if executeErr != nil {
 		reason := "executor_connection_lost"
 		if errors.Is(executeErr, openaiProvider.ErrResponsesTimeout) {
@@ -538,6 +795,112 @@ func (h *ResponsesHandler) billingTelemetry(ctx context.Context, transition, out
 	if h.telemetry != nil {
 		h.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: "openai", Operation: responsesoperation.Create, Transition: transition, Outcome: outcome})
 	}
+}
+
+func (h *ResponsesHandler) handleEarlyResponsesReplay(w http.ResponseWriter, r *http.Request, principal apikey.Principal, model string, stream bool, body []byte) bool {
+	key, err := idempotency.Extract(r.Header)
+	if err != nil {
+		writeError(w, 400, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+		return true
+	}
+	if key == "" {
+		return false
+	}
+	maximumOutput, err := extractResponsesOutputLimit(body)
+	if err != nil {
+		return false
+	}
+	delivery, media := "non_stream", "application/json"
+	if stream {
+		delivery, media = "stream", "text/event-stream"
+	}
+	fingerprint := idempotency.Fingerprint("openai", responsesoperation.Create, model, "logical-route", media, body)
+	request := chatbilling.BeginRequest{RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "openai", Operation: responsesoperation.Create, Model: model, ChannelID: "channel_00000000000000000000000000000001", IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput, DeliveryMode: delivery}
+	replayed, found, replayErr := h.billing.Replay(r.Context(), request)
+	if replayErr != nil {
+		h.writeBillingError(w, replayErr)
+		return true
+	}
+	if !found {
+		return false
+	}
+	if stream {
+		h.writeBillingError(w, chatbilling.ErrConflict)
+		return true
+	}
+	h.common.writeSnapshot(w, replayed.Response, true)
+	return true
+}
+
+func extractResponsesRequirements(body []byte, stream bool) (responsesoperation.Requirements, error) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(body, &object) != nil {
+		return responsesoperation.Requirements{}, errors.New("invalid JSON")
+	}
+	requirements := responsesoperation.Requirements{Streaming: stream}
+	if raw, ok := object["background"]; ok {
+		var enabled bool
+		if json.Unmarshal(raw, &enabled) != nil || enabled {
+			return requirements, errors.New("background unsupported")
+		}
+	}
+	if raw, ok := object["previous_response_id"]; ok && string(raw) != "null" {
+		var value string
+		if json.Unmarshal(raw, &value) != nil || value != "" {
+			return requirements, errors.New("response affinity unsupported")
+		}
+	}
+	if raw, ok := object["store"]; ok {
+		var enabled bool
+		if json.Unmarshal(raw, &enabled) != nil {
+			return requirements, errors.New("invalid store")
+		}
+		requirements.StoredResponse = enabled
+	}
+	if raw, ok := object["tools"]; ok {
+		var tools []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &tools) != nil {
+			return requirements, errors.New("invalid tools")
+		}
+		for _, tool := range tools {
+			switch tool.Type {
+			case "function":
+				requirements.FunctionTools = true
+			case "web_search", "web_search_preview":
+				requirements.WebSearch = true
+			case "x_search":
+				requirements.XSearch = true
+			case "code_interpreter":
+				requirements.CodeInterpreter = true
+			case "image_generation":
+				requirements.ImageGeneration = true
+			default:
+				return requirements, errors.New("unknown tool")
+			}
+		}
+	}
+	if raw, ok := object["text"]; ok && string(raw) != "null" {
+		var textObject struct {
+			Format *struct {
+				Type string `json:"type"`
+			} `json:"format"`
+		}
+		if json.Unmarshal(raw, &textObject) != nil {
+			return requirements, errors.New("invalid text format")
+		}
+		if textObject.Format != nil {
+			switch textObject.Format.Type {
+			case "", "text":
+			case "json_object", "json_schema":
+				requirements.JSONMode = true
+			default:
+				return requirements, errors.New("unknown text format")
+			}
+		}
+	}
+	return requirements, nil
 }
 
 func (h *ResponsesHandler) writeBillingError(w http.ResponseWriter, err error) {

@@ -139,6 +139,28 @@ func TestRoutedChargePersistsImmutableEvidenceAndReplayKeepsOriginalRoute(t *tes
 	}
 }
 
+func TestResponsesRouteUsesOperationSpecificImmutableEvidence(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	_, err := prices.Publish(ctx, chatpricing.Price{Protocol: "openai", Operation: "responses.create", ChannelID: "channel_00000000000000000000000000000002", Model: "logical-responses", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 500_000, InputSale: 1_000_000, CachedInputCost: 250_000, CachedInputSale: 500_000, OutputCost: 2_000_000, OutputSale: 3_000_000}}, "responses-route-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := BeginRequest{Protocol: "openai", Operation: "responses.create", RequestID: "routed-responses", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "logical-responses", ChannelID: "channel_00000000000000000000000000000002", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "responses-route-idempotency", Fingerprint: [32]byte{52}, CandidateID: "candidate_xai", Provider: "xai", ProviderModel: "grok-provider", RoutingPolicy: "priority", RouteRank: 1, PriceEvaluatedAt: time.Now().UTC()}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version string
+	if err = pool.QueryRow(ctx, `SELECT route_evidence_version FROM chat_request_charges WHERE id=$1`, charge.ID).Scan(&version); err != nil || version != "openai-responses-route-v1" {
+		t.Fatalf("version=%s err=%v", version, err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE chat_request_charges SET provider_model='changed' WHERE id=$1`, charge.ID); err == nil {
+		t.Fatal("Responses route evidence mutated")
+	}
+}
+
 func TestConcurrentRoutedIdempotencyCreatesOneChargeAndReservation(t *testing.T) {
 	service, pool := chatBillingFixture(t)
 	request := BeginRequest{RequestID: "concurrent-route", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "gpt-4.1", ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "concurrent-route-key", Fingerprint: [32]byte{71}, CandidateID: "candidate_openai", Provider: "openai", ProviderModel: "gpt-4.1", RoutingPolicy: "priority", PriceEvaluatedAt: time.Now().UTC()}

@@ -98,6 +98,7 @@ type Config struct {
 	OpenAIChatRoutes               []ChatRoute
 	OpenAIResponsesModels          []string
 	OpenAIResponsesModelLimits     map[string]ChatModelLimit
+	OpenAIResponsesRoutes          []ResponsesRoute
 	ResponsesTimeout               time.Duration
 	ResponsesStreamIdleTimeout     time.Duration
 	ResponsesBodyBytes             int64
@@ -172,6 +173,32 @@ type ChatCandidate struct {
 	Streaming     bool   `json:"streaming"`
 	Tools         bool   `json:"tools"`
 	JSONMode      bool   `json:"json_mode"`
+}
+type ResponsesRoute struct {
+	Model               string               `json:"model"`
+	Owner               string               `json:"owner"`
+	Policy              string               `json:"policy"`
+	FixedCandidateID    string               `json:"fixed_candidate_id"`
+	MaximumInputTokens  int64                `json:"maximum_input_tokens"`
+	MaximumOutputTokens int64                `json:"maximum_output_tokens"`
+	Candidates          []ResponsesCandidate `json:"candidates"`
+}
+type ResponsesCandidate struct {
+	ID              string `json:"id"`
+	Provider        string `json:"provider"`
+	ProviderModel   string `json:"provider_model"`
+	ChannelID       string `json:"channel_id"`
+	Priority        int    `json:"priority"`
+	Weight          uint32 `json:"weight"`
+	Enabled         bool   `json:"enabled"`
+	Streaming       bool   `json:"streaming"`
+	FunctionTools   bool   `json:"function_tools"`
+	WebSearch       bool   `json:"web_search"`
+	XSearch         bool   `json:"x_search"`
+	CodeInterpreter bool   `json:"code_interpreter"`
+	ImageGeneration bool   `json:"image_generation"`
+	JSONMode        bool   `json:"json_mode"`
+	StoredResponse  bool   `json:"stored_response"`
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -388,6 +415,27 @@ func Load(lookup LookupEnv) (Config, error) {
 			}
 			seen[model] = true
 			cfg.OpenAIResponsesModels = append(cfg.OpenAIResponsesModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_ROUTES_JSON"); ok {
+		decoder := json.NewDecoder(bytes.NewBufferString(value))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&cfg.OpenAIResponsesRoutes); err != nil || decoder.Decode(&struct{}{}) != io.EOF || len(cfg.OpenAIResponsesRoutes) == 0 || len(cfg.OpenAIResponsesRoutes) > 1000 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_ROUTES_JSON: must contain a bounded valid route array")
+		}
+		if len(cfg.OpenAIResponsesModels) > 0 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_ROUTES_JSON: cannot be combined with GATEWAY_OPENAI_RESPONSES_MODELS")
+		}
+		seen := map[string]bool{}
+		for _, route := range cfg.OpenAIResponsesRoutes {
+			if route.Model == "" || seen[route.Model] || len(route.Model) > 200 || len(route.Candidates) == 0 || len(route.Candidates) > 128 || route.MaximumInputTokens < 0 || route.MaximumOutputTokens < 0 || (route.MaximumInputTokens == 0) != (route.MaximumOutputTokens == 0) {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_ROUTES_JSON: contains an invalid route")
+			}
+			seen[route.Model] = true
+			cfg.OpenAIResponsesModels = append(cfg.OpenAIResponsesModels, route.Model)
+			if route.MaximumInputTokens > 0 {
+				cfg.OpenAIResponsesModelLimits[route.Model] = ChatModelLimit{route.MaximumInputTokens, route.MaximumOutputTokens}
+			}
 		}
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT"); ok {
