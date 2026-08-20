@@ -75,6 +75,7 @@ func TestTypedRecordsCollapseUnknownCardinality(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder.Route(context.Background(), RouteRecord{Protocol: "customer-secret", Operation: "model-secret", Policy: "candidate-secret", Outcome: "raw-error-secret"})
+	recorder.Job(context.Background(), JobRecord{Protocol: "tenant-secret", Stage: "raw-stage-secret", Status: "raw-status-secret", Outcome: "raw-error-secret"})
 	var collected metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &collected); err != nil {
 		t.Fatal(err)

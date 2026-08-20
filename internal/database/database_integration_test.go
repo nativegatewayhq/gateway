@@ -4,11 +4,50 @@ package database
 
 import (
 	"context"
+	"io/fs"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func TestAllMigrationsApplyToEmptySchema(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	ctx := context.Background()
+	pool, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	_, _ = conn.Exec(ctx, `DROP SCHEMA IF EXISTS gateway_fresh_migration_test CASCADE`)
+	if _, err := conn.Exec(ctx, `CREATE SCHEMA gateway_fresh_migration_test; SET search_path TO gateway_fresh_migration_test`); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Exec(ctx, `SET search_path TO public; DROP SCHEMA IF EXISTS gateway_fresh_migration_test CASCADE`)
+	entries, err := fs.Glob(migrationFiles, "migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(entries)
+	for _, name := range entries {
+		body, err := migrationFiles.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, string(body)); err != nil {
+			t.Fatalf("migration %s: %v", name, err)
+		}
+	}
+}
 
 func TestMigrateIsRepeatable(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")

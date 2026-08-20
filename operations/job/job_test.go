@@ -2,6 +2,8 @@ package job
 
 import (
 	"crypto/sha256"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -41,5 +43,22 @@ func TestValidateObservationRequiresTerminalSnapshot(t *testing.T) {
 	}
 	if err := ValidateObservation(Succeeded, Observation{Status: Failed}, 1024); err == nil {
 		t.Fatal("terminal conflict accepted")
+	}
+}
+
+func TestPublicJobExcludesProviderAndTenantMetadata(t *testing.T) {
+	value := Job{ID: "job_00000000000000000000000000000000", Owner: Owner{OrganizationID: "secret"}, Provider: "secret-provider", ChannelID: "secret-channel", ChargeID: "secret-charge", Status: Succeeded, Snapshot: Snapshot{Status: 200, Body: []byte("result")}}
+	public := Public(value)
+	if public.ID != value.ID || public.Result == nil || string(public.Result.Body) != "result" {
+		t.Fatalf("public=%+v", public)
+	}
+	encoded, err := json.Marshal(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"secret-provider", "secret-channel", "secret-charge", "secret\""} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("public job leaked %q: %s", secret, encoded)
+		}
 	}
 }

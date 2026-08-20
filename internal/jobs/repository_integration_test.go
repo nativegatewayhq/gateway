@@ -48,7 +48,7 @@ func jobRepositoryFixture(t *testing.T) (*Repository, joboperation.Owner, Create
 		t.Fatal(err)
 	}
 	fingerprint := sha256.Sum256([]byte("stable request"))
-	request := CreateRequest{RequestID: "request-" + suffix, Owner: owner, Protocol: "replicate", Operation: "image.generate", Model: "owner/model", Provider: "openai", ChannelID: "channel_00000000000000000000000000000001", IdempotencyKey: "idem-" + suffix, Fingerprint: fingerprint}
+	request := CreateRequest{RequestID: "request-" + suffix, Owner: owner, Protocol: "replicate", Operation: "image.generate", Model: "owner/model-" + suffix, Provider: "openai", ChannelID: "channel_00000000000000000000000000000001", IdempotencyKey: "idem-" + suffix, Fingerprint: fingerprint}
 	return repository, owner, request
 }
 
@@ -103,36 +103,53 @@ func TestSubmitClaimObservationAndTerminalReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.BeginSubmit(ctx, owner, created.ID); err != nil {
+	attempt, err := repository.BeginSubmit(ctx, owner, created.ID, "submitter", time.Minute)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.BeginSubmit(ctx, owner, created.ID); !errors.Is(err, joboperation.ErrConflict) {
+	if _, err := repository.BeginSubmit(ctx, owner, created.ID, "submitter", time.Minute); !errors.Is(err, joboperation.ErrConflict) {
 		t.Fatalf("duplicate submit=%v", err)
 	}
-	if _, err := repository.ConfirmSubmit(ctx, owner, created.ID, "provider-internal-id", joboperation.Queued, time.Now().Add(-time.Second)); err != nil {
+	if _, err := repository.ConfirmSubmit(ctx, owner, attempt, "provider-"+request.RequestID, joboperation.Queued, time.Now().Add(-24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	leases, err := repository.ClaimDue(ctx, "worker-a", time.Now(), time.Minute, 10)
-	if err != nil || len(leases) != 1 {
+	leases, err := repository.ClaimDue(ctx, "worker-a", time.Now(), time.Minute, 100)
+	lease, found := leaseFor(leases, created.ID)
+	if err != nil || !found {
 		t.Fatalf("leases=%+v err=%v", leases, err)
 	}
 	body := []byte(`{"status":"succeeded"}`)
 	observation := joboperation.Observation{Status: joboperation.Succeeded, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}}
-	terminal, err := repository.ApplyObservation(ctx, leases[0], observation, "poll")
+	terminal, err := repository.ApplyObservation(ctx, lease, observation, "poll", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if terminal.Status != joboperation.Succeeded || terminal.SettlementState != "PENDING" || string(terminal.Snapshot.Body) != string(body) {
 		t.Fatalf("terminal=%+v", terminal)
 	}
-	if _, err := repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1}}, observation, "webhook"); err != nil {
+	if _, err := repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1}}, observation, "webhook", time.Time{}); err != nil {
 		t.Fatalf("duplicate observation=%v", err)
 	}
-	if _, err := repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1}}, joboperation.Observation{Status: joboperation.Failed, Snapshot: observation.Snapshot}, "webhook"); !errors.Is(err, joboperation.ErrConflict) {
+	if _, err := repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1}}, joboperation.Observation{Status: joboperation.Failed, Snapshot: observation.Snapshot}, "webhook", time.Time{}); !errors.Is(err, joboperation.ErrConflict) {
 		t.Fatalf("terminal conflict=%v", err)
 	}
 	if len(terminal.Snapshot.Headers) != 1 {
 		t.Fatalf("headers=%+v", terminal.Snapshot.Headers)
+	}
+	settlements, err := repository.ClaimSettlements(ctx, "settler-a", time.Now(), time.Minute, 100)
+	settlement, found := settlementFor(settlements, created.ID)
+	if err != nil || !found {
+		t.Fatalf("settlements=%+v err=%v", settlements, err)
+	}
+	if err := repository.MarkSettled(ctx, settlement); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.MarkSettled(ctx, settlement); err != nil {
+		t.Fatalf("idempotent settlement=%v", err)
+	}
+	stored, err := repository.Get(ctx, owner, created.ID)
+	if err != nil || stored.SettlementState != "SETTLED" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
 }
 
@@ -140,22 +157,136 @@ func TestExpiredLeaseIsRecoveredWithoutConcurrentClaim(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	ctx := context.Background()
 	created, _, _ := repository.Create(ctx, request)
-	_, _ = repository.BeginSubmit(ctx, owner, created.ID)
-	_, _ = repository.ConfirmSubmit(ctx, owner, created.ID, "provider-recovery", joboperation.Processing, time.Now().Add(-time.Second))
+	attempt, _ := repository.BeginSubmit(ctx, owner, created.ID, "submitter", time.Minute)
+	_, _ = repository.ConfirmSubmit(ctx, owner, attempt, "provider-"+request.RequestID, joboperation.Processing, time.Now().Add(-24*time.Hour))
 	now := time.Now()
-	first, err := repository.ClaimDue(ctx, "worker-a", now, 50*time.Millisecond, 1)
-	if err != nil || len(first) != 1 {
+	claimed, err := repository.ClaimDue(ctx, "worker-a", now, 50*time.Millisecond, 100)
+	first, found := leaseFor(claimed, created.ID)
+	if err != nil || !found {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
-	second, err := repository.ClaimDue(ctx, "worker-b", now.Add(10*time.Millisecond), time.Minute, 1)
-	if err != nil || len(second) != 0 {
+	extended, err := repository.Heartbeat(ctx, first, now.Add(100*time.Millisecond))
+	if err != nil || !extended.LeaseUntil.Equal(now.Add(100*time.Millisecond)) {
+		t.Fatalf("heartbeat=%+v err=%v", extended, err)
+	}
+	first = extended
+	second, err := repository.ClaimDue(ctx, "worker-b", now.Add(10*time.Millisecond), time.Minute, 100)
+	_, concurrentlyClaimed := leaseFor(second, created.ID)
+	if err != nil || concurrentlyClaimed {
 		t.Fatalf("concurrent=%+v err=%v", second, err)
 	}
-	recovered, err := repository.ClaimDue(ctx, "worker-b", now.Add(time.Second), time.Minute, 1)
-	if err != nil || len(recovered) != 1 || recovered[0].PollCount != 2 {
+	recoveredRows, err := repository.ClaimDue(ctx, "worker-b", now.Add(time.Second), time.Minute, 100)
+	recovered, found := leaseFor(recoveredRows, created.ID)
+	if err != nil || !found || recovered.PollCount != 2 {
 		t.Fatalf("recovered=%+v err=%v", recovered, err)
 	}
-	if err := repository.Reschedule(ctx, first[0], time.Now().Add(time.Minute), "timeout"); !errors.Is(err, joboperation.ErrLeaseLost) {
+	if err := repository.Reschedule(ctx, first, time.Now().Add(time.Minute), "timeout"); !errors.Is(err, joboperation.ErrLeaseLost) {
 		t.Fatalf("stale lease reschedule=%v", err)
 	}
+}
+
+func TestStaleSubmittingLeaseBecomesRecoverableWithoutSecondSubmit(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	ctx := context.Background()
+	created, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.BeginSubmit(ctx, owner, created.ID, "crashed-submitter", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	claimed, err := repository.ClaimDue(ctx, "recovery-worker", time.Now(), time.Minute, 100)
+	lease, found := leaseFor(claimed, created.ID)
+	if err != nil || !found || lease.State != "SUBMITTING" || lease.ProviderJobID != "" {
+		t.Fatalf("lease=%+v err=%v", lease, err)
+	}
+	recovered, err := repository.ApplyObservation(ctx, lease, joboperation.Observation{Status: joboperation.Processing, ProviderJobID: "recovered-" + request.RequestID}, "reconciliation", time.Now().Add(time.Minute))
+	if err != nil || recovered.Status != joboperation.Processing {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	if _, err := repository.BeginSubmit(ctx, owner, created.ID, "second-submitter", time.Minute); !errors.Is(err, joboperation.ErrConflict) {
+		t.Fatalf("second submit=%v", err)
+	}
+}
+
+func TestConcurrentConflictingTerminalObservationsCreateOneWinner(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	ctx := context.Background()
+	created, _, _ := repository.Create(ctx, request)
+	attempt, _ := repository.BeginSubmit(ctx, owner, created.ID, "submitter", time.Minute)
+	_, _ = repository.ConfirmSubmit(ctx, owner, attempt, "provider-"+request.RequestID, joboperation.Processing, time.Now().Add(time.Hour))
+	success := joboperation.Observation{Status: joboperation.Succeeded, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{}, Body: []byte("success")}}
+	failure := joboperation.Observation{Status: joboperation.Failed, Snapshot: joboperation.Snapshot{Status: 500, Headers: map[string][]string{}, Body: []byte("failure")}}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, observation := range []joboperation.Observation{success, failure} {
+		go func(value joboperation.Observation) {
+			<-start
+			_, err := repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1}}, value, "webhook", time.Time{})
+			results <- err
+		}(observation)
+	}
+	close(start)
+	first, second := <-results, <-results
+	if (first == nil) == (second == nil) {
+		t.Fatalf("results=%v/%v", first, second)
+	}
+	loser := first
+	if loser == nil {
+		loser = second
+	}
+	if !errors.Is(loser, joboperation.ErrConflict) {
+		t.Fatalf("loser=%v", loser)
+	}
+	var terminalEvents int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_events WHERE job_id=$1 AND event_type='OBSERVED'`, created.ID).Scan(&terminalEvents); err != nil || terminalEvents != 1 {
+		t.Fatalf("events=%d err=%v", terminalEvents, err)
+	}
+}
+
+func TestCancelIsAttemptedOnceAndConvergesWithPolling(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	ctx := context.Background()
+	created, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := repository.BeginSubmit(ctx, owner, created.ID, "submitter", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repository.ConfirmSubmit(ctx, owner, attempt, "provider-"+request.RequestID, joboperation.Processing, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	_, cancelLease, claimed, err := repository.ClaimCancel(ctx, owner, created.ID, "canceler", time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%+v/%v err=%v", cancelLease, claimed, err)
+	}
+	if _, _, claimed, err := repository.ClaimCancel(ctx, owner, created.ID, "other", time.Minute); err != nil || claimed {
+		t.Fatalf("duplicate cancel claimed=%v err=%v", claimed, err)
+	}
+	canceled, err := repository.ApplyObservation(ctx, cancelLease, joboperation.Observation{Status: joboperation.Canceled}, "cancel", time.Time{})
+	if err != nil || canceled.Status != joboperation.Canceled || canceled.SettlementState != "PENDING" {
+		t.Fatalf("canceled=%+v err=%v", canceled, err)
+	}
+}
+
+func leaseFor(leases []Lease, id string) (Lease, bool) {
+	for _, lease := range leases {
+		if lease.JobID == id {
+			return lease, true
+		}
+	}
+	return Lease{}, false
+}
+
+func settlementFor(leases []SettlementLease, id string) (SettlementLease, bool) {
+	for _, lease := range leases {
+		if lease.Job.ID == id {
+			return lease, true
+		}
+	}
+	return SettlementLease{}, false
 }

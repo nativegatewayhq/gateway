@@ -63,6 +63,29 @@ type Observation struct {
 	Status          Status
 	Snapshot        Snapshot
 	FailureCategory string
+	ProviderJobID   string
+}
+
+type PublicResult struct {
+	Status  int                 `json:"status"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	Body    []byte              `json:"body,omitempty"`
+}
+type PublicJob struct {
+	ID              string        `json:"id"`
+	Status          Status        `json:"status"`
+	Result          *PublicResult `json:"result,omitempty"`
+	FailureCategory string        `json:"failure_category,omitempty"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
+}
+
+func Public(value Job) PublicJob {
+	result := PublicJob{ID: value.ID, Status: value.Status, FailureCategory: value.FailureCategory, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	if value.Status == Succeeded || value.Status == Failed {
+		result.Result = &PublicResult{Status: value.Snapshot.Status, Headers: value.Snapshot.Headers, Body: append([]byte(nil), value.Snapshot.Body...)}
+	}
+	return result
 }
 
 func ValidID(value string) bool { return idPattern.MatchString(value) }
@@ -110,10 +133,21 @@ func ValidateObservation(current Status, observation Observation, maximumBodyByt
 	if observation.Status == Canceled && len(observation.Snapshot.Body) != 0 {
 		return ErrInvalid
 	}
-	if len(observation.FailureCategory) > 80 || strings.ContainsAny(observation.FailureCategory, "\r\n") {
+	if observation.FailureCategory != "" && !ValidFailureCategory(observation.FailureCategory) {
+		return ErrInvalid
+	}
+	if len(observation.ProviderJobID) > 500 || strings.ContainsAny(observation.ProviderJobID, "\r\n") {
 		return ErrInvalid
 	}
 	return nil
+}
+
+func ValidFailureCategory(value string) bool {
+	switch value {
+	case "rejected", "invalid_request", "rate_limited", "unavailable", "timeout", "connection", "canceled", "invalid_response", "missing_provider_job_id", "provider_error", "provider_unavailable", "cancel_unknown", "settlement_failed", "manual_review":
+		return true
+	}
+	return false
 }
 
 func ValidateSnapshot(snapshot Snapshot, maximumBodyBytes int64) error {
