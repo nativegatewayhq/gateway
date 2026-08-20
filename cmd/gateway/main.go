@@ -71,7 +71,7 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway pricing initialization failed")
 			return 1
 		}
-		billingService, billingErr := chargebilling.NewService(pool, priceEstimator, ledger.NewService(pool))
+		billingService, billingErr := chargebilling.NewServiceWithLimit(pool, priceEstimator, ledger.NewService(pool), cfg.ReplayBodyBytes)
 		if billingErr != nil {
 			logger.Error("gateway billing initialization failed")
 			return 1

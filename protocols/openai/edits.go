@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
@@ -93,7 +94,16 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		}
 		var begin *billing.BeginRequest
 		if handler.common.billing != nil {
-			value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality}
+			idempotencyKey, keyErr := idempotency.Extract(request.Header)
+			if keyErr != nil {
+				writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+				return
+			}
+			var fingerprint [32]byte
+			if idempotencyKey != "" {
+				fingerprint = idempotency.Fingerprint("openai", string(imageoperation.Edit), selector.Model, route.ChannelID, mediaType, body)
+			}
+			value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint}
 			begin = &value
 		}
 		handler.execute(tracked, request, route, begin, request.Header.Get("Content-Type"), int64(len(body)), bytes.NewReader(body))
@@ -153,7 +163,24 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	}
 	var begin *billing.BeginRequest
 	if handler.common.billing != nil {
-		value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality}
+		idempotencyKey, keyErr := idempotency.Extract(request.Header)
+		if keyErr != nil {
+			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+			return
+		}
+		var fingerprint [32]byte
+		if idempotencyKey != "" {
+			fingerprint, err = idempotency.FingerprintReader("openai", string(imageoperation.Edit), selector.Model, route.ChannelID, mediaType, file, written)
+			if err != nil {
+				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
+				return
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
+				return
+			}
+		}
+		value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint}
 		begin = &value
 	}
 	handler.execute(tracked, request, route, begin, request.Header.Get("Content-Type"), written, file)
@@ -177,11 +204,9 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
-			settled := true
 			if charge != nil {
-				settled = handler.common.settle(writer, request.Context(), charge.ID, false)
-			}
-			if settled {
+				handler.common.reconciliationError(writer, request.Context(), charge.ID)
+			} else {
 				writeError(writer, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
 			}
 		}
@@ -198,17 +223,38 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 			return
 		}
 		charge = &started
+		if charge.Replay {
+			handler.common.writeSnapshot(writer, charge.Response, true)
+			return
+		}
 	}
 	response, err := executor.Generate(request.Context(), openaiimages.Request{Operation: openaiimages.Edit, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
 	if err != nil {
-		if charge != nil && !handler.common.settle(writer, request.Context(), charge.ID, false) {
+		if charge != nil {
+			completed, completeErr := handler.common.complete(request.Context(), charge.ID, false, handler.common.executorErrorSnapshot(err))
+			if completeErr != nil {
+				handler.common.reconciliationError(writer, request.Context(), charge.ID)
+				return
+			}
+			handler.common.writeSnapshot(writer, completed.Response, false)
 			return
 		}
 		handler.common.writeExecutorError(writer, err)
 		return
 	}
 	defer response.Body.Close()
-	if charge != nil && !handler.common.settle(writer, request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299) {
+	if charge != nil {
+		responseBody, readErr := readBounded(response.Body, handler.common.billing.MaximumResponseBytes())
+		if readErr != nil {
+			handler.common.reconciliationError(writer, request.Context(), charge.ID)
+			return
+		}
+		completed, completeErr := handler.common.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody})
+		if completeErr != nil {
+			handler.common.reconciliationError(writer, request.Context(), charge.ID)
+			return
+		}
+		handler.common.writeSnapshot(writer, completed.Response, false)
 		return
 	}
 	copyResponseHeaders(writer.Header(), response.Header)

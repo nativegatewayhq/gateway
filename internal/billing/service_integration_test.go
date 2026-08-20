@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,6 +171,139 @@ func TestBeginRollsBackWalletWhenChargeCreationFails(t *testing.T) {
 		t.Fatal("begin succeeded without charge ID entropy")
 	}
 	assertWalletAndCharge(t, pool, 500, 0, 0, "RESERVED")
+}
+
+func TestIdempotencyReplayConflictAndSafeSnapshot(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	ctx := context.Background()
+	request := billableRequest("original-request")
+	request.IdempotencyKey = "client-idempotency-key"
+	request.RequestFingerprint = [32]byte{1, 2, 3}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Begin(ctx, request); !errors.Is(err, ErrRequestPending) {
+		t.Fatalf("in-flight retry error=%v", err)
+	}
+	snapshot := ResponseSnapshot{Status: 201, Headers: map[string][]string{"Content-Type": {"application/json"}, "Retry-After": {"2"}, "Set-Cookie": {"secret=cookie"}}, Body: []byte(`{"native":"response"}`)}
+	completed, err := service.Complete(ctx, charge.ID, true, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := completed.Response.Headers["Set-Cookie"]; exists {
+		t.Fatalf("unsafe headers=%v", completed.Response.Headers)
+	}
+	retryRequest := request
+	retryRequest.RequestID = "retry-request"
+	restartedEstimator, _ := pricing.NewService(pool, 0)
+	restarted, _ := NewService(pool, restartedEstimator, ledger.NewService(pool))
+	replayed, err := restarted.Begin(ctx, retryRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed.Replay || replayed.ID != charge.ID || replayed.Response.Status != 201 || string(replayed.Response.Body) != `{"native":"response"}` || replayed.Response.Headers["Retry-After"][0] != "2" {
+		t.Fatalf("replay=%+v", replayed)
+	}
+	conflict := retryRequest
+	conflict.RequestFingerprint = [32]byte{9}
+	if _, err := service.Begin(ctx, conflict); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("conflict error=%v", err)
+	}
+	assertWalletAndCharge(t, pool, 800, 0, 1, "CAPTURED")
+	if _, err := pool.Exec(ctx, `INSERT INTO organizations(id,name,slug) VALUES('org_billing_other','Other billing','other-billing'); INSERT INTO projects(id,organization_id,name,slug) VALUES('project_billing_other','org_billing_other','Other billing','other-billing')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.NewService(pool).Deposit(ctx, "org_billing_other", 500, "other-deposit"); err != nil {
+		t.Fatal(err)
+	}
+	other := request
+	other.RequestID = "other-request"
+	other.OrganizationID = "org_billing_other"
+	other.ProjectID = "project_billing_other"
+	if _, err := service.Begin(ctx, other); err != nil {
+		t.Fatalf("organization-scoped key error=%v", err)
+	}
+}
+
+func TestConcurrentIdempotentBeginHasSingleReservation(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	request := billableRequest("concurrent-original")
+	request.IdempotencyKey = "concurrent-key"
+	request.RequestFingerprint = [32]byte{4}
+	type outcome struct {
+		err error
+	}
+	results := make(chan outcome, 2)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := service.Begin(context.Background(), request)
+			results <- outcome{err}
+		}()
+	}
+	wait.Wait()
+	close(results)
+	success, pending := 0, 0
+	for result := range results {
+		if result.err == nil {
+			success++
+		} else if errors.Is(result.err, ErrRequestPending) {
+			pending++
+		} else {
+			t.Fatal(result.err)
+		}
+	}
+	if success != 1 || pending != 1 {
+		t.Fatalf("success/pending=%d/%d", success, pending)
+	}
+	assertWalletAndCharge(t, pool, 800, 200, 1, "RESERVED")
+}
+
+func TestResponseLimitAndCorruptionFailClosed(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	service.maxResponseBytes = 4
+	request := billableRequest("response-limit")
+	request.IdempotencyKey = "response-limit-key"
+	request.RequestFingerprint = [32]byte{5}
+	charge, err := service.Begin(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Complete(context.Background(), charge.ID, true, ResponseSnapshot{Status: 200, Body: []byte("12345")}); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("oversized error=%v", err)
+	}
+	assertWalletAndCharge(t, pool, 800, 200, 1, "RESERVED")
+	service.maxResponseBytes = 1024
+	if _, err := pool.Exec(context.Background(), `CREATE FUNCTION fail_test_charge_completion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test completion failure'; END $$; CREATE TRIGGER fail_test_charge_completion BEFORE UPDATE ON image_request_charges FOR EACH ROW WHEN (NEW.response_snapshot_version=1) EXECUTE FUNCTION fail_test_charge_completion()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Complete(context.Background(), charge.ID, true, ResponseSnapshot{Status: 200, Body: []byte("safe")}); err == nil {
+		t.Fatal("completion succeeded through failing trigger")
+	}
+	assertWalletAndCharge(t, pool, 800, 200, 1, "RESERVED")
+	if _, err := pool.Exec(context.Background(), `DROP TRIGGER fail_test_charge_completion ON image_request_charges; DROP FUNCTION fail_test_charge_completion()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Complete(context.Background(), charge.ID, true, ResponseSnapshot{Status: 200, Body: []byte("safe")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `ALTER TABLE image_request_charges DISABLE TRIGGER image_request_charges_update_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE image_request_charges SET response_body='broken' WHERE id=$1`, charge.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `ALTER TABLE image_request_charges ENABLE TRIGGER image_request_charges_update_guard`); err != nil {
+		t.Fatal(err)
+	}
+	retry := request
+	retry.RequestID = "corrupt-retry"
+	if _, err := service.Begin(context.Background(), retry); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("corrupt replay error=%v", err)
+	}
 }
 
 func assertWalletAndCharge(t *testing.T, pool *pgxpool.Pool, available, reserved int64, charges int, state string) {

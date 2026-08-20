@@ -15,6 +15,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
@@ -40,9 +41,9 @@ type Executor interface {
 
 type Billing interface {
 	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
-	Capture(context.Context, string) (billing.Charge, error)
-	Release(context.Context, string) (billing.Charge, error)
+	Complete(context.Context, string, bool, billing.ResponseSnapshot) (billing.Charge, error)
 	MarkReconciling(context.Context, string) error
+	MaximumResponseBytes() int64
 }
 
 type Handler struct {
@@ -77,11 +78,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
-			settled := true
 			if charge != nil {
-				settled = handler.settle(tracked, request.Context(), charge.ID, false)
-			}
-			if settled && !tracked.wroteHeader {
+				handler.reconciliationError(tracked, request.Context(), charge.ID)
+			} else if !tracked.wroteHeader {
 				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
 			}
 			handler.logger.Error("openai image request panic recovered", "request_id", requestid.FromContext(request.Context()))
@@ -160,12 +159,25 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_pricing_selector", "request contains unsupported billing options")
 			return
 		}
-		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Generate), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality})
+		idempotencyKey, keyErr := idempotency.Extract(request.Header)
+		if keyErr != nil {
+			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "idempotency key is invalid")
+			return
+		}
+		var fingerprint [32]byte
+		if idempotencyKey != "" {
+			fingerprint = idempotency.Fingerprint("openai", string(imageoperation.Generate), selector.Model, route.ChannelID, mediaType, body)
+		}
+		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Generate), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint})
 		if billingErr != nil {
 			handler.writeBillingError(tracked, billingErr)
 			return
 		}
 		charge = &startedCharge
+		if charge.Replay {
+			handler.writeSnapshot(tracked, charge.Response, true)
+			return
+		}
 	}
 	response, err := executor.Generate(request.Context(), openaiimages.Request{
 		ContentType: request.Header.Get("Content-Type"),
@@ -174,14 +186,33 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		Body:        bytes.NewReader(body),
 	})
 	if err != nil {
-		if charge != nil && !handler.settle(tracked, request.Context(), charge.ID, false) {
+		if charge != nil {
+			snapshot := handler.executorErrorSnapshot(err)
+			completed, completeErr := handler.complete(request.Context(), charge.ID, false, snapshot)
+			if completeErr != nil {
+				handler.reconciliationError(tracked, request.Context(), charge.ID)
+				return
+			}
+			handler.writeSnapshot(tracked, completed.Response, false)
 			return
 		}
 		handler.writeExecutorError(tracked, err)
 		return
 	}
 	defer response.Body.Close()
-	if charge != nil && !handler.settle(tracked, request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299) {
+	if charge != nil {
+		responseBody, readErr := readBounded(response.Body, handler.billing.MaximumResponseBytes())
+		if readErr != nil {
+			handler.reconciliationError(tracked, request.Context(), charge.ID)
+			return
+		}
+		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}
+		completed, completeErr := handler.complete(request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299, snapshot)
+		if completeErr != nil {
+			handler.reconciliationError(tracked, request.Context(), charge.ID)
+			return
+		}
+		handler.writeSnapshot(tracked, completed.Response, false)
 		return
 	}
 	copyResponseHeaders(tracked.Header(), response.Header)
@@ -221,31 +252,29 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 	return principal, true
 }
 
-func (handler *Handler) settle(writer http.ResponseWriter, ctx context.Context, chargeID string, success bool) bool {
+func (handler *Handler) complete(ctx context.Context, chargeID string, success bool, snapshot billing.ResponseSnapshot) (billing.Charge, error) {
 	settlementContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	var err error
-	if success {
-		_, err = handler.billing.Capture(settlementContext, chargeID)
-	} else {
-		_, err = handler.billing.Release(settlementContext, chargeID)
-	}
-	if err == nil {
-		return true
-	}
+	return handler.billing.Complete(settlementContext, chargeID, success, snapshot)
+}
+
+func (handler *Handler) reconciliationError(writer http.ResponseWriter, ctx context.Context, chargeID string) {
 	markContext, markCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer markCancel()
 	_ = handler.billing.MarkReconciling(markContext, chargeID)
 	writeError(writer, http.StatusServiceUnavailable, "server_error", "billing_reconciliation_required", "billing settlement is pending")
-	return false
 }
 
 func (handler *Handler) writeBillingError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ledger.ErrInsufficientFunds):
 		writeError(writer, http.StatusPaymentRequired, "invalid_request_error", "insufficient_credits", "insufficient credits")
-	case errors.Is(err, billing.ErrRequestConflict), errors.Is(err, billing.ErrRequestPending), errors.Is(err, billing.ErrAlreadySettled):
-		writeError(writer, http.StatusConflict, "invalid_request_error", "request_conflict", "request identifier is already in use")
+	case errors.Is(err, billing.ErrRequestConflict):
+		writeError(writer, http.StatusConflict, "invalid_request_error", "idempotency_conflict", "idempotency key conflicts with another request")
+	case errors.Is(err, billing.ErrRequestPending):
+		writeError(writer, http.StatusConflict, "invalid_request_error", "idempotency_in_progress", "idempotent request is still in progress")
+	case errors.Is(err, billing.ErrAlreadySettled):
+		writeError(writer, http.StatusConflict, "invalid_request_error", "request_conflict", "request identifier is already settled")
 	case errors.Is(err, billing.ErrInvalidRequest):
 		writeError(writer, http.StatusBadRequest, "invalid_request_error", "invalid_billing_request", "request cannot be billed")
 	case errors.Is(err, pricing.ErrPriceUnavailable), errors.Is(err, pricing.ErrMarginViolation), errors.Is(err, ledger.ErrTenantUnavailable):
@@ -253,6 +282,45 @@ func (handler *Handler) writeBillingError(writer http.ResponseWriter, err error)
 	default:
 		writeError(writer, http.StatusServiceUnavailable, "server_error", "billing_unavailable", "billing unavailable")
 	}
+}
+
+func (handler *Handler) executorErrorSnapshot(err error) billing.ResponseSnapshot {
+	status, code, message := http.StatusInternalServerError, "internal_error", "internal server error"
+	switch {
+	case errors.Is(err, providercredentials.ErrCredentialUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "provider_unavailable", "provider unavailable"
+	case errors.Is(err, openaiimages.ErrTimeout):
+		status, code, message = http.StatusGatewayTimeout, "upstream_timeout", "provider request timed out"
+	case errors.Is(err, openaiimages.ErrCanceled):
+		status, code, message = 499, "request_canceled", "request canceled"
+	case errors.Is(err, openaiimages.ErrUpstream):
+		status, code, message = http.StatusBadGateway, "upstream_unavailable", "provider unavailable"
+	}
+	body, _ := json.Marshal(errorEnvelope{Error: errorBody{Message: message, Type: "server_error", Code: code}})
+	return billing.ResponseSnapshot{Status: status, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
+}
+
+func (handler *Handler) writeSnapshot(writer http.ResponseWriter, snapshot billing.ResponseSnapshot, replay bool) {
+	for key, values := range snapshot.Headers {
+		for _, value := range values {
+			writer.Header().Add(key, value)
+		}
+	}
+	if replay {
+		writer.Header().Set("Idempotency-Replayed", "true")
+	}
+	writer.WriteHeader(snapshot.Status)
+	_, _ = writer.Write(snapshot.Body)
+}
+
+func safeResponseHeaders(source http.Header) map[string][]string {
+	result := map[string][]string{}
+	for _, key := range []string{"Content-Type", "Retry-After"} {
+		if values := source.Values(key); len(values) > 0 {
+			result[key] = append([]string(nil), values...)
+		}
+	}
+	return result
 }
 
 func (handler *Handler) writeExecutorError(writer http.ResponseWriter, err error) {

@@ -21,16 +21,22 @@ import (
 
 type billingFake struct {
 	beginRequest chargebilling.BeginRequest
+	beginCharge  chargebilling.Charge
 	beginErr     error
 	captureErr   error
 	releaseErr   error
+	maxResponse  int64
 	events       []string
 }
 
 func (fake *billingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
 	fake.beginRequest = request
 	fake.events = append(fake.events, "begin")
-	return chargebilling.Charge{ID: "charge_00000000000000000000000000000001"}, fake.beginErr
+	charge := fake.beginCharge
+	if charge.ID == "" {
+		charge.ID = "charge_00000000000000000000000000000001"
+	}
+	return charge, fake.beginErr
 }
 func (fake *billingFake) Capture(context.Context, string) (chargebilling.Charge, error) {
 	fake.events = append(fake.events, "capture")
@@ -43,6 +49,20 @@ func (fake *billingFake) Release(context.Context, string) (chargebilling.Charge,
 func (fake *billingFake) MarkReconciling(context.Context, string) error {
 	fake.events = append(fake.events, "reconciling")
 	return nil
+}
+func (fake *billingFake) Complete(_ context.Context, _ string, success bool, snapshot chargebilling.ResponseSnapshot) (chargebilling.Charge, error) {
+	if success {
+		fake.events = append(fake.events, "capture")
+		return chargebilling.Charge{Response: snapshot}, fake.captureErr
+	}
+	fake.events = append(fake.events, "release")
+	return chargebilling.Charge{Response: snapshot}, fake.releaseErr
+}
+func (fake *billingFake) MaximumResponseBytes() int64 {
+	if fake.maxResponse > 0 {
+		return fake.maxResponse
+	}
+	return 1024 * 1024
 }
 
 func billingAuth() Authenticator {
@@ -132,6 +152,40 @@ func TestBillableImagesRejectsUnavailablePriceBeforeProvider(t *testing.T) {
 	}
 }
 
+func TestBillableImagesReplaysStoredResponseWithoutProvider(t *testing.T) {
+	providerCalls := 0
+	fake := &billingFake{beginCharge: chargebilling.Charge{ID: "charge_00000000000000000000000000000001", Replay: true, Response: chargebilling.ResponseSnapshot{Status: 202, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"stored":true}`)}}}
+	handler := NewBillableImagesHandler(slog.Default(), billingAuth(), testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+	}, 1024, fake)
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"gpt-image-1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer service-secret")
+	request.Header.Set(requestid.HeaderName, "replay-request")
+	request.Header.Set("Idempotency-Key", "replay-key")
+	response := httptest.NewRecorder()
+	requestid.Middleware(handler).ServeHTTP(response, request)
+	if response.Code != 202 || response.Body.String() != `{"stored":true}` || response.Header().Get("Idempotency-Replayed") != "true" || providerCalls != 0 {
+		t.Fatalf("response=%d %s headers=%v calls=%d", response.Code, response.Body.String(), response.Header(), providerCalls)
+	}
+	if fake.beginRequest.IdempotencyKey != "replay-key" || fake.beginRequest.RequestFingerprint == ([32]byte{}) {
+		t.Fatalf("begin=%+v", fake.beginRequest)
+	}
+}
+
+func TestBillableImagesOversizedProviderResponseBecomesReconciling(t *testing.T) {
+	fake := &billingFake{maxResponse: 4}
+	handler := NewBillableImagesHandler(slog.Default(), billingAuth(), testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("12345"))}, nil
+		}),
+	}, 1024, fake)
+	response := billableImageRequest(handler, `{"model":"gpt-image-1"}`)
+	if response.Code != 503 || strings.Join(fake.events, ",") != "begin,reconciling" {
+		t.Fatalf("response=%d events=%v body=%s", response.Code, fake.events, response.Body.String())
+	}
+}
+
 func TestBillableMultipartEditExtractsSelectorWithoutChangingBody(t *testing.T) {
 	body, contentType := multipartEdit(t, "gpt-image-1")
 	fake := &billingFake{}
@@ -148,9 +202,10 @@ func TestBillableMultipartEditExtractsSelectorWithoutChangingBody(t *testing.T) 
 	request.Header.Set("Content-Type", contentType)
 	request.Header.Set("Authorization", "Bearer service-secret")
 	request.Header.Set(requestid.HeaderName, "edit-request")
+	request.Header.Set("Idempotency-Key", "multipart-edit-key")
 	response := httptest.NewRecorder()
 	requestid.Middleware(handler).ServeHTTP(response, request)
-	if response.Code != 200 || fake.beginRequest.Operation != "image.edit" || fake.beginRequest.Quantity != 1 || strings.Join(fake.events, ",") != "begin,capture" {
+	if response.Code != 200 || fake.beginRequest.Operation != "image.edit" || fake.beginRequest.Quantity != 1 || fake.beginRequest.IdempotencyKey != "multipart-edit-key" || fake.beginRequest.RequestFingerprint == ([32]byte{}) || strings.Join(fake.events, ",") != "begin,capture" {
 		t.Fatalf("response=%d begin=%+v events=%v", response.Code, fake.beginRequest, fake.events)
 	}
 }

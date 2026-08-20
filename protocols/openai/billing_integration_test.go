@@ -55,6 +55,9 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	executor := executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
 		calls++
 		body, _ := io.ReadAll(request.Body)
+		if strings.Contains(string(body), `"executor":true`) {
+			return nil, openaiimages.ErrUpstream
+		}
 		if strings.Contains(string(body), `"fail":true`) {
 			return &http.Response{StatusCode: 429, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"native limit"}}`))}, nil
 		}
@@ -66,9 +69,19 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	if success.Code != 200 || success.Body.String() != `{"data":[{"url":"native-success"}]}` {
 		t.Fatalf("success=%d %s", success.Code, success.Body.String())
 	}
+	successReplay := billableProtocolRequest(handler, raw, "billable-success-retry", `{"model":"gpt-image-1","n":2}`)
+	if successReplay.Code != 200 || successReplay.Body.String() != success.Body.String() || successReplay.Header().Get("Idempotency-Replayed") != "true" || calls != 1 {
+		t.Fatalf("success replay=%d %s headers=%v calls=%d", successReplay.Code, successReplay.Body.String(), successReplay.Header(), calls)
+	}
 	failure := billableProtocolRequest(handler, raw, "billable-failure", `{"model":"gpt-image-1","fail":true}`)
-	if failure.Code != 429 || failure.Body.String() != `{"error":{"message":"native limit"}}` || calls != 2 {
+	failureReplay := billableProtocolRequest(handler, raw, "billable-failure-retry", `{"model":"gpt-image-1","fail":true}`)
+	if failure.Code != 429 || failure.Body.String() != `{"error":{"message":"native limit"}}` || failureReplay.Body.String() != failure.Body.String() || failureReplay.Header().Get("Idempotency-Replayed") != "true" || calls != 2 {
 		t.Fatalf("failure=%d %s calls=%d", failure.Code, failure.Body.String(), calls)
+	}
+	executorFailure := billableProtocolRequest(handler, raw, "billable-executor", `{"model":"gpt-image-1","executor":true}`)
+	executorReplay := billableProtocolRequest(handler, raw, "billable-executor-retry", `{"model":"gpt-image-1","executor":true}`)
+	if executorFailure.Code != 502 || executorReplay.Body.String() != executorFailure.Body.String() || executorReplay.Header().Get("Idempotency-Replayed") != "true" || calls != 3 {
+		t.Fatalf("executor replay=%d/%d calls=%d", executorFailure.Code, executorReplay.Code, calls)
 	}
 	var available, reserved int64
 	if err := pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_protocol_billing'`).Scan(&available, &reserved); err != nil {
@@ -78,8 +91,15 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state='CAPTURED'),count(*) FILTER (WHERE state='RELEASED') FROM image_request_charges WHERE organization_id='org_protocol_billing'`).Scan(&captured, &released); err != nil {
 		t.Fatal(err)
 	}
-	if available != 300 || reserved != 0 || captured != 1 || released != 1 {
+	if available != 300 || reserved != 0 || captured != 1 || released != 2 {
 		t.Fatalf("wallet=%d/%d charges=%d/%d", available, reserved, captured, released)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE projects SET status='disabled' WHERE id='project_protocol_billing'`); err != nil {
+		t.Fatal(err)
+	}
+	disabledReplay := billableProtocolRequest(handler, raw, "billable-success-disabled", `{"model":"gpt-image-1","n":2}`)
+	if disabledReplay.Code != 401 || calls != 3 {
+		t.Fatalf("disabled replay=%d calls=%d", disabledReplay.Code, calls)
 	}
 }
 
@@ -123,6 +143,15 @@ func billableProtocolRequest(handler http.Handler, key, id, body string) *httpte
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+key)
 	request.Header.Set(requestid.HeaderName, id)
+	if strings.HasPrefix(id, "billable-success") {
+		request.Header.Set("Idempotency-Key", "billable-success-key")
+	}
+	if strings.HasPrefix(id, "billable-failure") {
+		request.Header.Set("Idempotency-Key", "billable-failure-key")
+	}
+	if strings.HasPrefix(id, "billable-executor") {
+		request.Header.Set("Idempotency-Key", "billable-executor-key")
+	}
 	response := httptest.NewRecorder()
 	requestid.Middleware(handler).ServeHTTP(response, request)
 	return response
