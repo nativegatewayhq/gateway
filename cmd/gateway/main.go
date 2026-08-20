@@ -22,6 +22,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
@@ -104,7 +105,7 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway pricing initialization failed")
 			return 1
 		}
-		billingService, billingErr := chargebilling.NewServiceWithQuota(pool, priceEstimator, ledger.NewService(pool), costquota.NewStore(pool), cfg.ReplayBodyBytes)
+		billingService, billingErr := chargebilling.NewServiceWithControls(pool, priceEstimator, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool), cfg.ReplayBodyBytes)
 		if billingErr != nil {
 			logger.Error("gateway billing initialization failed")
 			return 1

@@ -25,6 +25,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/google"
 )
@@ -224,6 +225,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			}
 			startedCharge, beginErr := handler.billing.Begin(request.Context(), attempt)
 			if beginErr != nil {
+				if errors.Is(beginErr, spendcap.ErrExceeded) {
+					handler.logSpendCapSkip(request, candidate, beginErr)
+					continue
+				}
 				if errors.Is(beginErr, pricing.ErrPriceUnavailable) || errors.Is(beginErr, pricing.ErrMarginViolation) {
 					handler.logCandidateSkip(request, candidate, "price_race_unavailable")
 					continue
@@ -328,6 +333,15 @@ func geminiProviderConfigured(availability ProviderAvailability, provider provid
 
 func (handler *Handler) logCandidateSkip(request *http.Request, decision imageoperation.RoutingDecision, category string) {
 	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "model", decision.Model, "candidate_id", decision.CandidateID, "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
+}
+
+func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageoperation.RoutingDecision, err error) {
+	attributes := []any{"request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", "spend_cap_exhausted"}
+	var limitErr *spendcap.LimitError
+	if errors.As(err, &limitErr) {
+		attributes = append(attributes, "period", limitErr.Period, "reset_at", limitErr.ResetAt)
+	}
+	handler.logger.Info("gemini routing candidate skipped", attributes...)
 }
 
 func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {

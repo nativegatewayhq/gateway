@@ -21,6 +21,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
@@ -29,6 +30,7 @@ type billingFake struct {
 	beginRequest  chargebilling.BeginRequest
 	beginCharge   chargebilling.Charge
 	beginErr      error
+	beginErrors   map[string]error
 	captureErr    error
 	releaseErr    error
 	maxResponse   int64
@@ -49,6 +51,9 @@ func (fake *billingFake) Begin(_ context.Context, request chargebilling.BeginReq
 	charge := fake.beginCharge
 	if charge.ID == "" {
 		charge.ID = "charge_00000000000000000000000000000001"
+	}
+	if err := fake.beginErrors[request.ChannelID]; err != nil {
+		return charge, err
 	}
 	return charge, fake.beginErr
 }
@@ -172,6 +177,49 @@ func TestBillableImagesFallsBackBeforeReserveWhenFirstCandidatePriceIsUnavailabl
 	if response.Code != 200 || openAICalls != 0 || xAICalls != 1 || len(fake.beginChannels) != 1 || fake.beginChannels[0] != "channel_00000000000000000000000000000002" {
 		t.Fatalf("response=%d calls=%d/%d begin=%v", response.Code, openAICalls, xAICalls, fake.beginChannels)
 	}
+}
+
+func TestBillableImagesSkipsExhaustedSpendCapCandidates(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("fallback", func(t *testing.T) {
+		resetAt := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+		fake := &billingFake{beginErrors: map[string]error{"channel_00000000000000000000000000000001": &spendcap.LimitError{ChannelID: "channel_00000000000000000000000000000001", Period: spendcap.Day, ResetAt: resetAt}}}
+		openAICalls, xAICalls := 0, 0
+		var logs bytes.Buffer
+		handler := NewBillableImagesHandlerWithAvailability(slog.New(slog.NewTextHandler(&logs, nil)), billingAuth(), registry, map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { openAICalls++; return nil, nil }), providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			xAICalls++
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		})}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		response := billableImageRequest(handler, `{"model":"logical-image"}`)
+		if response.Code != 200 || openAICalls != 0 || xAICalls != 1 || len(fake.beginChannels) != 2 {
+			t.Fatalf("response=%d calls=%d/%d begins=%v", response.Code, openAICalls, xAICalls, fake.beginChannels)
+		}
+		var spendCapLog string
+		for _, line := range strings.Split(logs.String(), "\n") {
+			if strings.Contains(line, "category=spend_cap_exhausted") {
+				spendCapLog = line
+				break
+			}
+		}
+		if !strings.Contains(spendCapLog, "period=day") || strings.Contains(spendCapLog, "logical-image") || strings.Contains(spendCapLog, "candidate_openai") {
+			t.Fatalf("unsafe or incomplete spend cap log: %s", spendCapLog)
+		}
+	})
+	t.Run("all exhausted", func(t *testing.T) {
+		fake := &billingFake{beginErrors: map[string]error{"channel_00000000000000000000000000000001": spendcap.ErrExceeded, "channel_00000000000000000000000000000002": spendcap.ErrExceeded}}
+		providerCalls := 0
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }), providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil })}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		response := billableImageRequest(handler, `{"model":"logical-image"}`)
+		if response.Code != 503 || providerCalls != 0 || len(fake.beginChannels) != 2 || !strings.Contains(response.Body.String(), "provider_unavailable") {
+			t.Fatalf("response=%d body=%s calls=%d begins=%v", response.Code, response.Body.String(), providerCalls, fake.beginChannels)
+		}
+	})
 }
 
 func TestBillableImagesDoesNotFallbackAfterReserveOnTimeout(t *testing.T) {

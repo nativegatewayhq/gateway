@@ -18,6 +18,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
+	"github.com/nativegatewayhq/gateway/internal/spendcap"
 )
 
 const openAIChannel = "channel_00000000000000000000000000000001"
@@ -77,11 +78,176 @@ func billingFixture(t *testing.T, balance int64) (*Service, *pgxpool.Pool) {
 	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: openAIChannel, Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "billing-price"); err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewServiceWithQuota(pool, estimator, wallet, costquota.NewStore(pool), 32*1024*1024)
+	service, err := NewServiceWithControls(pool, estimator, wallet, costquota.NewStore(pool), spendcap.NewStore(pool), 32*1024*1024)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service, pool
+}
+
+func TestProviderSpendCapReserveCaptureAndRollback(t *testing.T) {
+	service, pool := billingFixture(t, 10_000)
+	store := spendcap.NewStore(pool)
+	ctx := context.Background()
+	policy, err := store.SetPolicy(ctx, spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Day, Limit: 150, Actor: "integration", Reason: "provider budget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetPolicy(ctx, spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Month, Limit: 130, Actor: "integration", Reason: "monthly provider budget"}); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(ctx, billableRequest("spend-capture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Capture(ctx, charge.ID); err != nil {
+		t.Fatal(err)
+	}
+	request := billableRequest("spend-denied")
+	request.Quantity = 1
+	if _, err := service.Begin(ctx, request); !errors.Is(err, spendcap.ErrExceeded) {
+		t.Fatalf("error=%v", err)
+	} else {
+		var limited *spendcap.LimitError
+		if !errors.As(err, &limited) || limited.Period != spendcap.Day {
+			t.Fatalf("limit=%+v", limited)
+		}
+	}
+	usage, err := store.Usage(ctx, policy.ID, time.Now())
+	if err != nil || usage.Captured != 120 || usage.Reserved != 0 {
+		t.Fatalf("usage=%+v err=%v", usage, err)
+	}
+	var available int64
+	var charges int
+	if err := pool.QueryRow(ctx, `SELECT available FROM organization_wallets WHERE organization_id='org_billing'`).Scan(&available); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM image_request_charges`).Scan(&charges); err != nil {
+		t.Fatal(err)
+	}
+	if available != 9_800 || charges != 1 {
+		t.Fatalf("available=%d charges=%d", available, charges)
+	}
+}
+
+func TestSpendCapFailureRollsBackWalletAndUserQuota(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	ctx := context.Background()
+	if _, err := costquota.NewStore(pool).SetPolicy(ctx, costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Day, Limit: 500, Actor: "integration", Reason: "atomic"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spendcap.NewStore(pool).SetPolicy(ctx, spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Day, Limit: 100, Actor: "integration", Reason: "atomic"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Begin(ctx, billableRequest("spend-atomic")); !errors.Is(err, spendcap.ErrExceeded) {
+		t.Fatalf("error=%v", err)
+	}
+	var available, walletReserved int64
+	if err := pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_billing'`).Scan(&available, &walletReserved); err != nil {
+		t.Fatal(err)
+	}
+	var quotaBuckets, charges int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM cost_quota_buckets`).Scan(&quotaBuckets); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM image_request_charges`).Scan(&charges); err != nil {
+		t.Fatal(err)
+	}
+	if available != 1_000 || walletReserved != 0 || quotaBuckets != 0 || charges != 0 {
+		t.Fatalf("effects=%d/%d buckets=%d charges=%d", available, walletReserved, quotaBuckets, charges)
+	}
+}
+
+func TestSpendCapActualCostDifferenceAndRelease(t *testing.T) {
+	service, pool := billingFixture(t, 1_000)
+	ctx := context.Background()
+	store := spendcap.NewStore(pool)
+	if _, err := store.SetPolicy(ctx, spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Month, Limit: 220, Actor: "integration", Reason: "actual"}); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(ctx, billableRequest("spend-actual"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompleteWithAmounts(ctx, charge.ID, 90, 200, ResponseSnapshot{Status: 200, Headers: map[string][]string{}, Body: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Begin(ctx, billableRequest("spend-release"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Release(ctx, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	var reserved, captured int64
+	if err := pool.QueryRow(ctx, `SELECT reserved,captured FROM provider_channel_spend_buckets`).Scan(&reserved, &captured); err != nil || reserved != 0 || captured != 90 {
+		t.Fatalf("bucket=%d/%d err=%v", reserved, captured, err)
+	}
+}
+
+func TestConcurrentServicesRespectSpendCap(t *testing.T) {
+	service, pool := billingFixture(t, 10_000)
+	if _, err := spendcap.NewStore(pool).SetPolicy(context.Background(), spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Day, Limit: 180, Actor: "integration", Reason: "concurrent"}); err != nil {
+		t.Fatal(err)
+	}
+	estimator, _ := pricing.NewService(pool, 0)
+	second, _ := NewServiceWithControls(pool, estimator, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool), 32*1024*1024)
+	services := []*Service{service, second}
+	results := make(chan error, 8)
+	var group sync.WaitGroup
+	for index := 0; index < 8; index++ {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			request := billableRequest(fmt.Sprintf("spend-concurrent-%d", index))
+			request.Quantity = 1
+			_, err := services[index%2].Begin(context.Background(), request)
+			results <- err
+		}(index)
+	}
+	group.Wait()
+	close(results)
+	success, limited := 0, 0
+	for err := range results {
+		if err == nil {
+			success++
+		} else if errors.Is(err, spendcap.ErrExceeded) {
+			limited++
+		} else {
+			t.Fatalf("error=%v", err)
+		}
+	}
+	if success != 3 || limited != 5 {
+		t.Fatalf("success=%d limited=%d", success, limited)
+	}
+}
+
+func TestSpendCapPolicyAuditUpdateDisable(t *testing.T) {
+	_, pool := billingFixture(t, 1_000)
+	store := spendcap.NewStore(pool)
+	input := spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Day, Limit: 100, Actor: "operator", Reason: "create"}
+	created, err := store.SetPolicy(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Limit, input.Reason = 200, "update"
+	updated, err := store.SetPolicy(context.Background(), input)
+	if err != nil || updated.ID != created.ID || updated.Version != 2 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	if _, err := store.SetPolicy(context.Background(), spendcap.PolicyInput{ChannelID: "channel_ffffffffffffffffffffffffffffffff", Period: spendcap.Day, Limit: 1, Actor: "operator", Reason: "invalid"}); !errors.Is(err, spendcap.ErrInvalid) {
+		t.Fatalf("invalid channel=%v", err)
+	}
+	if err := store.DisablePolicy(context.Background(), created.ID, "operator", "retire"); err != nil {
+		t.Fatal(err)
+	}
+	var events int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM provider_channel_spend_policy_events WHERE policy_id=$1`, created.ID).Scan(&events); err != nil || events != 3 {
+		t.Fatalf("events=%d err=%v", events, err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE provider_channel_spend_policy_events SET reason='tampered' WHERE policy_id=$1`, created.ID); err == nil {
+		t.Fatal("event mutation succeeded")
+	}
 }
 
 func billableRequest(requestID string) BeginRequest {
@@ -252,12 +418,15 @@ func TestQuotaSettlementSurvivesServiceRestart(t *testing.T) {
 	if _, err := costquota.NewStore(pool).SetPolicy(context.Background(), costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Month, Limit: 500, Actor: "integration", Reason: "restart"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := spendcap.NewStore(pool).SetPolicy(context.Background(), spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Month, Limit: 500, Actor: "integration", Reason: "restart"}); err != nil {
+		t.Fatal(err)
+	}
 	charge, err := service.Begin(context.Background(), billableRequest("quota-restart"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	estimator, _ := pricing.NewService(pool, 0)
-	restarted, err := NewServiceWithQuota(pool, estimator, ledger.NewService(pool), costquota.NewStore(pool), 32*1024*1024)
+	restarted, err := NewServiceWithControls(pool, estimator, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool), 32*1024*1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,6 +436,9 @@ func TestQuotaSettlementSurvivesServiceRestart(t *testing.T) {
 	var reserved, captured int64
 	if err := pool.QueryRow(context.Background(), `SELECT reserved,captured FROM cost_quota_buckets`).Scan(&reserved, &captured); err != nil || reserved != 0 || captured != 200 {
 		t.Fatalf("bucket=%d/%d err=%v", reserved, captured, err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT reserved,captured FROM provider_channel_spend_buckets`).Scan(&reserved, &captured); err != nil || reserved != 0 || captured != 120 {
+		t.Fatalf("spend bucket=%d/%d err=%v", reserved, captured, err)
 	}
 }
 
@@ -368,6 +540,9 @@ func TestRequestConflictAndReconcilingSettlement(t *testing.T) {
 	if _, err := costquota.NewStore(pool).SetPolicy(ctx, costquota.PolicyInput{ScopeType: costquota.Organization, OrganizationID: "org_billing", Period: costquota.Day, Limit: 500, Actor: "integration", Reason: "reconciliation"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := spendcap.NewStore(pool).SetPolicy(ctx, spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Day, Limit: 500, Actor: "integration", Reason: "reconciliation"}); err != nil {
+		t.Fatal(err)
+	}
 	charge, err := service.Begin(ctx, billableRequest("request-reconcile"))
 	if err != nil {
 		t.Fatal(err)
@@ -386,6 +561,9 @@ func TestRequestConflictAndReconcilingSettlement(t *testing.T) {
 	var quotaReserved int64
 	if err := pool.QueryRow(ctx, `SELECT reserved FROM cost_quota_buckets`).Scan(&quotaReserved); err != nil || quotaReserved != 0 {
 		t.Fatalf("quota reserved=%d err=%v", quotaReserved, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT reserved FROM provider_channel_spend_buckets`).Scan(&quotaReserved); err != nil || quotaReserved != 0 {
+		t.Fatalf("spend reserved=%d err=%v", quotaReserved, err)
 	}
 	assertWalletAndCharge(t, pool, 1_000, 0, 1, "RELEASED")
 	if _, err := pool.Exec(ctx, `UPDATE image_request_charges SET reserved_sale=1 WHERE id=$1`, charge.ID); err == nil {
@@ -409,6 +587,9 @@ func TestIdempotencyReplayConflictAndSafeSnapshot(t *testing.T) {
 	service, pool := billingFixture(t, 1_000)
 	ctx := context.Background()
 	if _, err := costquota.NewStore(pool).SetPolicy(ctx, costquota.PolicyInput{ScopeType: costquota.Project, OrganizationID: "org_billing", ProjectID: "project_billing", Period: costquota.Month, Limit: 500, Actor: "integration", Reason: "idempotency"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spendcap.NewStore(pool).SetPolicy(ctx, spendcap.PolicyInput{ChannelID: openAIChannel, Period: spendcap.Month, Limit: 500, Actor: "integration", Reason: "idempotency"}); err != nil {
 		t.Fatal(err)
 	}
 	request := billableRequest("original-request")
@@ -443,6 +624,9 @@ func TestIdempotencyReplayConflictAndSafeSnapshot(t *testing.T) {
 	var quotaAllocations int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM cost_quota_allocations WHERE charge_id=$1`, charge.ID).Scan(&quotaAllocations); err != nil || quotaAllocations != 1 {
 		t.Fatalf("quota allocations=%d err=%v", quotaAllocations, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM provider_channel_spend_allocations WHERE charge_id=$1`, charge.ID).Scan(&quotaAllocations); err != nil || quotaAllocations != 1 {
+		t.Fatalf("spend allocations=%d err=%v", quotaAllocations, err)
 	}
 	routedRetry := retryRequest
 	routedRetry.ChannelID = "channel_00000000000000000000000000000002"
