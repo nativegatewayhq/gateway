@@ -17,23 +17,30 @@ var (
 	ErrChatCanceled       = errors.New("chat provider request canceled")
 	ErrChatUpstream       = errors.New("chat provider unavailable")
 	ErrInvalidChatRequest = errors.New("invalid chat provider request")
+	ErrChatStreamIdle     = errors.New("chat provider stream idle timeout")
 )
 
 type ChatRequest struct {
 	ChannelID, ContentType, Accept, UserAgent string
 	ContentLength                             int64
 	Body                                      io.Reader
+	Streaming                                 bool
 }
 type ChatExecutor struct {
-	origin      *url.URL
-	client      *http.Client
-	credentials *providercredentials.Registry
-	timeout     time.Duration
+	origin            *url.URL
+	client            *http.Client
+	credentials       *providercredentials.Registry
+	timeout           time.Duration
+	streamIdleTimeout time.Duration
 }
 
-func NewChat(credentials *providercredentials.Registry, timeout time.Duration) *ChatExecutor {
+func NewChat(credentials *providercredentials.Registry, timeout time.Duration, streamIdle ...time.Duration) *ChatExecutor {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, ForceAttemptHTTP2: true, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: timeout, ExpectContinueTimeout: time.Second}
-	return NewChatWithClient(credentials, timeout, &http.Client{Transport: transport})
+	executor := NewChatWithClient(credentials, timeout, &http.Client{Transport: transport})
+	if len(streamIdle) > 0 {
+		executor.streamIdleTimeout = streamIdle[0]
+	}
+	return executor
 }
 func NewChatWithClient(credentials *providercredentials.Registry, timeout time.Duration, client *http.Client) *ChatExecutor {
 	origin, err := url.Parse("https://api.openai.com")
@@ -45,7 +52,7 @@ func NewChatWithClient(credentials *providercredentials.Registry, timeout time.D
 	}
 	copy := *client
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &ChatExecutor{origin: origin, client: &copy, credentials: credentials, timeout: timeout}
+	return &ChatExecutor{origin: origin, client: &copy, credentials: credentials, timeout: timeout, streamIdleTimeout: 30 * time.Second}
 }
 func (e *ChatExecutor) Complete(ctx context.Context, input ChatRequest) (*http.Response, error) {
 	if e == nil || e.origin == nil || e.timeout <= 0 {
@@ -94,6 +101,9 @@ func (e *ChatExecutor) Complete(ctx context.Context, input ChatRequest) (*http.R
 		}
 	}
 	response.Body = &chatCancelBody{ReadCloser: response.Body, cancel: cancel}
+	if input.Streaming {
+		response.Body = &idleReadCloser{ReadCloser: response.Body, timeout: e.streamIdleTimeout}
+	}
 	return response, nil
 }
 
@@ -103,3 +113,30 @@ type chatCancelBody struct {
 }
 
 func (b *chatCancelBody) Close() error { err := b.ReadCloser.Close(); b.cancel(); return err }
+
+type idleReadCloser struct {
+	io.ReadCloser
+	timeout time.Duration
+}
+type idleReadResult struct {
+	n   int
+	err error
+}
+
+func (reader *idleReadCloser) Read(buffer []byte) (int, error) {
+	if reader.timeout <= 0 {
+		return reader.ReadCloser.Read(buffer)
+	}
+	result := make(chan idleReadResult, 1)
+	go func() { n, err := reader.ReadCloser.Read(buffer); result <- idleReadResult{n: n, err: err} }()
+	timer := time.NewTimer(reader.timeout)
+	defer timer.Stop()
+	select {
+	case value := <-result:
+		return value.n, value.err
+	case <-timer.C:
+		_ = reader.ReadCloser.Close()
+		<-result
+		return 0, ErrChatStreamIdle
+	}
+}

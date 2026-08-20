@@ -234,9 +234,9 @@ func run(stdout, stderr io.Writer) int {
 	if len(cfg.OpenAIChatModels) > 0 {
 		var chatHandler *openaiProtocol.ChatHandler
 		if chatChargeBilling == nil {
-			chatHandler = openaiProtocol.NewChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes)
+			chatHandler = openaiProtocol.NewChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout, cfg.ChatStreamIdleTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes)
 		} else {
-			chatHandler = openaiProtocol.NewBillableChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes, chatChargeBilling)
+			chatHandler = openaiProtocol.NewBillableChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout, cfg.ChatStreamIdleTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes, chatChargeBilling)
 		}
 		chatHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIChatHandler = chatHandler

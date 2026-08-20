@@ -40,6 +40,11 @@ func (f *chatBillingFake) CompleteUsage(_ context.Context, _ string, u chatprici
 	f.charge.Response = s
 	return f.charge, nil
 }
+func (f *chatBillingFake) CompleteStreamUsage(_ context.Context, _ string, u chatpricing.Usage, _ [32]byte) (chatbilling.Charge, error) {
+	f.completeCalls++
+	f.usage = u
+	return f.charge, nil
+}
 func (f *chatBillingFake) Release(_ context.Context, _ string, s billing.ResponseSnapshot) (chatbilling.Charge, error) {
 	f.releaseCalls++
 	f.charge.Response = s
@@ -50,6 +55,14 @@ func (f *chatBillingFake) MarkReconciling(context.Context, string, string, *bill
 	return nil
 }
 func (f *chatBillingFake) MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error {
+	f.reconcileCalls++
+	return nil
+}
+func (f *chatBillingFake) MarkStreamReconcilingUsage(context.Context, string, chatpricing.Usage, [32]byte) error {
+	f.reconcileCalls++
+	return nil
+}
+func (f *chatBillingFake) MarkStreamReconciling(context.Context, string, string, string, string) error {
 	f.reconcileCalls++
 	return nil
 }
@@ -104,7 +117,7 @@ func TestChatRejectsBeforeDispatch(t *testing.T) {
 		name, body string
 		mutate     func(*http.Request)
 		status     int
-	}{{"stream", `{"model":"gpt-4.1","stream":true}`, nil, 400}, {"trailing", `{"model":"gpt-4.1"}{}`, nil, 400}, {"missing model", `{"messages":[]}`, nil, 400}, {"compressed", `{"model":"gpt-4.1"}`, func(r *http.Request) { r.Header.Set("Content-Encoding", "gzip") }, 415}, {"unauthorized model", `{"model":"gpt-4.1"}`, nil, 403}}
+	}{{"trailing", `{"model":"gpt-4.1"}{}`, nil, 400}, {"missing model", `{"messages":[]}`, nil, 400}, {"compressed", `{"model":"gpt-4.1"}`, func(r *http.Request) { r.Header.Set("Content-Encoding", "gzip") }, 415}, {"unauthorized model", `{"model":"gpt-4.1"}`, nil, 403}}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			auth := acceptingAuth(t)

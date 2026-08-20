@@ -3,7 +3,9 @@
 package chatbilling
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -113,5 +115,34 @@ func TestUnknownOutcomeKeepsReservation(t *testing.T) {
 	_ = pool.QueryRow(context.Background(), `SELECT reserved FROM organization_wallets WHERE organization_id='org_chat'`).Scan(&reserved)
 	if state != "RECONCILING" || reserved != 400 {
 		t.Fatalf("state=%s reserved=%d", state, reserved)
+	}
+}
+
+func TestStreamingUsageSettlementDoesNotStoreTranscriptAndCannotReplay(t *testing.T) {
+	service, pool := chatBillingFixture(t)
+	ctx := context.Background()
+	request := BeginRequest{RequestID: "stream-request", OrganizationID: "org_chat", ProjectID: "project_chat", APIKeyID: "key_chat", Model: "gpt-4.1", ChannelID: "channel_00000000000000000000000000000001", MaximumInputTokens: 100, MaximumOutputTokens: 50, IdempotencyKey: "stream-idempotency", DeliveryMode: "stream"}
+	request.Fingerprint = [32]byte{2}
+	charge, err := service.Begin(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := [32]byte{9}
+	settled, err := service.CompleteStreamUsage(ctx, charge.ID, chatpricing.Usage{PromptTokens: 10, CachedInputTokens: 4, CompletionTokens: 5}, digest)
+	if err != nil || !settled.StreamCompleted || settled.CapturedSale != 36 {
+		t.Fatalf("settled=%+v err=%v", settled, err)
+	}
+	if _, found, err := service.Replay(ctx, request); !errors.Is(err, ErrConflict) || found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	var snapshotVersion int
+	var responseBody []byte
+	var mode string
+	var storedDigest []byte
+	if err = pool.QueryRow(ctx, `SELECT c.response_snapshot_version,c.response_body,e.delivery_mode,e.terminal_event_sha256 FROM chat_request_charges c JOIN chat_usage_evidence e ON e.charge_id=c.id WHERE c.id=$1`, charge.ID).Scan(&snapshotVersion, &responseBody, &mode, &storedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotVersion != 0 || responseBody != nil || mode != "stream" || !bytes.Equal(storedDigest, digest[:]) {
+		t.Fatalf("snapshot=%d body=%v mode=%s digest=%x", snapshotVersion, responseBody, mode, storedDigest)
 	}
 }

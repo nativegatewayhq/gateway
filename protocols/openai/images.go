@@ -1140,6 +1140,11 @@ func (writer *statusWriter) Write(content []byte) (int, error) {
 	}
 	return writer.ResponseWriter.Write(content)
 }
+func (writer *statusWriter) Flush() {
+	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
 
 func (writer *statusWriter) statusCode() int {
 	if writer.status == 0 {

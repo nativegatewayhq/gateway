@@ -6,13 +6,13 @@ import (
 )
 
 func TestOpenAIChatConfiguration(t *testing.T) {
-	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_OPENAI_CHAT_MODELS": "gpt-4.1,gpt-4o", "GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT": "45s", "GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES": "4096"}
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_OPENAI_CHAT_MODELS": "gpt-4.1,gpt-4o", "GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT": "45s", "GATEWAY_OPENAI_CHAT_STREAM_IDLE_TIMEOUT": "12s", "GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES": "4096"}
 	lookup := func(key string) (string, bool) { v, ok := values[key]; return v, ok }
 	cfg, err := Load(lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.OpenAIChatModels) != 2 || cfg.ChatTimeout != 45*time.Second || cfg.ChatBodyBytes != 4096 {
+	if len(cfg.OpenAIChatModels) != 2 || cfg.ChatTimeout != 45*time.Second || cfg.ChatStreamIdleTimeout != 12*time.Second || cfg.ChatBodyBytes != 4096 {
 		t.Fatalf("config=%+v", cfg)
 	}
 	values["GATEWAY_OPENAI_CHAT_MODELS"] = "gpt-4.1,gpt-4.1"
