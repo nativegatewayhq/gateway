@@ -1,9 +1,9 @@
 ---
 id: gateway-20260822-049
 title: Phase 4 OpenAI Responses Protocol-compatible Provider Routing
-status: in_progress
+status: completed
 created_at: 2026-08-22T07:00:00+09:00
-updated_at: 2026-08-22T09:00:00+09:00
+updated_at: 2026-08-22T10:00:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-responses-provider-routing
@@ -207,20 +207,25 @@ endpoint, 인증, 성공/error JSON과 SSE wire는 바뀌지 않는다. logical 
 
 ## 완료 조건
 
-- [ ] logical Responses model이 OpenAI/xAI candidate를 네 정책으로 선택함
-- [ ] Responses capability가 exact-match되고 unknown/stateful unsupported 요청이 fail closed함
-- [ ] xAI fixed-origin Responses non-stream/stream transport와 credential scope가 검증됨
-- [ ] 모든 fallback이 pre-dispatch에 한정되고 dispatch 이후 두 번째 호출이 없음
-- [ ] 최종 candidate만 exactly-once 예약·정산되고 immutable route evidence가 저장됨
-- [ ] idempotency replay가 current route 평가 없이 original route/result를 유지함
-- [ ] native typed JSON/SSE/tool/reasoning data가 손실 없이 전달됨
-- [ ] route/health/billing telemetry가 bounded되고 content/secret이 유출되지 않음
-- [ ] 공식 SDK와 전체 unit/race/integration 회귀가 통과함
-- [ ] README, migration, multi-repo handoff와 검증 증거가 갱신됨
+- [x] logical Responses model이 OpenAI/xAI candidate를 네 정책으로 선택함
+- [x] Responses capability가 exact-match되고 unknown/stateful unsupported 요청이 fail closed함
+- [x] xAI fixed-origin Responses non-stream/stream transport와 credential scope가 검증됨
+- [x] 모든 fallback이 pre-dispatch에 한정되고 dispatch 이후 두 번째 호출이 없음
+- [x] 최종 candidate만 exactly-once 예약·정산되고 immutable route evidence가 저장됨
+- [x] idempotency replay가 current route 평가 없이 original route/result를 유지함
+- [x] native typed JSON/SSE/tool/reasoning data가 손실 없이 전달됨
+- [x] route/health/billing telemetry가 bounded되고 content/secret이 유출되지 않음
+- [x] 공식 SDK와 전체 unit/race/integration 회귀가 통과함
+- [x] README, migration, multi-repo handoff와 검증 증거가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `0c4b186` (`feat: route OpenAI Responses providers`)
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- fresh PostgreSQL `gateway_plan049`와 Redis DB 13에서 `GOCACHE=/private/tmp/gateway-go-cache GOFLAGS=-p=1 TEST_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway_plan049?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/13' make integration-test` 통과
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/openai ./protocols/gemini ./protocols/anthropic -count=1` 통과
+- OpenAI Python/JavaScript SDK logical Responses model의 xAI-compatible route와 native function-tool body를 검증함
+- migration `000043_openai_responses_routing_evidence.sql`이 operation별 route evidence version과 immutable identity를 검증함
 
 ## Rollback 계획
 

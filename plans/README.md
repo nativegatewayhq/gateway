@@ -188,6 +188,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260821-046` | completed | [Phase 4 Anthropic Messages Token Usage Billing and Settlement](./20260821_233000_plan_phase4_anthropic_token_usage_settlement.md) | `phase-4-anthropic-token-usage-settlement` |
 | `gateway-20260822-047` | completed | [Phase 4 Anthropic Messages Native SSE and Disconnect Settlement](./20260822_013000_plan_phase4_anthropic_streaming_settlement.md) | `phase-4-anthropic-messages-streaming-settlement` |
 | `gateway-20260822-048` | completed | [Phase 4 OpenAI-protocol LLM Routing and Pre-dispatch Fallback](./20260822_040000_plan_phase4_openai_protocol_llm_routing_fallback.md) | `phase-4-openai-protocol-llm-routing-fallback` |
-| `gateway-20260822-049` | in_progress | [Phase 4 OpenAI Responses Protocol-compatible Provider Routing](./20260822_070000_plan_phase4_openai_responses_provider_routing.md) | `phase-4-openai-responses-provider-routing` |
+| `gateway-20260822-049` | completed | [Phase 4 OpenAI Responses Protocol-compatible Provider Routing](./20260822_070000_plan_phase4_openai_responses_provider_routing.md) | `phase-4-openai-responses-provider-routing` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
