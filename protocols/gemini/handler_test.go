@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/providers/google"
@@ -120,6 +121,7 @@ func TestGenerateContentMapsRateLimitBeforeBodyAndProvider(t *testing.T) {
 	}{
 		{"limited", &ratelimit.LimitError{Decision: ratelimit.Decision{Limit: 30, RetryAfter: time.Second, ResetAt: reset}}, 429, "RESOURCE_EXHAUSTED"},
 		{"unavailable", ratelimit.ErrUnavailable, 503, "UNAVAILABLE"},
+		{"network denied", &networkauth.DeniedError{APIKeyID: "key_test", ProjectID: "project_test"}, 403, "PERMISSION_DENIED"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			executor := &stubExecutor{}

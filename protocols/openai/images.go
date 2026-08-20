@@ -18,6 +18,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
+	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
@@ -391,6 +392,16 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 	}
 	principal, err := handler.authenticator.Authenticate(request.Context(), raw)
 	if err != nil {
+		var denied *networkauth.DeniedError
+		if errors.As(err, &denied) {
+			attributes := []any{"request_id", requestid.FromContext(request.Context()), "api_key_id", denied.APIKeyID, "project_id", denied.ProjectID, "category", "network_not_allowed"}
+			if denied.ClientIP.IsValid() {
+				attributes = append(attributes, "client_ip", denied.ClientIP.String())
+			}
+			handler.logger.Info("API key client network denied", attributes...)
+			writeError(writer, http.StatusForbidden, "permission_error", "network_not_allowed", "API key is not permitted from this network")
+			return apikey.Principal{}, false
+		}
 		var limited *ratelimit.LimitError
 		if errors.As(err, &limited) {
 			handler.logger.Info("API key request rate limited", "request_id", requestid.FromContext(request.Context()), "api_key_id", limited.APIKeyID, "project_id", limited.ProjectID, "outcome", "limited", "retry_after_ms", limited.Decision.RetryAfter.Milliseconds())

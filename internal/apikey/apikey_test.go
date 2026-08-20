@@ -4,10 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestGenerateCanonicalNetworkAllowlist(t *testing.T) {
+	record, _, err := GenerateForProjectWithAccess(bytes.NewReader(make([]byte, 64)), "networked", "project_test", nil, RateLimitPolicy{}, nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.8/24"), netip.MustParsePrefix("192.0.2.0/25")})
+	principal := Principal{NetworkAccessMode: record.NetworkAccessMode, NetworkPrefixes: record.NetworkPrefixes}
+	if err != nil || record.NetworkAccessMode != NetworkAccessAllowlist || len(record.NetworkPrefixes) != 1 || record.NetworkPrefixes[0].String() != "192.0.2.0/24" || !principal.AuthorizeNetwork(netip.MustParseAddr("192.0.2.9")) {
+		t.Fatalf("got %#v, %v", record, err)
+	}
+}
 
 type memoryStore struct {
 	record Record

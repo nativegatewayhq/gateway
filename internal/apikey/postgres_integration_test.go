@@ -6,12 +6,48 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/database"
 )
+
+func TestPostgresStorePersistsNetworkPolicySnapshotAndCascade(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	pool, err := database.Open(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := database.Migrate(context.Background(), pool); err != nil {
+		t.Fatal(err)
+	}
+	record, raw, err := GenerateForProjectWithAccess(bytes.NewReader(bytes.Repeat([]byte{7}, randomKeyBytes+16)), "network integration", "project_legacy", nil, RateLimitPolicy{}, nil, []netip.Prefix{netip.MustParsePrefix("192.0.2.9/24")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewPostgresStore(pool)
+	if err := store.Create(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Exec(context.Background(), `DELETE FROM service_api_keys WHERE id=$1`, record.ID)
+	principal, err := NewService(store).Authenticate(context.Background(), raw)
+	if err != nil || !principal.AuthorizeNetwork(netip.MustParseAddr("192.0.2.10")) || principal.AuthorizeNetwork(netip.MustParseAddr("198.51.100.10")) {
+		t.Fatalf("principal=%#v err=%v", principal, err)
+	}
+	if _, err := pool.Exec(context.Background(), `DELETE FROM service_api_keys WHERE id=$1`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM service_api_key_network_prefixes WHERE api_key_id=$1`, record.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("prefix rows=%d err=%v", count, err)
+	}
+}
 
 func TestPostgresStoreLifecycle(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
@@ -157,6 +158,7 @@ func TestImagesHandlerMapsRateLimitBeforeBodyAndProvider(t *testing.T) {
 	}{
 		{"limited", &ratelimit.LimitError{Decision: ratelimit.Decision{Limit: 60, Remaining: 0, RetryAfter: 1500 * time.Millisecond, ResetAt: reset}}, 429, "rate_limit_exceeded"},
 		{"unavailable", ratelimit.ErrUnavailable, 503, "rate_limit_unavailable"},
+		{"network denied", &networkauth.DeniedError{APIKeyID: "key_test", ProjectID: "project_test"}, 403, "network_not_allowed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			providerCalls := 0

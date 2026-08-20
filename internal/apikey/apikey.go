@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/nativegatewayhq/gateway/internal/clientip"
 )
 
 const (
@@ -33,22 +36,32 @@ const (
 	ModelAccessAll       ModelAccessMode = "all"
 	ModelAccessAllowlist ModelAccessMode = "allowlist"
 	maxModelPermissions                  = 256
+	maxNetworkPrefixes                   = 64
 )
 
 type ModelPermission struct {
-	Protocol  string
-	Operation string
-	Model     string
+	Protocol  string `json:"protocol"`
+	Operation string `json:"operation"`
+	Model     string `json:"model"`
 }
 
+type NetworkAccessMode string
+
+const (
+	NetworkAccessAll       NetworkAccessMode = "all"
+	NetworkAccessAllowlist NetworkAccessMode = "allowlist"
+)
+
 type Principal struct {
-	APIKeyID         string
-	ProjectID        string
-	OrganizationID   string
-	RateLimit        RateLimitPolicy
-	RateLimitState   *RateLimitState
-	ModelAccessMode  ModelAccessMode
-	ModelPermissions []ModelPermission
+	APIKeyID          string
+	ProjectID         string
+	OrganizationID    string
+	RateLimit         RateLimitPolicy
+	RateLimitState    *RateLimitState
+	ModelAccessMode   ModelAccessMode
+	ModelPermissions  []ModelPermission
+	NetworkAccessMode NetworkAccessMode
+	NetworkPrefixes   []netip.Prefix
 }
 
 type RateLimitState struct {
@@ -70,15 +83,17 @@ func (policy RateLimitPolicy) Valid() bool {
 }
 
 type Record struct {
-	ID               string
-	Name             string
-	Digest           [32]byte
-	Prefix           string
-	ExpiresAt        *time.Time
-	ProjectID        string
-	RateLimit        RateLimitPolicy
-	ModelAccessMode  ModelAccessMode
-	ModelPermissions []ModelPermission
+	ID                string
+	Name              string
+	Digest            [32]byte
+	Prefix            string
+	ExpiresAt         *time.Time
+	ProjectID         string
+	RateLimit         RateLimitPolicy
+	ModelAccessMode   ModelAccessMode
+	ModelPermissions  []ModelPermission
+	NetworkAccessMode NetworkAccessMode
+	NetworkPrefixes   []netip.Prefix
 }
 
 type Store interface {
@@ -121,6 +136,10 @@ func GenerateForProjectWithPolicy(reader io.Reader, name, projectID string, expi
 }
 
 func GenerateForProjectWithPolicies(reader io.Reader, name, projectID string, expiresAt *time.Time, ratePolicy RateLimitPolicy, permissions []ModelPermission) (Record, string, error) {
+	return GenerateForProjectWithAccess(reader, name, projectID, expiresAt, ratePolicy, permissions, nil)
+}
+
+func GenerateForProjectWithAccess(reader io.Reader, name, projectID string, expiresAt *time.Time, ratePolicy RateLimitPolicy, permissions []ModelPermission, networkPrefixes []netip.Prefix) (Record, string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 200 {
 		return Record{}, "", fmt.Errorf("name must contain 1 to 200 characters")
@@ -139,6 +158,14 @@ func GenerateForProjectWithPolicies(reader io.Reader, name, projectID string, ex
 	if len(permissions) > 0 {
 		accessMode = ModelAccessAllowlist
 	}
+	networkPrefixes, err = CanonicalNetworkPrefixes(networkPrefixes)
+	if err != nil {
+		return Record{}, "", err
+	}
+	networkMode := NetworkAccessAll
+	if len(networkPrefixes) > 0 {
+		networkMode = NetworkAccessAllowlist
+	}
 	secret := make([]byte, randomKeyBytes)
 	if _, err := io.ReadFull(reader, secret); err != nil {
 		return Record{}, "", fmt.Errorf("generate key: %w", err)
@@ -149,8 +176,16 @@ func GenerateForProjectWithPolicies(reader io.Reader, name, projectID string, ex
 	if _, err := io.ReadFull(reader, idBytes); err != nil {
 		return Record{}, "", fmt.Errorf("generate key id: %w", err)
 	}
-	record := Record{ID: "key_" + hex.EncodeToString(idBytes), Name: name, Digest: digest, Prefix: raw[:min(len(raw), 14)], ExpiresAt: expiresAt, ProjectID: projectID, RateLimit: ratePolicy, ModelAccessMode: accessMode, ModelPermissions: permissions}
+	record := Record{ID: "key_" + hex.EncodeToString(idBytes), Name: name, Digest: digest, Prefix: raw[:min(len(raw), 14)], ExpiresAt: expiresAt, ProjectID: projectID, RateLimit: ratePolicy, ModelAccessMode: accessMode, ModelPermissions: permissions, NetworkAccessMode: networkMode, NetworkPrefixes: networkPrefixes}
 	return record, raw, nil
+}
+
+func CanonicalNetworkPrefixes(prefixes []netip.Prefix) ([]netip.Prefix, error) {
+	canonical, err := clientip.CanonicalPrefixes(prefixes, maxNetworkPrefixes)
+	if err != nil {
+		return nil, ErrPolicyInvalid
+	}
+	return canonical, nil
 }
 
 func CanonicalModelPermissions(permissions []ModelPermission) ([]ModelPermission, error) {
@@ -202,6 +237,22 @@ func (principal Principal) AuthorizeModel(protocol, operation, model string) boo
 	target := ModelPermission{Protocol: protocol, Operation: operation, Model: model}
 	for _, permission := range principal.ModelPermissions {
 		if permission == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (principal Principal) AuthorizeNetwork(address netip.Addr) bool {
+	if principal.NetworkAccessMode == "" || principal.NetworkAccessMode == NetworkAccessAll {
+		return true
+	}
+	if principal.NetworkAccessMode != NetworkAccessAllowlist || len(principal.NetworkPrefixes) == 0 || !address.IsValid() {
+		return false
+	}
+	address = address.Unmap()
+	for _, prefix := range principal.NetworkPrefixes {
+		if prefix.Contains(address) {
 			return true
 		}
 	}

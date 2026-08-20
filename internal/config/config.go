@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nativegatewayhq/gateway/internal/clientip"
 )
 
 const (
@@ -68,6 +71,7 @@ type Config struct {
 	RateLimitMode        RateLimitMode
 	RedisURL             string
 	RateLimitTimeout     time.Duration
+	TrustedProxyPrefixes []netip.Prefix
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -203,6 +207,25 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_RATE_LIMIT_TIMEOUT: must be a positive duration no greater than 1s")
 		}
 		cfg.RateLimitTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_TRUSTED_PROXY_CIDRS"); ok {
+		parts := strings.Split(value, ",")
+		if len(parts) > 128 {
+			return Config{}, fmt.Errorf("GATEWAY_TRUSTED_PROXY_CIDRS: must contain no more than 128 prefixes")
+		}
+		prefixes := make([]netip.Prefix, 0, len(parts))
+		for _, part := range parts {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(part))
+			if err != nil {
+				return Config{}, fmt.Errorf("GATEWAY_TRUSTED_PROXY_CIDRS: must contain valid comma-separated CIDR prefixes")
+			}
+			prefixes = append(prefixes, prefix)
+		}
+		canonical, err := clientip.CanonicalPrefixes(prefixes, 128)
+		if err != nil || len(canonical) != len(prefixes) {
+			return Config{}, fmt.Errorf("GATEWAY_TRUSTED_PROXY_CIDRS: invalid trusted proxy policy")
+		}
+		cfg.TrustedProxyPrefixes = canonical
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {
