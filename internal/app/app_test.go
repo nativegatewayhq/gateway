@@ -11,6 +11,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/observability"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 )
 
 func TestRunFailsWhenPortIsInUse(t *testing.T) {
@@ -27,7 +28,11 @@ func TestRunFailsWhenPortIsInUse(t *testing.T) {
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: time.Second,
 	}
-	err = Run(context.Background(), cfg, observability.NewLogger(&bytes.Buffer{}, slog.LevelInfo), nil)
+	registry, loadErr := providercredentials.Load(func(string) (string, bool) { return "", false })
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	err = Run(context.Background(), cfg, observability.NewLogger(&bytes.Buffer{}, slog.LevelInfo), Dependencies{ProviderCredentials: registry})
 	if err == nil || !strings.Contains(err.Error(), "listen failed") {
 		t.Fatalf("Run() error = %v, want listen error", err)
 	}

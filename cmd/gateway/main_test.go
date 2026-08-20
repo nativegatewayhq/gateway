@@ -40,6 +40,29 @@ func TestRunRejectsInvalidConfigWithoutEchoingValue(t *testing.T) {
 	}
 }
 
+func TestRunRejectsMalformedProviderCredentialBeforeDatabaseConnection(t *testing.T) {
+	t.Setenv("GATEWAY_HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("GATEWAY_LOG_LEVEL", "info")
+	t.Setenv("GATEWAY_SHUTDOWN_TIMEOUT", "1s")
+	t.Setenv("GATEWAY_DATABASE_URL", "postgres://gateway:database-secret@127.0.0.1:1/gateway")
+	t.Setenv("GATEWAY_GOOGLE_API_KEY", " provider-secret ")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := run(&stdout, &stderr); code != 1 {
+		t.Fatalf("run() code = %d, want 1", code)
+	}
+	combined := stdout.String() + stderr.String()
+	for _, secret := range []string{"provider-secret", "database-secret"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("configuration failure leaked %q: %s", secret, combined)
+		}
+	}
+	if !strings.Contains(combined, "GATEWAY_GOOGLE_API_KEY") {
+		t.Fatalf("configuration failure omitted setting name: %s", combined)
+	}
+}
+
 func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 	executable := buildGateway(t)
 	address := availableAddress(t)
@@ -47,7 +70,11 @@ func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, executable)
-	command.Env = gatewayEnvironment(address)
+	command.Env = append(gatewayEnvironment(address),
+		"GATEWAY_GOOGLE_API_KEY=google-process-secret",
+		"GATEWAY_OPENAI_API_KEY=openai-process-secret",
+		"GATEWAY_XAI_API_KEY=xai-process-secret",
+	)
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -67,6 +94,11 @@ func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 	for _, message := range []string{"gateway started", "gateway shutting down", "gateway stopped"} {
 		if !strings.Contains(logs, message) {
 			t.Errorf("logs missing %q: %s", message, logs)
+		}
+	}
+	for _, secret := range []string{"google-process-secret", "openai-process-secret", "xai-process-secret"} {
+		if strings.Contains(logs, secret) {
+			t.Fatalf("process logs leaked provider credential %q: %s", secret, logs)
 		}
 	}
 }

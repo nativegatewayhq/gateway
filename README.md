@@ -52,8 +52,23 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `GATEWAY_SHUTDOWN_TIMEOUT` | `10s` | Positive Go duration for graceful shutdown |
 | `GATEWAY_DATABASE_URL` | required | PostgreSQL connection URL; treated as a secret and never logged |
+| `GATEWAY_GOOGLE_API_KEY` | unset | Optional Google upstream credential |
+| `GATEWAY_OPENAI_API_KEY` | unset | Optional OpenAI upstream credential |
+| `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
+
+## Provider credentials
+
+Provider credentials are optional until their adapters are enabled. Inject them through environment variables backed by your deployment platform's secret manager; never commit them to source files or Compose configuration.
+
+```bash
+export GATEWAY_GOOGLE_API_KEY='...'
+export GATEWAY_OPENAI_API_KEY='...'
+export GATEWAY_XAI_API_KEY='...'
+```
+
+Provider credentials are held in an opaque, provider-scoped registry. They are not placed in the general process configuration and are never returned through an API. Outbound request preparation clones the request, removes inbound `Authorization`, API-key headers, cookies, and sensitive query parameters, then applies only the credential scoped to the selected provider. Missing credentials and provider-scope mismatches fail before any network request.
 
 ## Create a service API key
 
