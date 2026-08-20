@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-024
 title: Phase 2 Lowest-Cost Provider Routing
-status: in_progress
+status: completed
 created_at: 2026-08-20T19:34:08+09:00
-updated_at: 2026-08-20T19:34:08+09:00
+updated_at: 2026-08-20T19:51:10+09:00
 owners:
   - gateway
 initiative: phase-2-cost-routing
@@ -193,25 +193,31 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] lowest_cost가 eligible candidate의 upstream estimated cost 최솟값을 선택함
-- [ ] 모든 candidate quote가 동일 evaluation timestamp를 사용함
-- [ ] cost tie-break가 priority와 candidate ID로 deterministic함
-- [ ] selected quote와 Begin charge의 price/cost/sale/currency가 일치함
-- [ ] price snapshot race가 금전 effect 없이 최대 한 번 재평가됨
-- [ ] minimum margin, credential과 inactive/unpriced channel이 dispatch 전에 제외됨
-- [ ] cheapest cap 소진 시 next-cheapest로 fallback함
-- [ ] global/customer 오류와 post-dispatch 실패는 fallback하지 않음
-- [ ] terminal replay가 현재 가격과 route를 재평가하지 않음
-- [ ] OpenAI 생성·편집과 Gemini가 동일 ordering 계약을 사용함
-- [ ] response/log에 내부 가격·마진·credential·request content가 노출되지 않음
-- [ ] fixed/priority와 native SDK wire behavior가 회귀하지 않음
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] lowest_cost가 eligible candidate의 upstream estimated cost 최솟값을 선택함
+- [x] 모든 candidate quote가 동일 evaluation timestamp를 사용함
+- [x] cost tie-break가 priority와 candidate ID로 deterministic함
+- [x] selected quote와 Begin charge의 price/cost/sale/currency가 일치함
+- [x] price snapshot race가 금전 effect 없이 최대 한 번 재평가됨
+- [x] minimum margin, credential과 inactive/unpriced channel이 dispatch 전에 제외됨
+- [x] cheapest cap 소진 시 next-cheapest로 fallback함
+- [x] global/customer 오류와 post-dispatch 실패는 fallback하지 않음
+- [x] terminal replay가 현재 가격과 route를 재평가하지 않음
+- [x] OpenAI 생성·편집과 Gemini가 동일 ordering 계약을 사용함
+- [x] response/log에 내부 가격·마진·credential·request content가 노출되지 않음
+- [x] fixed/priority와 native SDK wire behavior가 회귀하지 않음
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `fa60aa60ebfa225744d6055e9276aa02548d4f3a`
+- PR: https://github.com/nativegatewayhq/gateway/pull/23
+- local check: `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과
+- local integration: PostgreSQL 17/Redis 8에서 `make integration-test` 통과
+- GitHub Actions check: https://github.com/nativegatewayhq/gateway/actions/runs/32360754902/job/96399616088
+- GitHub Actions plan validation: https://github.com/nativegatewayhq/gateway/actions/runs/32360783325/job/96399700785
+- 검증 범위: lowest-cost ordering/tie-break, OpenAI 생성·편집/Gemini parity, 단 1회 price-race 재평가, spend-cap fallback, bound quote 불일치 rollback, immutable charge routing evidence, fixed/priority 회귀 및 전체 race test
 
 ## Rollback 계획
 
