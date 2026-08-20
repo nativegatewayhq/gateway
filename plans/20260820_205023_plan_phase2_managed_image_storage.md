@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-027
 title: Phase 2 Managed Image Storage and CDN Delivery
-status: in_progress
+status: completed
 created_at: 2026-08-20T20:50:23+09:00
-updated_at: 2026-08-20T20:50:23+09:00
+updated_at: 2026-08-20T21:19:24+09:00
 owners:
   - gateway
 initiative: phase-2-managed-image-storage
@@ -195,26 +195,38 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] provider mode가 기존 native response bytes와 network behavior를 보존함
-- [ ] managed mode가 OpenAI URL/Base64와 Gemini inline image를 stable CDN URL로 반환함
-- [ ] URL fetch가 SSRF, DNS rebinding, redirect와 credential forwarding을 방지함
-- [ ] download/upload가 개별·전체 크기 제한 안에서 streaming으로 동작함
-- [ ] object key, put, asset row와 retry가 멱등적임
-- [ ] terminal replay가 Provider fetch/upload를 다시 호출하지 않음
-- [ ] Provider 성공 후 storage 실패가 잘못 환불되지 않음
-- [ ] ambiguous persistence가 reconciliation으로 복구됨
-- [ ] 부분 저장 결과가 client response로 노출되지 않음
-- [ ] managed required dependency 장애가 readiness를 낮추고 provider mode는 영향받지 않음
-- [ ] OpenAI 생성·편집과 Gemini native response 계약이 호환 테스트로 고정됨
-- [ ] storage credential, 내부 bucket/key, raw URL, prompt와 customer identity가 response/log/metadata에 노출되지 않음
-- [ ] migration forward/backward와 provider-mode rollback이 검증됨
-- [ ] README, Cloud와 Conformance handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] provider mode가 기존 native response bytes와 network behavior를 보존함
+- [x] managed mode가 OpenAI URL/Base64와 Gemini inline image를 stable CDN URL로 반환함
+- [x] URL fetch가 SSRF, DNS rebinding, redirect와 credential forwarding을 방지함
+- [x] download/upload가 개별·전체 크기 제한 안에서 streaming으로 동작함
+- [x] object key, put, asset row와 retry가 멱등적임
+- [x] terminal replay가 Provider fetch/upload를 다시 호출하지 않음
+- [x] Provider 성공 후 storage 실패가 잘못 환불되지 않음
+- [x] ambiguous persistence가 reconciliation으로 복구됨
+- [x] 부분 저장 결과가 client response로 노출되지 않음
+- [x] managed required dependency 장애가 readiness를 낮추고 provider mode는 영향받지 않음
+- [x] OpenAI 생성·편집과 Gemini native response 계약이 호환 테스트로 고정됨
+- [x] storage credential, 내부 bucket/key, raw URL, prompt와 customer identity가 response/log/metadata에 노출되지 않음
+- [x] migration forward/backward와 provider-mode rollback이 검증됨
+- [x] README, Cloud와 Conformance handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- PR: `https://github.com/nativegatewayhq/gateway/pull/26`
+- 계획: `0fa8898`
+- S3-compatible store, configuration과 asset migrations: `2d57d3b`
+- safe collector, native transformers와 protocol integration: `4067f56`, `9fe8e4e`
+- distributed upload lease와 single-PUT integration: `7bac3da`
+- storage reconciliation transform와 billing preservation: `987855c`
+- readiness process test와 운영 문서: `2ec38d4`
+- SSRF reserved-range, lease와 Provider fetch port hardening: `7efe210`, `a5266e6`
+- `git diff --check` 통과
+- `make check` 통과
+- `TEST_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/0' make integration-test` 통과
+- GitHub Plan policy `validate` 통과
+- GitHub CI `check` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32368052371`
 
 ## Rollback 계획
 
