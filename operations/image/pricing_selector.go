@@ -151,6 +151,54 @@ func ParseOpenAIJSONPricingSelector(body []byte) (PricingSelector, error) {
 	return selector, nil
 }
 
+func RewriteJSONModel(body []byte, providerModel string) ([]byte, error) {
+	if !validModelID(providerModel) {
+		return nil, ErrInvalidPricingSelector
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, ErrInvalidPricingSelector
+	}
+	start, end, count := 0, 0, 0
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, ErrInvalidPricingSelector
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, ErrInvalidPricingSelector
+		}
+		before := int(decoder.InputOffset())
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, ErrInvalidPricingSelector
+		}
+		if key != "model" {
+			continue
+		}
+		var current string
+		if json.Unmarshal(raw, &current) != nil {
+			return nil, ErrInvalidPricingSelector
+		}
+		count++
+		start, end = before, int(decoder.InputOffset())
+		for start < end && (body[start] == ' ' || body[start] == '\t' || body[start] == '\r' || body[start] == '\n' || body[start] == ':') {
+			start++
+		}
+	}
+	if _, err := decoder.Token(); err != nil || decoder.Decode(&struct{}{}) != io.EOF || count != 1 || start >= end {
+		return nil, ErrInvalidPricingSelector
+	}
+	replacement, _ := json.Marshal(providerModel)
+	result := make([]byte, 0, len(body)-end+start+len(replacement))
+	result = append(result, body[:start]...)
+	result = append(result, replacement...)
+	result = append(result, body[end:]...)
+	return result, nil
+}
+
 func ParseOpenAIMultipartPricingSelector(reader io.Reader, boundary string) (PricingSelector, error) {
 	if reader == nil || boundary == "" || len(boundary) > 200 {
 		return PricingSelector{}, ErrInvalidPricingSelector
@@ -200,6 +248,61 @@ func ParseOpenAIMultipartPricingSelector(reader io.Reader, boundary string) (Pri
 		return PricingSelector{}, ErrInvalidPricingSelector
 	}
 	return selector, nil
+}
+
+func RewriteMultipartModel(source io.Reader, boundary, providerModel string, destination io.Writer) (int64, error) {
+	if source == nil || destination == nil || boundary == "" || len(boundary) > 200 || !validModelID(providerModel) {
+		return 0, ErrInvalidPricingSelector
+	}
+	counter := &countingWriter{destination: destination}
+	writer := multipart.NewWriter(counter)
+	if err := writer.SetBoundary(boundary); err != nil {
+		return 0, ErrInvalidPricingSelector
+	}
+	reader := multipart.NewReader(source, boundary)
+	modelCount := 0
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return 0, ErrInvalidPricingSelector
+		}
+		output, err := writer.CreatePart(part.Header)
+		if err != nil {
+			_ = part.Close()
+			return 0, ErrInvalidPricingSelector
+		}
+		if part.FormName() == "model" {
+			modelCount++
+			_, err = io.WriteString(output, providerModel)
+			if _, copyErr := io.Copy(io.Discard, part); err == nil {
+				err = copyErr
+			}
+		} else {
+			_, err = io.Copy(output, part)
+		}
+		_ = part.Close()
+		if err != nil {
+			return 0, ErrInvalidPricingSelector
+		}
+	}
+	if modelCount != 1 || writer.Close() != nil {
+		return 0, ErrInvalidPricingSelector
+	}
+	return counter.written, nil
+}
+
+type countingWriter struct {
+	destination io.Writer
+	written     int64
+}
+
+func (writer *countingWriter) Write(value []byte) (int, error) {
+	count, err := writer.destination.Write(value)
+	writer.written += int64(count)
+	return count, err
 }
 
 func validSelector(selector PricingSelector) bool {

@@ -75,6 +75,26 @@ func TestBillableGeminiCapturesNativeResponse(t *testing.T) {
 	}
 }
 
+func TestBillableGeminiUsesSelectedProviderModel(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "gemini", Model: "gemini-logical", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_disabled", Provider: providercredentials.Google, ProviderModel: "disabled-model", ChannelID: "channel_00000000000000000000000000000004", Enabled: false, Priority: 0},
+		{ID: "candidate_google", Provider: providercredentials.Google, ProviderModel: "google-provider-model", ChannelID: "channel_00000000000000000000000000000003", Enabled: true, Priority: 1},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &geminiBillingFake{beginCharge: chargebilling.Charge{ID: "charge_test"}}
+	executor := &stubExecutor{response: &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}}
+	handler := NewBillableHandler(slog.Default(), &stubAuthenticator{principal: apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test"}}, registry, executor, 4096, fake)
+	request := geminiRequest(strings.NewReader(`{"contents":[]}`))
+	request.URL.Path = "/v1beta/models/gemini-logical:generateContent"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || executor.request.Model != "google-provider-model" || fake.beginRequest.Model != "gemini-logical" || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000003" {
+		t.Fatalf("response=%d providerModel=%s begin=%+v", response.Code, executor.request.Model, fake.beginRequest)
+	}
+}
+
 func TestBillableGeminiReplaysWithoutProvider(t *testing.T) {
 	fake := &geminiBillingFake{beginCharge: chargebilling.Charge{Replay: true, Response: chargebilling.ResponseSnapshot{Status: 202, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"stored":true}`)}}}
 	executor := &stubExecutor{}

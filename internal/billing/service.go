@@ -44,6 +44,7 @@ type BeginRequest struct {
 	Quality            string
 	IdempotencyKey     string
 	RequestFingerprint [32]byte
+	LegacyFingerprint  [32]byte
 }
 
 type ResponseSnapshot struct {
@@ -416,10 +417,13 @@ func scanCharge(row pgx.Row) (Charge, bool, error) {
 
 func sameRequest(charge Charge, request BeginRequest) bool {
 	requestIdentityMatches := charge.RequestID == request.RequestID
+	routeMatches := charge.ChannelID == request.ChannelID
 	if request.IdempotencyKey != "" {
-		requestIdentityMatches = charge.IdempotencyKey == request.IdempotencyKey && bytes.Equal(charge.RequestFingerprint[:], request.RequestFingerprint[:])
+		fingerprintMatches := bytes.Equal(charge.RequestFingerprint[:], request.RequestFingerprint[:]) || (request.LegacyFingerprint != ([32]byte{}) && bytes.Equal(charge.RequestFingerprint[:], request.LegacyFingerprint[:]))
+		requestIdentityMatches = charge.IdempotencyKey == request.IdempotencyKey && fingerprintMatches
+		routeMatches = true
 	}
-	return requestIdentityMatches && charge.OrganizationID == request.OrganizationID && charge.ProjectID == request.ProjectID && charge.Protocol == request.Protocol && charge.Operation == request.Operation && charge.Model == request.Model && charge.ChannelID == request.ChannelID && charge.Quantity == request.Quantity && charge.Size == request.Size && charge.Quality == request.Quality
+	return requestIdentityMatches && routeMatches && charge.OrganizationID == request.OrganizationID && charge.ProjectID == request.ProjectID && charge.Protocol == request.Protocol && charge.Operation == request.Operation && charge.Model == request.Model && charge.Quantity == request.Quantity && charge.Size == request.Size && charge.Quality == request.Quality
 }
 
 func validBeginRequest(request BeginRequest) bool {

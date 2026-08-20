@@ -59,7 +59,11 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 	data := []modelObject{}
 	if handler.common.models != nil {
 		for _, model := range handler.common.models.List() {
-			if configured[model.Provider] {
+			if len(model.Capabilities) == 0 {
+				continue
+			}
+			decision, err := handler.common.models.Resolve(model.Model, model.Capabilities[0].Operation, model.Capabilities[0].MediaType)
+			if err == nil && configured[decision.Provider] {
 				data = append(data, modelObject{model.Model, "model", model.Created, model.Owner})
 			}
 		}

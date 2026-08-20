@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
 
@@ -67,6 +69,32 @@ func TestEditHandlerPreservesOpenAIMultipartAndCleansSpool(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(tempDir, "gateway-image-edit-*"))
 	if len(files) != 0 {
 		t.Fatalf("spool files remain: %v", files)
+	}
+}
+
+func TestEditHandlerRewritesOnlyMultipartProviderModel(t *testing.T) {
+	body, contentType := multipartEdit(t, "logical-edit")
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-edit", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Edit, MediaType: imageoperation.Multipart}}, Policy: imageoperation.Fixed, FixedCandidateID: "candidate_edit", Candidates: []imageoperation.ChannelCandidate{{ID: "candidate_edit", Provider: providercredentials.OpenAI, ProviderModel: "provider-edit", ChannelID: "channel_00000000000000000000000000000001", Enabled: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	handler := NewEditHandler(slog.Default(), acceptingAuth(t), registry, map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+		called = true
+		_, parameters, _ := mime.ParseMediaType(request.ContentType)
+		selector, err := imageoperation.ParseOpenAIMultipartPricingSelector(request.Body, parameters["boundary"])
+		if err != nil || selector.Model != "provider-edit" {
+			t.Fatalf("selector=%+v error=%v", selector, err)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}, 4096, 1)
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body))
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("Authorization", "Bearer service-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || !called {
+		t.Fatalf("response=%d called=%v body=%s", response.Code, called, response.Body.String())
 	}
 }
 

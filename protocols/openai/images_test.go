@@ -33,8 +33,8 @@ func (function executorFunc) Generate(ctx context.Context, request openaiimages.
 func testRegistry(t *testing.T) *imageoperation.Registry {
 	t.Helper()
 	registry, err := imageoperation.NewRegistry(
-		imageoperation.ModelRoute{Protocol: "openai", Model: "gpt-image-1", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.Multipart}}},
-		imageoperation.ModelRoute{Protocol: "openai", Model: "grok-imagine-image-quality", Provider: providercredentials.XAI, ChannelID: "channel_00000000000000000000000000000002", Owner: "xai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.JSON}}},
+		imageoperation.ModelRoute{Protocol: "openai", Model: "gpt-image-1", Owner: "openai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.Multipart}}, Policy: imageoperation.Fixed, FixedCandidateID: "candidate_openai", Candidates: []imageoperation.ChannelCandidate{{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "gpt-image-1", ChannelID: "channel_00000000000000000000000000000001", Enabled: true}}},
+		imageoperation.ModelRoute{Protocol: "openai", Model: "grok-imagine-image-quality", Owner: "xai", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}, {Operation: imageoperation.Edit, MediaType: imageoperation.JSON}}, Policy: imageoperation.Fixed, FixedCandidateID: "candidate_xai", Candidates: []imageoperation.ChannelCandidate{{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "grok-imagine-image-quality", ChannelID: "channel_00000000000000000000000000000002", Enabled: true}}},
 	)
 	if err != nil {
 		t.Fatal(err)
