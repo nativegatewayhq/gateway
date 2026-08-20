@@ -25,6 +25,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
@@ -57,6 +58,16 @@ func run(stdout, stderr io.Writer) int {
 	logger := observability.NewLogger(stdout, cfg.LogLevel)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	telemetryRuntime, err := telemetry.New(ctx, cfg.Telemetry)
+	if err != nil {
+		logger.Error("gateway telemetry initialization failed")
+		return 1
+	}
+	defer func() {
+		if shutdownErr := telemetryRuntime.Shutdown(context.Background()); shutdownErr != nil {
+			logger.Warn("gateway telemetry shutdown incomplete", "category", "telemetry_shutdown_failed")
+		}
+	}()
 	pool, err := database.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("gateway database unavailable")
@@ -217,6 +228,8 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIImageEdits:    openAIImageEditsHandler,
 		OpenAIModels:        openAIModelsHandler,
 		ClientIPResolver:    clientIPResolver,
+		Telemetry:           telemetryRuntime.Recorder,
+		TracePropagator:     telemetryRuntime.Propagator,
 	})
 	cancelWorker()
 	<-workerDone

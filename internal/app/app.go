@@ -13,6 +13,8 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/httpserver"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 type Dependencies struct {
@@ -23,6 +25,8 @@ type Dependencies struct {
 	OpenAIImageEdits    http.Handler
 	OpenAIModels        http.Handler
 	ClientIPResolver    *clientip.Resolver
+	Telemetry           *telemetry.Recorder
+	TracePropagator     propagation.TextMapPropagator
 }
 
 // Error reports a lifecycle failure category without exposing listener or
@@ -67,7 +71,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, dependenci
 	}
 
 	server := &http.Server{
-		Handler:           httpserver.NewHandlerWithClientIP(logger, dependencies.Ready, dependencies.ClientIPResolver, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels}),
+		Handler:           httpserver.NewHandlerWithTelemetry(logger, dependencies.Ready, dependencies.ClientIPResolver, dependencies.Telemetry, dependencies.TracePropagator, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels}),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

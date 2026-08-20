@@ -34,7 +34,7 @@ func recovery(logger *slog.Logger, next http.Handler) http.Handler {
 			if recover() == nil {
 				return
 			}
-			logger.Error("request panic recovered", "request_id", requestid.FromContext(request.Context()))
+			logger.ErrorContext(request.Context(), "request panic recovered", "request_id", requestid.FromContext(request.Context()))
 			writeError(writer, request, http.StatusInternalServerError, "internal_error", "internal server error")
 		}()
 		next.ServeHTTP(writer, request)
@@ -55,7 +55,7 @@ func accessLog(logger *slog.Logger, next http.Handler) http.Handler {
 		if route == "" {
 			route = "unmatched"
 		}
-		logger.Info("request completed",
+		logger.InfoContext(request.Context(), "request completed",
 			"request_id", requestid.FromContext(request.Context()),
 			"method", request.Method,
 			"route", route,

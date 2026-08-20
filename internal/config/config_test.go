@@ -58,6 +58,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ImageStorage.Mode != "provider" || cfg.ImageStorage.MaximumImages != 10 || cfg.ImageStorage.MaximumImageBytes != 32<<20 {
 		t.Errorf("image storage config = %+v", cfg.ImageStorage)
 	}
+	if cfg.Telemetry.Mode != "disabled" || cfg.Telemetry.ServiceName != "native-ai-gateway" || cfg.Telemetry.SampleRatio != 0.1 {
+		t.Errorf("telemetry config=%+v", cfg.Telemetry)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -109,6 +112,16 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_IMAGE_STORAGE_FETCH_TIMEOUT":           "20s",
 		"GATEWAY_IMAGE_STORAGE_UPLOAD_TIMEOUT":          "45s",
 		"GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_OPENAI":    "https://images.openai.com,https://cdn.openai.com",
+		"GATEWAY_TELEMETRY_MODE":                        "required",
+		"GATEWAY_TELEMETRY_OTLP_ENDPOINT":               "https://otel.example.com/collector",
+		"GATEWAY_TELEMETRY_OTLP_AUTHORIZATION":          "Bearer telemetry-secret",
+		"GATEWAY_TELEMETRY_SERVICE_NAME":                "gateway-test",
+		"GATEWAY_TELEMETRY_SERVICE_VERSION":             "v1.2.3",
+		"GATEWAY_TELEMETRY_ENVIRONMENT":                 "test",
+		"GATEWAY_TELEMETRY_SAMPLE_RATIO":                "0.25",
+		"GATEWAY_TELEMETRY_EXPORT_INTERVAL":             "15s",
+		"GATEWAY_TELEMETRY_EXPORT_TIMEOUT":              "3s",
+		"GATEWAY_TELEMETRY_SHUTDOWN_TIMEOUT":            "2s",
 		"GATEWAY_TRUSTED_PROXY_CIDRS":                   "10.0.0.8/8, 2001:db8::1/32",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
@@ -156,6 +169,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if len(cfg.ImageStorage.FetchOrigins["openai"]) != 2 {
 		t.Errorf("fetch origins=%v", cfg.ImageStorage.FetchOrigins)
+	}
+	if cfg.Telemetry.Mode != "required" || cfg.Telemetry.Endpoint != "https://otel.example.com/collector" || cfg.Telemetry.SampleRatio != 0.25 || cfg.Telemetry.ExportInterval != 15*time.Second || cfg.Telemetry.ShutdownTimeout != 2*time.Second {
+		t.Errorf("telemetry overrides=%+v", cfg.Telemetry)
 	}
 	if len(cfg.TrustedProxyPrefixes) != 2 || cfg.TrustedProxyPrefixes[0].String() != "10.0.0.0/8" || cfg.TrustedProxyPrefixes[1].String() != "2001:db8::/32" {
 		t.Errorf("trusted proxies=%v", cfg.TrustedProxyPrefixes)

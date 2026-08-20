@@ -6,6 +6,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"context"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestNewLoggerHonorsLevel(t *testing.T) {
@@ -22,6 +25,20 @@ func TestNewLoggerHonorsLevel(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "visible") || !strings.Contains(logOutput, "req_test") {
 		t.Fatalf("expected structured fields in output: %s", logOutput)
+	}
+}
+
+func TestLoggerAddsTraceCorrelationOnlyFromContext(t *testing.T) {
+	var output bytes.Buffer
+	logger := NewLogger(&output, slog.LevelInfo)
+	traceID, _ := trace.TraceIDFromHex("0102030405060708090a0b0c0d0e0f10")
+	spanID, _ := trace.SpanIDFromHex("0102030405060708")
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled}))
+	logger.InfoContext(ctx, "correlated")
+	logger.Info("plain")
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], traceID.String()) || !strings.Contains(lines[0], spanID.String()) || strings.Contains(lines[1], "trace_id") {
+		t.Fatalf("logs=%s", output.String())
 	}
 }
 
