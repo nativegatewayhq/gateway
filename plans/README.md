@@ -154,5 +154,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-012` | completed | [Phase 1 Idempotency-Key and Native Response Replay](./20260820_153309_plan_phase1_idempotency_native_response_replay.md) | `phase-1-idempotency-response-replay` |
 | `gateway-20260820-013` | completed | [Phase 1 Timeout and Provider Reconciliation Worker](./20260820_155724_plan_phase1_timeout_provider_reconciliation_worker.md) | `phase-1-timeout-reconciliation` |
 | `gateway-20260820-014` | in_progress | [Phase 1 Gemini Image Billing and Idempotency](./20260820_161342_plan_phase1_gemini_image_billing_idempotency.md) | `phase-1-gemini-image-billing` |
+| `gateway-20260820-015` | in_progress | [Allow Gemini Protocol in Image Charge Schema](./20260820_162516_change_allow_gemini_image_charge_protocol.md) | `phase-1-gemini-image-billing` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
