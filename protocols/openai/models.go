@@ -47,7 +47,7 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 		writeError(tracked, 405, "invalid_request_error", "method_not_allowed", "method not allowed")
 		return
 	}
-	if !handler.common.authenticate(tracked, request) {
+	if _, authenticated := handler.common.authenticate(tracked, request); !authenticated {
 		return
 	}
 	configured := map[providercredentials.ProviderID]bool{}

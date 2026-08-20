@@ -26,6 +26,13 @@ const (
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
 type LookupEnv func(string) (string, bool)
 
+type BillingMode string
+
+const (
+	BillingDisabled BillingMode = "disabled"
+	BillingRequired BillingMode = "required"
+)
+
 // Config contains non-provider process settings. Provider credentials remain
 // in their opaque registry and are never exposed through this structure.
 type Config struct {
@@ -39,6 +46,8 @@ type Config struct {
 	ImagesBodyBytes     int64
 	ImageEditsBodyBytes int64
 	ImageEditSpoolLimit int
+	BillingMode         BillingMode
+	MinimumMarginBPS    int64
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -54,6 +63,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ImagesBodyBytes:     defaultImagesBodyBytes,
 		ImageEditsBodyBytes: defaultImageEditsBodyBytes,
 		ImageEditSpoolLimit: 8,
+		BillingMode:         BillingDisabled,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -117,6 +127,23 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS: must be an integer between 1 and 128")
 		}
 		cfg.ImageEditSpoolLimit = limit
+	}
+	if value, ok := lookup("GATEWAY_BILLING_MODE"); ok {
+		switch BillingMode(strings.ToLower(strings.TrimSpace(value))) {
+		case BillingDisabled:
+			cfg.BillingMode = BillingDisabled
+		case BillingRequired:
+			cfg.BillingMode = BillingRequired
+		default:
+			return Config{}, fmt.Errorf("GATEWAY_BILLING_MODE: must be disabled or required")
+		}
+	}
+	if value, ok := lookup("GATEWAY_MINIMUM_MARGIN_BPS"); ok {
+		margin, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || margin < 0 || margin > 10_000 {
+			return Config{}, fmt.Errorf("GATEWAY_MINIMUM_MARGIN_BPS: must be an integer between 0 and 10000")
+		}
+		cfg.MinimumMarginBPS = margin
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {

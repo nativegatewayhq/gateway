@@ -1,0 +1,129 @@
+//go:build integration
+
+package openai
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nativegatewayhq/gateway/internal/apikey"
+	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/database"
+	"github.com/nativegatewayhq/gateway/internal/ledger"
+	"github.com/nativegatewayhq/gateway/internal/pricing"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/requestid"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
+	"github.com/nativegatewayhq/gateway/providers/openaiimages"
+)
+
+func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
+	pool := isolatedOpenAIPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO organizations(id,name,slug) VALUES('org_protocol_billing','Protocol billing','protocol-billing'); INSERT INTO projects(id,organization_id,name,slug) VALUES('project_protocol_billing','org_protocol_billing','Protocol billing','protocol-billing')`); err != nil {
+		t.Fatal(err)
+	}
+	record, raw, err := apikey.GenerateForProject(rand.Reader, "billable protocol", "project_protocol_billing", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := apikey.NewPostgresStore(pool)
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	wallet := ledger.NewService(pool)
+	if _, err := wallet.Deposit(ctx, "org_protocol_billing", 500, "fixture-deposit"); err != nil {
+		t.Fatal(err)
+	}
+	estimator, _ := pricing.NewService(pool, 0)
+	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: "channel_00000000000000000000000000000001", Protocol: "openai", Operation: "image.generate", Model: "gpt-image-1", UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "protocol-billing-price"); err != nil {
+		t.Fatal(err)
+	}
+	chargeService, _ := chargebilling.NewService(pool, estimator, wallet)
+	calls := 0
+	executor := executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+		calls++
+		body, _ := io.ReadAll(request.Body)
+		if strings.Contains(string(body), `"fail":true`) {
+			return &http.Response{StatusCode: 429, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"native limit"}}`))}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"data":[{"url":"native-success"}]}`))}, nil
+	})
+	handler := NewBillableImagesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), imageoperation.DefaultRegistry(), map[providercredentials.ProviderID]Executor{providercredentials.OpenAI: executor}, 2048, chargeService)
+
+	success := billableProtocolRequest(handler, raw, "billable-success", `{"model":"gpt-image-1","n":2}`)
+	if success.Code != 200 || success.Body.String() != `{"data":[{"url":"native-success"}]}` {
+		t.Fatalf("success=%d %s", success.Code, success.Body.String())
+	}
+	failure := billableProtocolRequest(handler, raw, "billable-failure", `{"model":"gpt-image-1","fail":true}`)
+	if failure.Code != 429 || failure.Body.String() != `{"error":{"message":"native limit"}}` || calls != 2 {
+		t.Fatalf("failure=%d %s calls=%d", failure.Code, failure.Body.String(), calls)
+	}
+	var available, reserved int64
+	if err := pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_protocol_billing'`).Scan(&available, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	var captured, released int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state='CAPTURED'),count(*) FILTER (WHERE state='RELEASED') FROM image_request_charges WHERE organization_id='org_protocol_billing'`).Scan(&captured, &released); err != nil {
+		t.Fatal(err)
+	}
+	if available != 300 || reserved != 0 || captured != 1 || released != 1 {
+		t.Fatalf("wallet=%d/%d charges=%d/%d", available, reserved, captured, released)
+	}
+}
+
+func isolatedOpenAIPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is required")
+	}
+	ctx := context.Background()
+	admin, err := database.Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := fmt.Sprintf("openai_billing_test_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE")
+		admin.Close()
+	})
+	return pool
+}
+
+func billableProtocolRequest(handler http.Handler, key, id, body string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+key)
+	request.Header.Set(requestid.HeaderName, id)
+	response := httptest.NewRecorder()
+	requestid.Middleware(handler).ServeHTTP(response, request)
+	return response
+}

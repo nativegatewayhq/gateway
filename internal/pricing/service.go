@@ -168,6 +168,23 @@ func (service *Service) Publish(ctx context.Context, price Price, publicationKey
 }
 
 func (service *Service) Estimate(ctx context.Context, request Request) (Estimate, error) {
+	return service.estimate(ctx, service.pool, request)
+}
+
+// EstimateInTx selects a price using a caller-owned transaction so a larger
+// business operation can retain one database snapshot and connection.
+func (service *Service) EstimateInTx(ctx context.Context, tx pgx.Tx, request Request) (Estimate, error) {
+	if tx == nil {
+		return Estimate{}, ErrInvalidRequest
+	}
+	return service.estimate(ctx, tx, request)
+}
+
+type rowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (service *Service) estimate(ctx context.Context, query rowQuerier, request Request) (Estimate, error) {
 	request = canonicalRequest(request)
 	if !validRequest(request) {
 		return Estimate{}, ErrInvalidRequest
@@ -176,7 +193,7 @@ func (service *Service) Estimate(ctx context.Context, request Request) (Estimate
 		request.At = service.now().UTC()
 	}
 	var price Price
-	err := service.pool.QueryRow(ctx, `SELECT p.id,p.channel_id,p.protocol,p.operation,p.model,p.size,p.quality,p.currency,p.unit_cost,p.unit_sale,p.effective_from,p.effective_until
+	err := query.QueryRow(ctx, `SELECT p.id,p.channel_id,p.protocol,p.operation,p.model,p.size,p.quality,p.currency,p.unit_cost,p.unit_sale,p.effective_from,p.effective_until
 		FROM provider_prices p JOIN provider_channels c ON c.id=p.channel_id
 		WHERE p.channel_id=$1 AND p.protocol=$2 AND p.operation=$3 AND p.model=$4 AND p.size=$5 AND p.quality=$6
 		AND c.status='active' AND p.effective_from <= $7 AND (p.effective_until IS NULL OR p.effective_until > $7)`, request.ChannelID, request.Protocol, request.Operation, request.Model, request.Size, request.Quality, request.At).

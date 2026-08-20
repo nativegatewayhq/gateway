@@ -4,7 +4,7 @@ An open-source multimodal AI API gateway that preserves official provider SDKs a
 
 ## Status
 
-Phase 0 native protocol validation and early Phase 1 foundations. The process exposes health endpoints, tenant-owned PostgreSQL service API key authentication, a capability-backed models endpoint, non-streaming Gemini `generateContent`, and OpenAI-compatible image generation and editing. The internal wallet and append-only ledger foundation is not yet connected to inference requests; production deposits, pricing, and dynamic routing remain intentionally unavailable.
+Phase 0 native protocol validation and early Phase 1 billing foundations. The process exposes health endpoints, tenant-owned PostgreSQL service API key authentication, a capability-backed models endpoint, non-streaming Gemini `generateContent`, and OpenAI-compatible image generation and editing. OpenAI/xAI image requests can use required price-and-Wallet settlement; production payment deposits, dynamic routing, and Gemini billing remain unavailable.
 
 ## Development workflow
 
@@ -61,6 +61,8 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES` | `1048576` | Positive OpenAI Images JSON body limit up to 1 MiB |
 | `GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES` | `67108864` | Image edit body limit; maximum 256 MiB |
 | `GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent multipart edit spool limit; maximum 128 |
+| `GATEWAY_BILLING_MODE` | `disabled` | `disabled` preserves BYOK pass-through; `required` enforces price and Wallet settlement |
+| `GATEWAY_MINIMUM_MARGIN_BPS` | `0` | Minimum sale margin from 0 to 10000 basis points |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
@@ -162,7 +164,7 @@ const response = await client.images.generate({
 });
 ```
 
-The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, retries, fallback, storage, and billing are excluded from this phase.
+The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, retries, fallback, and storage remain excluded; billing is opt-in through the required mode described below.
 
 ## Image editing
 
@@ -197,7 +199,9 @@ This is currently an internal domain boundary only. No public wallet endpoint ex
 
 Provider channels can publish append-only, time-versioned image prices through the internal pricing domain. Cost and sale amounts use `USD_TICKS`; estimates match channel, protocol, operation, model, size, and quality exactly, enforce a configured minimum margin, and retain the selected price ID for later audit.
 
-Pricing is not connected to native inference handlers yet. There is no public price-management endpoint, and clients cannot supply trusted prices or historical evaluation times. A managed Cloud service must authenticate and audit price publications through the internal domain rather than modifying pricing tables directly.
+There is no public price-management endpoint, and clients cannot supply trusted prices or historical evaluation times. A managed Cloud service must authenticate and audit price publications through the internal domain rather than modifying pricing tables directly.
+
+When `GATEWAY_BILLING_MODE=required`, OpenAI/xAI image generation and editing resolve the exact active price, reserve project-owned organization credits, and call the Provider only after the reservation commits. Provider 2xx responses are returned only after Capture; native non-2xx responses and executor failures release the reservation first. An uncertain settlement fails closed with `billing_reconciliation_required`. Managed Cloud deployments must use `required`; the default `disabled` mode exists for self-hosted BYOK compatibility.
 
 ## Verify
 

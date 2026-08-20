@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/ledger"
+	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
@@ -35,12 +38,26 @@ type Executor interface {
 	Generate(context.Context, openaiimages.Request) (*http.Response, error)
 }
 
+type Billing interface {
+	Begin(context.Context, billing.BeginRequest) (billing.Charge, error)
+	Capture(context.Context, string) (billing.Charge, error)
+	Release(context.Context, string) (billing.Charge, error)
+	MarkReconciling(context.Context, string) error
+}
+
 type Handler struct {
 	logger        *slog.Logger
 	authenticator Authenticator
 	models        ModelRegistry
 	executors     map[providercredentials.ProviderID]Executor
 	maxBodyBytes  int64
+	billing       Billing
+}
+
+func NewBillableImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
+	handler := NewImagesHandler(logger, authenticator, models, executors, maxBodyBytes)
+	handler.billing = chargeBilling
+	return handler
 }
 
 func NewImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64) *Handler {
@@ -57,9 +74,14 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	model := "invalid"
 	logModel := "invalid"
 	provider := providercredentials.ProviderID("")
+	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
-			if !tracked.wroteHeader {
+			settled := true
+			if charge != nil {
+				settled = handler.settle(tracked, request.Context(), charge.ID, false)
+			}
+			if settled && !tracked.wroteHeader {
 				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
 			}
 			handler.logger.Error("openai image request panic recovered", "request_id", requestid.FromContext(request.Context()))
@@ -80,7 +102,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(tracked, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "method not allowed")
 		return
 	}
-	if !handler.authenticate(tracked, request) {
+	principal, authenticated := handler.authenticate(tracked, request)
+	if !authenticated {
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -131,6 +154,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
+	if handler.billing != nil {
+		selector, selectorErr := imageoperation.ParseOpenAIJSONPricingSelector(body)
+		if selectorErr != nil {
+			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_pricing_selector", "request contains unsupported billing options")
+			return
+		}
+		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Generate), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality})
+		if billingErr != nil {
+			handler.writeBillingError(tracked, billingErr)
+			return
+		}
+		charge = &startedCharge
+	}
 	response, err := executor.Generate(request.Context(), openaiimages.Request{
 		ContentType: request.Header.Get("Content-Type"),
 		Accept:      request.Header.Get("Accept"),
@@ -138,10 +174,16 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		Body:        bytes.NewReader(body),
 	})
 	if err != nil {
+		if charge != nil && !handler.settle(tracked, request.Context(), charge.ID, false) {
+			return
+		}
 		handler.writeExecutorError(tracked, err)
 		return
 	}
 	defer response.Body.Close()
+	if charge != nil && !handler.settle(tracked, request.Context(), charge.ID, response.StatusCode >= 200 && response.StatusCode <= 299) {
+		return
+	}
 	copyResponseHeaders(tracked.Header(), response.Header)
 	tracked.WriteHeader(response.StatusCode)
 	if _, err := io.Copy(tracked, response.Body); err != nil {
@@ -153,29 +195,64 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
-func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) bool {
+func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {
 	if handler.authenticator == nil {
 		writeError(writer, http.StatusServiceUnavailable, "server_error", "authentication_unavailable", "authentication service unavailable")
-		return false
+		return apikey.Principal{}, false
 	}
 	raw, err := apikey.Extract(request)
 	if err != nil {
 		if errors.Is(err, apikey.ErrAmbiguous) {
 			writeError(writer, http.StatusBadRequest, "invalid_request_error", "ambiguous_authentication", "multiple credential locations are not allowed")
-			return false
+			return apikey.Principal{}, false
 		}
 		writeError(writer, http.StatusUnauthorized, "invalid_request_error", "authentication_required", "authentication required")
-		return false
+		return apikey.Principal{}, false
 	}
-	if _, err := handler.authenticator.Authenticate(request.Context(), raw); err != nil {
+	principal, err := handler.authenticator.Authenticate(request.Context(), raw)
+	if err != nil {
 		if errors.Is(err, apikey.ErrUnavailable) {
 			writeError(writer, http.StatusServiceUnavailable, "server_error", "authentication_unavailable", "authentication service unavailable")
-			return false
+			return apikey.Principal{}, false
 		}
 		writeError(writer, http.StatusUnauthorized, "invalid_request_error", "authentication_required", "authentication required")
-		return false
+		return apikey.Principal{}, false
 	}
-	return true
+	return principal, true
+}
+
+func (handler *Handler) settle(writer http.ResponseWriter, ctx context.Context, chargeID string, success bool) bool {
+	settlementContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	var err error
+	if success {
+		_, err = handler.billing.Capture(settlementContext, chargeID)
+	} else {
+		_, err = handler.billing.Release(settlementContext, chargeID)
+	}
+	if err == nil {
+		return true
+	}
+	markContext, markCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer markCancel()
+	_ = handler.billing.MarkReconciling(markContext, chargeID)
+	writeError(writer, http.StatusServiceUnavailable, "server_error", "billing_reconciliation_required", "billing settlement is pending")
+	return false
+}
+
+func (handler *Handler) writeBillingError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ledger.ErrInsufficientFunds):
+		writeError(writer, http.StatusPaymentRequired, "invalid_request_error", "insufficient_credits", "insufficient credits")
+	case errors.Is(err, billing.ErrRequestConflict), errors.Is(err, billing.ErrRequestPending), errors.Is(err, billing.ErrAlreadySettled):
+		writeError(writer, http.StatusConflict, "invalid_request_error", "request_conflict", "request identifier is already in use")
+	case errors.Is(err, billing.ErrInvalidRequest):
+		writeError(writer, http.StatusBadRequest, "invalid_request_error", "invalid_billing_request", "request cannot be billed")
+	case errors.Is(err, pricing.ErrPriceUnavailable), errors.Is(err, pricing.ErrMarginViolation), errors.Is(err, ledger.ErrTenantUnavailable):
+		writeError(writer, http.StatusServiceUnavailable, "server_error", "billing_unavailable", "billing unavailable")
+	default:
+		writeError(writer, http.StatusServiceUnavailable, "server_error", "billing_unavailable", "billing unavailable")
+	}
 }
 
 func (handler *Handler) writeExecutorError(writer http.ResponseWriter, err error) {

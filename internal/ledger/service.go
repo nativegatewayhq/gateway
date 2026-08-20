@@ -117,11 +117,30 @@ func (service *Service) Reserve(ctx context.Context, organizationID, projectID, 
 		return Result{}, err
 	}
 	defer tx.Rollback(ctx)
+	result, err := service.ReserveInTx(ctx, tx, organizationID, projectID, requestID, maximum, operationKey)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+// ReserveInTx applies Reserve using a caller-owned transaction. The caller
+// must commit or roll back and must not use this method concurrently on a Tx.
+func (service *Service) ReserveInTx(ctx context.Context, tx pgx.Tx, organizationID, projectID, requestID string, maximum int64, operationKey string) (Result, error) {
+	if maximum <= 0 {
+		return Result{}, ErrInvalidAmount
+	}
+	if tx == nil || !valid(organizationID, "org_") || !valid(projectID, "project_") || !validKey(requestID) || !validKey(operationKey) {
+		return Result{}, ErrInvalidIdentifier
+	}
 	if err := lockOperationKey(ctx, tx, organizationID, operationKey); err != nil {
 		return Result{}, err
 	}
 	var available, reserved int64
-	err = tx.QueryRow(ctx, `SELECT w.available,w.reserved FROM organization_wallets w JOIN organizations o ON o.id=w.organization_id JOIN projects p ON p.organization_id=o.id
+	err := tx.QueryRow(ctx, `SELECT w.available,w.reserved FROM organization_wallets w JOIN organizations o ON o.id=w.organization_id JOIN projects p ON p.organization_id=o.id
 		WHERE w.organization_id=$1 AND w.currency=$2 AND p.id=$3 AND o.status='active' AND p.status='active' FOR UPDATE OF w`, organizationID, Currency, projectID).Scan(&available, &reserved)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Result{}, ErrTenantUnavailable
@@ -156,9 +175,6 @@ func (service *Service) Reserve(ctx context.Context, organizationID, projectID, 
 	if _, err := tx.Exec(ctx, `INSERT INTO ledger_entries(id,operation_id,organization_id,project_id,reservation_id,entry_type,currency,delta_available,delta_reserved) VALUES($1,$2,$3,$4,$5,'reserve',$6,$7,$8)`, entryID, operationID, organizationID, projectID, reservationID, Currency, -maximum, maximum); err != nil {
 		return Result{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Result{}, err
-	}
 	return Result{balance, reservation}, nil
 }
 
@@ -173,7 +189,7 @@ func (service *Service) finish(ctx context.Context, reservationID string, amount
 	if amount < 0 {
 		return Result{}, ErrInvalidAmount
 	}
-	if !valid(reservationID, "res_") || !validKey(operationKey) {
+	if !valid(reservationID, "res_") || !validKey(operationKey) || (kind != "capture" && kind != "release") {
 		return Result{}, ErrInvalidIdentifier
 	}
 	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -181,6 +197,31 @@ func (service *Service) finish(ctx context.Context, reservationID string, amount
 		return Result{}, err
 	}
 	defer tx.Rollback(ctx)
+	result, err := service.finishInTx(ctx, tx, reservationID, amount, operationKey, kind)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func (service *Service) CaptureInTx(ctx context.Context, tx pgx.Tx, reservationID string, actual int64, operationKey string) (Result, error) {
+	return service.finishInTx(ctx, tx, reservationID, actual, operationKey, "capture")
+}
+
+func (service *Service) ReleaseInTx(ctx context.Context, tx pgx.Tx, reservationID, operationKey string) (Result, error) {
+	return service.finishInTx(ctx, tx, reservationID, 0, operationKey, "release")
+}
+
+func (service *Service) finishInTx(ctx context.Context, tx pgx.Tx, reservationID string, amount int64, operationKey, kind string) (Result, error) {
+	if amount < 0 {
+		return Result{}, ErrInvalidAmount
+	}
+	if tx == nil || !valid(reservationID, "res_") || !validKey(operationKey) || (kind != "capture" && kind != "release") {
+		return Result{}, ErrInvalidIdentifier
+	}
 	reservation, err := lockReservation(ctx, tx, reservationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Result{}, ErrInvalidTransition
@@ -237,9 +278,6 @@ func (service *Service) finish(ctx context.Context, reservationID string, amount
 		if err := service.entry(ctx, tx, operationID, reservation, "release", release, -release); err != nil {
 			return Result{}, err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Result{}, err
 	}
 	return Result{balance, reservation}, nil
 }

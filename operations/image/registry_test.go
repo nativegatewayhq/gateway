@@ -43,7 +43,7 @@ func TestRegistryResolvesCapabilitiesAndListsStably(t *testing.T) {
 
 func TestRegistryRejectsInvalidManifest(t *testing.T) {
 	t.Parallel()
-	valid := ModelRoute{Model: "model", Provider: providercredentials.OpenAI, Owner: "openai", Capabilities: []Capability{{Generate, JSON}}}
+	valid := ModelRoute{Model: "model", Provider: providercredentials.OpenAI, ChannelID: "channel_00000000000000000000000000000001", Owner: "openai", Capabilities: []Capability{{Generate, JSON}}}
 	if _, err := NewRegistry(valid, valid); !errors.Is(err, ErrDuplicateModel) {
 		t.Fatalf("duplicate = %v", err)
 	}

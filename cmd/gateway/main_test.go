@@ -71,6 +71,8 @@ func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 	defer cancel()
 	command := exec.CommandContext(ctx, executable)
 	command.Env = append(gatewayEnvironment(address),
+		"GATEWAY_BILLING_MODE=required",
+		"GATEWAY_MINIMUM_MARGIN_BPS=1000",
 		"GATEWAY_GOOGLE_API_KEY=google-process-secret",
 		"GATEWAY_OPENAI_API_KEY=openai-process-secret",
 		"GATEWAY_XAI_API_KEY=xai-process-secret",
