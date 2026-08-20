@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-007
 title: Phase 1 Capability Registry and Models API
-status: in_progress
+status: completed
 created_at: 2026-08-20T14:22:22+09:00
-updated_at: 2026-08-20T14:22:22+09:00
+updated_at: 2026-08-20T14:29:30+09:00
 owners:
   - gateway
 initiative: phase-1-capability-registry
@@ -191,21 +191,36 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] model/provider/operation/media capability가 하나의 immutable registry에 있음
-- [ ] 잘못되거나 모순된 registry가 시작 전에 거부됨
-- [ ] generation과 edit handler가 같은 registry로 routing함
-- [ ] `/v1/models`가 service Key로 보호됨
-- [ ] configured Provider의 실행 가능 model만 stable OpenAI schema로 반환됨
-- [ ] credential 없음과 빈 registry가 안전한 빈 목록을 반환함
-- [ ] credential과 내부 capability가 응답·로그에 노출되지 않음
-- [ ] 기존 native request/response 의미가 회귀하지 않음
-- [ ] 단위·통합·race 테스트와 CI가 통과함
-- [ ] README와 Conformance 계약이 갱신됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] model/provider/operation/media capability가 하나의 immutable registry에 있음
+- [x] 잘못되거나 모순된 registry가 시작 전에 거부됨
+- [x] generation과 edit handler가 같은 registry로 routing함
+- [x] `/v1/models`가 service Key로 보호됨
+- [x] configured Provider의 실행 가능 model만 stable OpenAI schema로 반환됨
+- [x] credential 없음과 빈 registry가 안전한 빈 목록을 반환함
+- [x] credential과 내부 capability가 응답·로그에 노출되지 않음
+- [x] 기존 native request/response 의미가 회귀하지 않음
+- [x] 단위·통합·race 테스트와 CI가 통과함
+- [x] README와 Conformance 계약이 갱신됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 로컬 검증:
+  - `make check`: formatter, vet, 전체 race test와 binary build 통과
+  - `make integration-test`: PostgreSQL service Key로 image generation과 `/v1/models` 호출 통과
+  - `git diff --check`: 통과
+  - `go test -cover ./operations/image ./protocols/openai`: registry 89.4%, OpenAI protocol 79.8%
+- 동작 및 보안 검증:
+  - manifest 중복·잘못된 Provider·빈 operation·모순 media capability 시작 전 거부
+  - registry copy-on-read 불변성과 model ID stable ordering
+  - generation/edit의 operation/media resolve 및 불일치 upstream 전 거부
+  - OpenAI/xAI credential 조합별 model filtering, credential 없는 빈 목록과 native schema
+  - service Key 인증과 로그에 credential·model 목록이 포함되지 않는 최소 관측성
+- 구현 commit: [`9f5d4fd`](https://github.com/nativegatewayhq/gateway/commit/9f5d4fd)
+- pull request: [#7](https://github.com/nativegatewayhq/gateway/pull/7)
+- CI:
+  - [`check`](https://github.com/nativegatewayhq/gateway/actions/runs/32335703138/job/96324752622): 통과
+  - [`validate`](https://github.com/nativegatewayhq/gateway/actions/runs/32335703091/job/96324752731): 통과
 
 ## Rollback 계획
 
