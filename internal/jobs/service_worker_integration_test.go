@@ -25,11 +25,51 @@ type fakeAsyncProvider struct {
 	pollError         error
 	cancelObservation joboperation.Observation
 	cancelError       error
+	submitStarted     chan struct{}
+	submitRelease     chan struct{}
 }
 
 func (provider *fakeAsyncProvider) Submit(_ context.Context, _ joboperation.Job, _ any) (SubmitResult, error) {
 	provider.submits.Add(1)
+	if provider.submitStarted != nil {
+		select {
+		case provider.submitStarted <- struct{}{}:
+		default:
+			{
+			}
+		}
+	}
+	if provider.submitRelease != nil {
+		<-provider.submitRelease
+	}
 	return provider.submitResult, provider.submitError
+}
+
+func TestConcurrentServiceSubmitDispatchesProviderOnce(t *testing.T) {
+	repository, _, request := jobRepositoryFixture(t)
+	provider := &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "provider-" + request.RequestID, Observation: joboperation.Observation{Status: joboperation.Queued}, PollAfter: time.Hour}, submitStarted: make(chan struct{}, 1), submitRelease: make(chan struct{})}
+	service, _ := NewService(repository, map[string]Provider{"openai": provider}, jobServiceConfig(), "api-instance")
+	ctx := context.Background()
+	first := make(chan error, 1)
+	go func() { _, err := service.Submit(ctx, request, nil); first <- err }()
+	<-provider.submitStarted
+	secondDone := make(chan error, 1)
+	go func() { _, err := service.Submit(ctx, request, nil); secondDone <- err }()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent replay blocked")
+	}
+	close(provider.submitRelease)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if provider.submits.Load() != 1 {
+		t.Fatalf("submits=%d", provider.submits.Load())
+	}
 }
 func (provider *fakeAsyncProvider) Poll(_ context.Context, _ ProviderAttempt) (joboperation.Observation, error) {
 	provider.polls.Add(1)
@@ -220,4 +260,72 @@ func TestWorkerExhaustionLeavesReservationPathInManualReconciliation(t *testing.
 	if err := repository.pool.QueryRow(context.Background(), `SELECT state,next_poll_at::text FROM async_job_provider_attempts WHERE job_id=$1`, created.ID).Scan(&state, &next); err != nil || state != "RECONCILING" || next != "infinity" {
 		t.Fatalf("attempt=%s/%s err=%v", state, next, err)
 	}
+}
+
+func TestFailedAndCanceledJobsReleaseBillingReservation(t *testing.T) {
+	for _, scenario := range []string{"failed", "canceled"} {
+		t.Run(scenario, func(t *testing.T) {
+			repository, owner, request, billingService := billableAsyncFixture(t)
+			var provider *fakeAsyncProvider
+			recoveryObservation := joboperation.Observation{Status: joboperation.Reconciling, FailureCategory: "provider_error"}
+			if scenario == "failed" {
+				provider = &fakeAsyncProvider{submitError: &ProviderError{Category: "rejected", Known: true, Observation: joboperation.Observation{Status: joboperation.Failed, FailureCategory: "rejected", Snapshot: joboperation.Snapshot{Status: 400, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"error":"rejected"}`)}}}, pollObservation: recoveryObservation}
+			} else {
+				provider = &fakeAsyncProvider{submitResult: SubmitResult{ProviderJobID: "provider-" + request.RequestID, Observation: joboperation.Observation{Status: joboperation.Processing}, PollAfter: time.Hour}, cancelObservation: joboperation.Observation{Status: joboperation.Canceled}, pollObservation: recoveryObservation}
+			}
+			service, _ := NewService(repository, map[string]Provider{"openai": provider}, jobServiceConfig(), "api-instance")
+			terminal, err := service.Submit(context.Background(), request, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "canceled" {
+				terminal, err = service.Cancel(context.Background(), owner, terminal.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			worker, _ := NewWorker(repository, map[string]Provider{"openai": provider}, billingService, jobWorkerConfig(), "worker-instance")
+			if _, err := worker.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := service.Get(context.Background(), owner, terminal.ID)
+			if err != nil || stored.SettlementState != "SETTLED" {
+				t.Fatalf("stored=%+v err=%v", stored, err)
+			}
+			var available, reserved int64
+			if err := repository.pool.QueryRow(context.Background(), `SELECT available,reserved FROM organization_wallets WHERE organization_id=$1`, owner.OrganizationID).Scan(&available, &reserved); err != nil {
+				t.Fatal(err)
+			}
+			if available != 1000 || reserved != 0 {
+				t.Fatalf("wallet=%d/%d", available, reserved)
+			}
+		})
+	}
+}
+
+func billableAsyncFixture(t *testing.T) (*Repository, joboperation.Owner, CreateRequest, *billing.Service) {
+	t.Helper()
+	repository, owner, request := jobRepositoryFixture(t)
+	ctx := context.Background()
+	wallet := ledger.NewService(repository.pool)
+	if _, err := wallet.Deposit(ctx, owner.OrganizationID, 1000, "async-job-deposit-"+request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	estimator, err := pricing.NewService(repository.pool, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: request.ChannelID, Protocol: "openai", Operation: "image.generate", Model: request.Model, UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "async-job-price-"+request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	billingService, err := billing.NewService(repository.pool, estimator, wallet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charge, err := billingService.Begin(ctx, billing.BeginRequest{RequestID: "charge-" + request.RequestID, OrganizationID: owner.OrganizationID, ProjectID: owner.ProjectID, APIKeyID: owner.APIKeyID, Protocol: "openai", Operation: "image.generate", Model: request.Model, ChannelID: request.ChannelID, Quantity: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ChargeID = charge.ID
+	return repository, owner, request, billingService
 }

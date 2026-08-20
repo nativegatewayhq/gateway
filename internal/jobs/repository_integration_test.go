@@ -55,6 +55,9 @@ func jobRepositoryFixture(t *testing.T) (*Repository, joboperation.Owner, Create
 func TestCreateIsIdempotentAndTenantIsolated(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	ctx := context.Background()
+	if err := repository.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
 	const workers = 8
 	results := make(chan joboperation.Job, workers)
 	failures := make(chan error, workers)
@@ -88,6 +91,9 @@ func TestCreateIsIdempotentAndTenantIsolated(t *testing.T) {
 	}
 	if _, err := repository.Get(ctx, joboperation.Owner{OrganizationID: owner.OrganizationID, ProjectID: owner.ProjectID, APIKeyID: "key_other"}, id); !errors.Is(err, joboperation.ErrNotFound) {
 		t.Fatalf("cross-tenant get=%v", err)
+	}
+	if _, _, _, err := repository.ClaimCancel(ctx, joboperation.Owner{OrganizationID: owner.OrganizationID, ProjectID: owner.ProjectID, APIKeyID: "key_other"}, id, "canceler", time.Minute); !errors.Is(err, joboperation.ErrNotFound) {
+		t.Fatalf("cross-tenant cancel=%v", err)
 	}
 	conflict := request
 	conflict.Model = "other/model"
@@ -150,6 +156,15 @@ func TestSubmitClaimObservationAndTerminalReplay(t *testing.T) {
 	stored, err := repository.Get(ctx, owner, created.ID)
 	if err != nil || stored.SettlementState != "SETTLED" {
 		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE async_jobs SET provider='changed' WHERE id=$1`, created.ID); err == nil {
+		t.Fatal("immutable job identity updated")
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE async_job_events SET source='api' WHERE job_id=$1`, created.ID); err == nil {
+		t.Fatal("append-only event updated")
+	}
+	if _, err := repository.pool.Exec(ctx, `DELETE FROM async_jobs WHERE id=$1`, created.ID); err == nil {
+		t.Fatal("durable job deleted")
 	}
 }
 

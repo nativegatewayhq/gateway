@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-029
 title: Phase 3 Durable Asynchronous Job Foundation
-status: in_progress
+status: completed
 created_at: 2026-08-20T21:45:40+09:00
-updated_at: 2026-08-20T21:45:40+09:00
+updated_at: 2026-08-20T22:10:17+09:00
 owners:
   - gateway
 initiative: phase-3-async-job-foundation
@@ -198,24 +198,31 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] durable Job/attempt/event schema와 typed 상태 전이가 구현됨
-- [ ] Gateway Job ID와 Provider Job ID가 저장·공개 계약에서 분리됨
-- [ ] tenant 소유 Get/Cancel이 존재 정보와 내부 metadata를 누출하지 않음
-- [ ] submit은 논리 Job당 최대 한 번이며 idempotent Create가 중복 reserve/dispatch를 만들지 않음
-- [ ] worker lease와 stale recovery가 다중 instance 및 재시작에서 안전함
-- [ ] polling/cancel/향후 webhook observation이 하나의 idempotent terminal transition으로 수렴함
-- [ ] 성공 Capture, 확정 실패/취소 Release, timeout/unknown reservation 유지가 검증됨
-- [ ] terminal 경합과 crash recovery에서도 Ledger 정산이 정확히 한 번 수행됨
-- [ ] Provider submit 이후 fallback이 발생하지 않음
-- [ ] result snapshot과 logs/events/telemetry가 secret·tenant·raw Provider 데이터를 제한함
-- [ ] 기존 동기 OpenAI/Gemini wire, billing, replay와 readiness 동작이 회귀하지 않음
-- [ ] README와 멀티레포 handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] durable Job/attempt/event schema와 typed 상태 전이가 구현됨
+- [x] Gateway Job ID와 Provider Job ID가 저장·공개 계약에서 분리됨
+- [x] tenant 소유 Get/Cancel이 존재 정보와 내부 metadata를 누출하지 않음
+- [x] submit은 논리 Job당 최대 한 번이며 idempotent Create가 중복 reserve/dispatch를 만들지 않음
+- [x] worker lease와 stale recovery가 다중 instance 및 재시작에서 안전함
+- [x] polling/cancel/향후 webhook observation이 하나의 idempotent terminal transition으로 수렴함
+- [x] 성공 Capture, 확정 실패/취소 Release, timeout/unknown reservation 유지가 검증됨
+- [x] terminal 경합과 crash recovery에서도 Ledger 정산이 정확히 한 번 수행됨
+- [x] Provider submit 이후 fallback이 발생하지 않음
+- [x] result snapshot과 logs/events/telemetry가 secret·tenant·raw Provider 데이터를 제한함
+- [x] 기존 동기 OpenAI/Gemini wire, billing, replay와 readiness 동작이 회귀하지 않음
+- [x] README와 멀티레포 handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commits: `d7e5486` (durable aggregate/repository), `4f3c64a` (application service와 workers).
+- PostgreSQL: migration `000019`~`000021`, 빈 schema 전체 migration 적용, tenant/idempotency, append-only event, submit/poll/cancel/settlement lease와 stale recovery 검증.
+- 과금: 실제 Wallet/Ledger에서 성공 Capture, 실패·취소 Release, unknown reservation 유지, Billing commit 직후 crash 재처리의 정확히 한 번 수렴 검증.
+- 동시성: concurrent Create/Submit, `SKIP LOCKED`, heartbeat/lease loss, conflicting poll/webhook terminal observation과 duplicate cancel 검증.
+- 보안: bounded snapshot/header/category, public Job metadata 분리와 payload/event 비저장 검증.
+- 로컬 검증: `make check` 통과.
+- 통합 검증: Compose PostgreSQL/Redis에서 Job 패키지를 포함한 `make integration-test` 통과.
+- PR: https://github.com/nativegatewayhq/gateway/pull/28
 
 ## Rollback 계획
 
