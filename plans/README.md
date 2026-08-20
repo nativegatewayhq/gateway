@@ -148,5 +148,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-006` | completed | [Phase 0 Image Edits Native Pass-through](./20260820_141124_plan_phase0_image_edits_native_passthrough.md) | `phase-0-image-edits-native-e2e` |
 | `gateway-20260820-007` | completed | [Phase 1 Capability Registry and Models API](./20260820_142222_plan_phase1_capability_registry_models_api.md) | `phase-1-capability-registry` |
 | `gateway-20260820-008` | completed | [Phase 1 Tenant Ownership Foundation](./20260820_143201_plan_phase1_tenant_ownership_foundation.md) | `phase-1-tenant-ownership` |
+| `gateway-20260820-009` | completed | [Phase 1 Wallet and Append-only Ledger Foundation](./20260820_144259_plan_phase1_wallet_ledger_foundation.md) | `phase-1-wallet-ledger` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

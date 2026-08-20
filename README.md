@@ -4,7 +4,7 @@ An open-source multimodal AI API gateway that preserves official provider SDKs a
 
 ## Status
 
-Phase 0 native protocol validation. The process exposes health endpoints, PostgreSQL-backed service API key authentication, non-streaming Gemini `generateContent`, and OpenAI-compatible image generation for OpenAI and xAI. Billing and dynamic routing are intentionally not implemented yet.
+Phase 0 native protocol validation and early Phase 1 foundations. The process exposes health endpoints, tenant-owned PostgreSQL service API key authentication, a capability-backed models endpoint, non-streaming Gemini `generateContent`, and OpenAI-compatible image generation and editing. The internal wallet and append-only ledger foundation is not yet connected to inference requests; production deposits, pricing, and dynamic routing remain intentionally unavailable.
 
 ## Development workflow
 
@@ -186,6 +186,12 @@ Every service key belongs to a project. Self-hosted migrations create `org_legac
 The plaintext `ngw_sk_...` value is printed exactly once. Store it securely: PostgreSQL contains only its SHA-256 digest and a non-secret display prefix, so the plaintext cannot be recovered. An optional expiration can be supplied with `-expires-at 2026-09-01T00:00:00Z`.
 
 Protected native routes will accept exactly one of `Authorization: Bearer`, `x-api-key`, `x-goog-api-key`, or the Gemini-compatible `key` query parameter. Supplying credentials in multiple locations is rejected. Health endpoints remain unauthenticated.
+
+## Wallet and ledger foundation
+
+Phase 1 includes an internal organization wallet with append-only accounting entries. Amounts use integer `USD_TICKS`, where one USD equals 10,000,000,000 ticks. Deposit, reserve, capture, release, and refund commands are transactional and idempotent by organization-scoped operation key.
+
+This is currently an internal domain boundary only. No public wallet endpoint exists, inference requests are not charged yet, and self-hosted operators must not treat the Deposit command as proof of payment. A managed Cloud service must validate payment events before calling Deposit.
 
 ## Verify
 
