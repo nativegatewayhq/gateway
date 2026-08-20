@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-020
 title: Phase 1 API Key Network Restrictions
-status: in_progress
+status: completed
 created_at: 2026-08-20T17:52:31+09:00
-updated_at: 2026-08-20T17:52:31+09:00
+updated_at: 2026-08-20T19:02:00+09:00
 owners:
   - gateway
 initiative: phase-1-api-key-authorization
@@ -177,22 +177,26 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] 기존 Key가 network default-all로 동일하게 동작함
-- [ ] restricted Key가 canonical IPv4/IPv6 prefix만 허용함
-- [ ] untrusted peer의 spoofed forwarding header가 무시됨
-- [ ] trusted multi-hop chain이 right-to-left 규칙으로 안전하게 해석됨
-- [ ] ambiguous/malformed resolver state가 restricted Key에서 fail closed함
-- [ ] network denial은 rate-limit, Billing/Wallet/Ledger/replay와 Provider effect가 없음
-- [ ] native OpenAI/Gemini 403과 models route가 일관되게 적용됨
-- [ ] Key/prefix 생성 원자성, snapshot과 cascade가 검증됨
-- [ ] credential/header chain/trusted topology가 log와 response에 노출되지 않음
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] 기존 Key가 network default-all로 동일하게 동작함
+- [x] restricted Key가 canonical IPv4/IPv6 prefix만 허용함
+- [x] untrusted peer의 spoofed forwarding header가 무시됨
+- [x] trusted multi-hop chain이 right-to-left 규칙으로 안전하게 해석됨
+- [x] ambiguous/malformed resolver state가 restricted Key에서 fail closed함
+- [x] network denial은 rate-limit, Billing/Wallet/Ledger/replay와 Provider effect가 없음
+- [x] native OpenAI/Gemini 403과 models route가 일관되게 적용됨
+- [x] Key/prefix 생성 원자성, snapshot과 cascade가 검증됨
+- [x] credential/header chain/trusted topology가 log와 response에 노출되지 않음
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `0b05f0d38ce92abfdc547e3f39dcfa283e898070`
+- PR: `https://github.com/nativegatewayhq/gateway/pull/19`
+- 로컬 검증: `GOCACHE=/private/tmp/nativegateway-go-cache make check`
+- 통합 검증: PostgreSQL `127.0.0.1:55433`, Redis `127.0.0.1:56379`를 사용한 `make integration-test`
+- GitHub Actions: `check` pass (`32352173199`), `validate` pass (`32352173077`)
 
 ## Rollback 계획
 
