@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-038
 title: Phase 4 OpenAI Chat SSE Streaming and Disconnect Settlement
-status: proposed
+status: accepted
 created_at: 2026-08-21T04:25:00+09:00
-updated_at: 2026-08-21T04:25:00+09:00
+updated_at: 2026-08-21T06:10:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-chat-streaming-settlement
@@ -179,21 +179,27 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIStreaming
 
 ## 완료 조건
 
-- [ ] 공식 OpenAI Python/JavaScript SDK가 native SSE Chat stream을 소비함
-- [ ] Provider dispatch 전 최대 비용이 Wallet/quota/spend cap에 원자적으로 예약됨
-- [ ] terminal usage가 actual token 금액으로 exactly-once Capture되고 차액이 반환됨
-- [ ] client disconnect와 upstream unknown outcome이 자동 Release되지 않음
-- [ ] missing/invalid/excess usage가 durable reconciliation 후 manual review로 수렴함
-- [ ] streaming idempotency가 Provider 재호출과 Ledger 중복을 방지함
-- [ ] relay가 원본 SSE payload를 변형하지 않고 bounded backpressure로 동작함
-- [ ] header 전송 후 오류가 JSON/SSE wire를 오염시키지 않음
-- [ ] secret, prompt, completion, raw event와 high-cardinality 과금 identity가 로그·telemetry에 없음
-- [ ] 전체 unit/race/integration/공식 SDK/장애 테스트가 통과함
-- [ ] README와 Dashboard/Cloud/Conformance handoff가 갱신됨
+- [x] 공식 OpenAI Python/JavaScript SDK가 native SSE Chat stream을 소비함
+- [x] Provider dispatch 전 최대 비용이 Wallet/quota/spend cap에 원자적으로 예약됨
+- [x] terminal usage가 actual token 금액으로 exactly-once Capture되고 차액이 반환됨
+- [x] client disconnect와 upstream unknown outcome이 자동 Release되지 않음
+- [x] missing/invalid/excess usage가 durable reconciliation 후 manual review로 수렴함
+- [x] streaming idempotency가 Provider 재호출과 Ledger 중복을 방지함
+- [x] relay가 원본 SSE payload를 변형하지 않고 bounded backpressure로 동작함
+- [x] header 전송 후 오류가 JSON/SSE wire를 오염시키지 않음
+- [x] secret, prompt, completion, raw event와 high-cardinality 과금 identity가 로그·telemetry에 없음
+- [x] 전체 unit/race/integration/공식 SDK/장애 테스트가 통과함
+- [x] README와 Dashboard/Cloud/Conformance handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `make check`
+- `TEST_DATABASE_URL=... TEST_REDIS_URL=... make integration-test`
+- `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIStreamingSDKs`
+- fresh PostgreSQL schema에서 migration 000001~000032 반복 적용
+- streaming terminal usage Capture, transcript 비저장, non-replayable idempotency 통합 테스트
+- settlement failure task의 restart-safe worker Capture와 Ledger exactly-once 통합 테스트
+- client write failure, missing/duplicate usage, CRLF wire preservation과 idle timeout 장애 테스트
 
 ## Rollback 계획
 

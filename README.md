@@ -58,6 +58,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_CHAT_MODELS` | unset | Comma-separated exact OpenAI Chat model IDs; a non-empty value enables `POST /v1/chat/completions` |
 | `GATEWAY_OPENAI_CHAT_MODEL_LIMITS` | unset | Required in billing mode: comma-separated `model:maximum_input_tokens:maximum_output_tokens` entries |
 | `GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT` | `2m` | Non-streaming OpenAI Chat request timeout; maximum `10m` |
+| `GATEWAY_OPENAI_CHAT_STREAM_IDLE_TIMEOUT` | `30s` | Maximum idle interval between upstream streaming reads; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES` | `8388608` | Maximum Chat request and response body; maximum 32 MiB |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
 | `GATEWAY_REPLICATE_API_TOKEN` | unset | Optional Replicate upstream credential; enables the native Predictions route when models and a public base URL are configured |
@@ -166,7 +167,11 @@ gateway-chat-price \
   -output-cost 3000000 -output-sale 3600000
 ```
 
-`stream: true`, Provider fallback, and exact tokenizer-based preflight counting remain outside this phase.
+Both BYOK and managed modes support native `stream: true` SSE. Managed requests must explicitly send `stream_options.include_usage=true`; the Gateway never mutates the request to add it. SSE payloads and `[DONE]` are relayed byte-for-byte with bounded incremental buffering. Only the terminal usage event digest and token counts are retained—never the transcript.
+
+Streaming settlement captures validated terminal usage exactly once. A client disconnect, upstream reset or idle timeout, missing `[DONE]`, malformed/duplicate/missing usage, and downstream write failure retain the reservation for durable reconciliation; the Gateway never repeats the Provider request. Completed streaming idempotency keys are deliberately non-replayable because transcripts are not stored: reuse returns a conflict without another Provider call or Ledger mutation.
+
+Provider fallback and exact tokenizer-based preflight counting remain outside this phase.
 
 ```python
 from openai import OpenAI

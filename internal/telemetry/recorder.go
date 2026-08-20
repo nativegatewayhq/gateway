@@ -16,19 +16,22 @@ import (
 )
 
 type Recorder struct {
-	tracer           trace.Tracer
-	httpRequests     metric.Int64Counter
-	httpDuration     metric.Float64Histogram
-	httpActive       metric.Int64UpDownCounter
-	providerRequests metric.Int64Counter
-	providerDuration metric.Float64Histogram
-	routes           metric.Int64Counter
-	billing          metric.Int64Counter
-	storage          metric.Int64Counter
-	reconciliation   metric.Int64Counter
-	authentication   metric.Int64Counter
-	jobs             metric.Int64Counter
-	jobUsage         metric.Int64Histogram
+	tracer             trace.Tracer
+	httpRequests       metric.Int64Counter
+	httpDuration       metric.Float64Histogram
+	httpActive         metric.Int64UpDownCounter
+	providerRequests   metric.Int64Counter
+	providerDuration   metric.Float64Histogram
+	routes             metric.Int64Counter
+	billing            metric.Int64Counter
+	storage            metric.Int64Counter
+	reconciliation     metric.Int64Counter
+	authentication     metric.Int64Counter
+	jobs               metric.Int64Counter
+	jobUsage           metric.Int64Histogram
+	chatStreams        metric.Int64Counter
+	chatFirstByte      metric.Float64Histogram
+	chatStreamDuration metric.Float64Histogram
 }
 
 func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Recorder, error) {
@@ -84,7 +87,19 @@ func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Re
 	if err != nil {
 		return nil, err
 	}
-	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation, authentication: authentication, jobs: jobs, jobUsage: jobUsage}, nil
+	chatStreams, err := meter.Int64Counter("gateway.chat.streams", metric.WithUnit("{stream}"))
+	if err != nil {
+		return nil, err
+	}
+	chatFirstByte, err := meter.Float64Histogram("gateway.chat.stream.first_byte", metric.WithUnit("s"))
+	if err != nil {
+		return nil, err
+	}
+	chatStreamDuration, err := meter.Float64Histogram("gateway.chat.stream.duration", metric.WithUnit("s"))
+	if err != nil {
+		return nil, err
+	}
+	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation, authentication: authentication, jobs: jobs, jobUsage: jobUsage, chatStreams: chatStreams, chatFirstByte: chatFirstByte, chatStreamDuration: chatStreamDuration}, nil
 }
 
 type HTTPRecord struct {
@@ -106,6 +121,10 @@ type JobUsageRecord struct {
 	Quantity                        int64
 }
 type BillingRecord struct{ Protocol, Operation, Transition, Outcome string }
+type ChatStreamRecord struct {
+	TerminalCategory, DisconnectSide string
+	FirstByte, Duration              time.Duration
+}
 type StorageRecord struct{ Protocol, Stage, Source, Outcome string }
 type ReconciliationRecord struct {
 	Outcome string
@@ -161,6 +180,16 @@ func (recorder *Recorder) JobUsage(ctx context.Context, record JobUsageRecord) {
 }
 func (recorder *Recorder) Billing(ctx context.Context, record BillingRecord) {
 	recorder.billing.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.operation", boundedOperation(record.Operation)), attribute.String("gateway.billing.transition", boundedTransition(record.Transition)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
+}
+func (recorder *Recorder) ChatStream(ctx context.Context, record ChatStreamRecord) {
+	attributes := metric.WithAttributes(attribute.String("gateway.stream.terminal", allowed(record.TerminalCategory, "complete", "missing_usage", "invalid_usage", "missing_done", "write_failed", "provider_error", "client_disconnect")), attribute.String("gateway.stream.disconnect_side", allowed(record.DisconnectSide, "none", "client", "provider")))
+	recorder.chatStreams.Add(ctx, 1, attributes)
+	if record.FirstByte > 0 {
+		recorder.chatFirstByte.Record(ctx, record.FirstByte.Seconds(), attributes)
+	}
+	if record.Duration >= 0 {
+		recorder.chatStreamDuration.Record(ctx, record.Duration.Seconds(), attributes)
+	}
 }
 func (recorder *Recorder) Storage(ctx context.Context, record StorageRecord) {
 	recorder.storage.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.storage.stage", boundedStage(record.Stage)), attribute.String("gateway.storage.source", boundedSource(record.Source)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))

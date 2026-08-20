@@ -18,6 +18,7 @@ var ErrInvalid = errors.New("invalid chat reconciliation configuration")
 
 type Settler interface {
 	CompleteUsage(context.Context, string, chatpricing.Usage, billing.ResponseSnapshot) (chatbilling.Charge, error)
+	CompleteStreamUsage(context.Context, string, chatpricing.Usage, [32]byte) (chatbilling.Charge, error)
 }
 
 type Worker struct {
@@ -47,7 +48,8 @@ func (w *Worker) RunOne(ctx context.Context) (bool, error) {
 	var status *int
 	var headersJSON, body []byte
 	var prompt, cached, completion *int64
-	err = tx.QueryRow(ctx, `SELECT charge_id,reason,response_status,response_headers::text,response_body,prompt_tokens,cached_input_tokens,completion_tokens FROM chat_charge_reconciliations WHERE (state='PENDING' AND next_attempt_at<=now()) OR (state='LEASED' AND lease_until<=now()) ORDER BY next_attempt_at,charge_id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &reason, &status, &headersJSON, &body, &prompt, &cached, &completion)
+	var terminalDigest []byte
+	err = tx.QueryRow(ctx, `SELECT charge_id,reason,response_status,response_headers::text,response_body,prompt_tokens,cached_input_tokens,completion_tokens,terminal_event_sha256 FROM chat_charge_reconciliations WHERE (state='PENDING' AND next_attempt_at<=now()) OR (state='LEASED' AND lease_until<=now()) ORDER BY next_attempt_at,charge_id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &reason, &status, &headersJSON, &body, &prompt, &cached, &completion, &terminalDigest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -62,9 +64,19 @@ func (w *Worker) RunOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	recoverable := reason == "settlement_failed" && status != nil && prompt != nil && cached != nil && completion != nil
+	recoverable := reason == "settlement_failed" && prompt != nil && cached != nil && completion != nil && (status != nil || len(terminalDigest) == 32)
 	if !recoverable {
 		return true, w.retry(ctx, id, "provider_outcome_requires_manual_review")
+	}
+	usage := chatpricing.Usage{PromptTokens: *prompt, CachedInputTokens: *cached, CompletionTokens: *completion}
+	if len(terminalDigest) == 32 {
+		var digest [32]byte
+		copy(digest[:], terminalDigest)
+		_, settleErr := w.settler.CompleteStreamUsage(ctx, id, usage, digest)
+		if settleErr == nil {
+			return true, w.finish(ctx, id, true, "")
+		}
+		return true, w.retry(ctx, id, "settlement_retry_failed")
 	}
 	headers := map[string][]string{}
 	if len(headersJSON) > 0 && string(headersJSON) != "null" {
@@ -72,7 +84,7 @@ func (w *Worker) RunOne(ctx context.Context) (bool, error) {
 			return true, w.finish(ctx, id, false, "snapshot_headers_invalid")
 		}
 	}
-	_, settleErr := w.settler.CompleteUsage(ctx, id, chatpricing.Usage{PromptTokens: *prompt, CachedInputTokens: *cached, CompletionTokens: *completion}, billing.ResponseSnapshot{Status: *status, Headers: headers, Body: body})
+	_, settleErr := w.settler.CompleteUsage(ctx, id, usage, billing.ResponseSnapshot{Status: *status, Headers: headers, Body: body})
 	if settleErr == nil {
 		return true, w.finish(ctx, id, true, "")
 	}
