@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -89,7 +90,7 @@ func TestMessagesRejectsStreamingDuplicateModelAndUnsafeHeaders(t *testing.T) {
 	tests := []struct {
 		name, body string
 		mutate     func(*http.Request)
-	}{{"stream", `{"model":"claude-test","stream":true}`, nil}, {"duplicate", `{"model":"claude-test","model":"claude-test"}`, nil}, {"missing-version", `{"model":"claude-test"}`, func(r *http.Request) { r.Header.Del("anthropic-version") }}}
+	}{{"duplicate", `{"model":"claude-test","model":"claude-test"}`, nil}, {"missing-version", `{"model":"claude-test"}`, func(r *http.Request) { r.Header.Del("anthropic-version") }}}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			executor := &executorStub{}
@@ -107,9 +108,10 @@ func TestMessagesRejectsStreamingDuplicateModelAndUnsafeHeaders(t *testing.T) {
 }
 
 type billingStub struct {
-	begin    chatbilling.BeginRequest
-	usage    chatpricing.Usage
-	complete int
+	begin                  chatbilling.BeginRequest
+	usage                  chatpricing.Usage
+	complete               int
+	reason, side, category string
 }
 
 func (stub *billingStub) Begin(_ context.Context, request chatbilling.BeginRequest) (chatbilling.Charge, error) {
@@ -131,6 +133,19 @@ func (*billingStub) MarkReconciling(context.Context, string, string, *billing.Re
 	return nil
 }
 func (*billingStub) MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error {
+	return nil
+}
+func (stub *billingStub) CompleteStreamUsage(_ context.Context, _ string, usage chatpricing.Usage, _ [32]byte) (chatbilling.Charge, error) {
+	stub.complete++
+	stub.usage = usage
+	return chatbilling.Charge{}, nil
+}
+func (*billingStub) MarkStreamReconcilingUsage(context.Context, string, chatpricing.Usage, [32]byte) error {
+	return nil
+}
+
+func (stub *billingStub) MarkStreamReconciling(_ context.Context, _ string, reason, side, category string) error {
+	stub.reason, stub.side, stub.category = reason, side, category
 	return nil
 }
 
@@ -163,5 +178,41 @@ func TestAnthropicUsageParserRejectsDuplicateAndOverflow(t *testing.T) {
 		if _, err := extractUsage([]byte(body)); err == nil {
 			t.Fatalf("accepted %s", body)
 		}
+	}
+}
+
+type streamingExecutor struct{}
+
+func (streamingExecutor) CreateMessage(_ context.Context, request provider.MessagesRequest) (*http.Response, error) {
+	if !request.Streaming {
+		return nil, errors.New("stream flag missing")
+	}
+	body := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+func TestManagedStreamingMessagesSettlesTerminalUsage(t *testing.T) {
+	models, _ := operation.NewRegistryWithLimits([]string{"claude-test"}, map[string]operation.Limits{"claude-test": {MaximumInputTokens: 4096, MaximumOutputTokens: 100}})
+	charges := &billingStub{}
+	handler := NewBillableHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authStub{}, models, streamingExecutor{}, availableStub{}, nil, 4096, charges)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request(`{"model":"claude-test","max_tokens":16,"stream":true,"messages":[]}`))
+	if recorder.Code != 200 || charges.complete != 1 || charges.begin.DeliveryMode != "stream" || charges.usage.CacheWriteTokens != 2 || !strings.Contains(recorder.Body.String(), "message_stop") {
+		t.Fatalf("code=%d billing=%+v body=%s", recorder.Code, charges, recorder.Body.String())
+	}
+}
+
+type incompleteStreamExecutor struct{}
+
+func (incompleteStreamExecutor) CreateMessage(context.Context, provider.MessagesRequest) (*http.Response, error) {
+	body := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n"
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+func TestIncompleteManagedStreamReconcilesWithoutCapture(t *testing.T) {
+	models, _ := operation.NewRegistryWithLimits([]string{"claude-test"}, map[string]operation.Limits{"claude-test": {MaximumInputTokens: 4096, MaximumOutputTokens: 100}})
+	charges := &billingStub{}
+	handler := NewBillableHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authStub{}, models, incompleteStreamExecutor{}, availableStub{}, nil, 4096, charges)
+	handler.ServeHTTP(httptest.NewRecorder(), request(`{"model":"claude-test","max_tokens":16,"stream":true,"messages":[]}`))
+	if charges.complete != 0 || charges.category != "missing_terminal" || charges.side != "provider" {
+		t.Fatalf("billing=%+v", charges)
 	}
 }

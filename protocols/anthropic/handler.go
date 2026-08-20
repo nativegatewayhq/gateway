@@ -46,6 +46,9 @@ type Billing interface {
 	Release(context.Context, string, billing.ResponseSnapshot) (chatbilling.Charge, error)
 	MarkReconciling(context.Context, string, string, *billing.ResponseSnapshot) error
 	MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error
+	CompleteStreamUsage(context.Context, string, chatpricing.Usage, [32]byte) (chatbilling.Charge, error)
+	MarkStreamReconcilingUsage(context.Context, string, chatpricing.Usage, [32]byte) error
+	MarkStreamReconciling(context.Context, string, string, string, string) error
 }
 
 type Handler struct {
@@ -116,8 +119,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, stream, err := envelope(body)
-	if err != nil || stream {
-		writeError(status, 400, "invalid_request_error", "request must contain one model and stream must be false")
+	if err != nil {
+		writeError(status, 400, "invalid_request_error", "request must contain one model and valid stream option")
 		return
 	}
 	route, err := h.models.Resolve(model)
@@ -131,6 +134,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !principal.AuthorizeModel("anthropic", operation.CreateMessage, model) {
 		writeError(status, 403, "permission_error", "API key is not permitted to use this model")
+		return
+	}
+	if stream {
+		if _, ok := status.ResponseWriter.(http.Flusher); !ok {
+			writeError(status, 500, "api_error", "streaming unavailable")
+			return
+		}
+		if h.billing != nil {
+			h.serveBillableStream(status, r, principal, route, version, beta, body)
+		} else {
+			h.serveBYOKStream(status, r, route, version, beta, body)
+		}
 		return
 	}
 	if h.billing != nil {
@@ -174,6 +189,170 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	status.WriteHeader(response.StatusCode)
 	_, _ = status.Write(responseBody)
+}
+
+func (h *Handler) serveBYOKStream(w http.ResponseWriter, r *http.Request, route operation.Model, version string, beta []string, body []byte) {
+	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
+		writeError(w, 503, "api_error", "provider unavailable")
+		return
+	}
+	permit, allowed := h.claim(r, route.ChannelID)
+	if !allowed {
+		writeError(w, 503, "api_error", "provider unavailable")
+		return
+	}
+	response, err := h.executor.CreateMessage(r.Context(), provider.MessagesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), Version: version, Beta: beta, ContentLength: int64(len(body)), Body: bytes.NewReader(body), Streaming: true})
+	h.observe(r, route.ChannelID, permit, response, err)
+	if err != nil {
+		writeError(w, 502, "api_error", "provider unavailable")
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		responseBody, readErr := readBounded(response.Body, h.maximum)
+		if readErr != nil {
+			writeError(w, 502, "api_error", "provider response unavailable")
+			return
+		}
+		for name, values := range safeResponseHeaders(response.Header) {
+			for _, value := range values {
+				w.Header().Add(name, value)
+			}
+		}
+		w.WriteHeader(response.StatusCode)
+		_, _ = w.Write(responseBody)
+		return
+	}
+	media, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if mediaErr != nil || !strings.EqualFold(media, "text/event-stream") {
+		writeError(w, 502, "api_error", "invalid provider stream")
+		return
+	}
+	copyStreamHeaders(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	_, _ = relayStream(w, response.Body, h.maximum, false)
+}
+
+func (h *Handler) serveBillableStream(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route operation.Model, version string, beta []string, body []byte) {
+	maximumOutput, err := extractMaximumOutput(body)
+	if err != nil || route.MaximumInputTokens < 1 || route.MaximumOutputTokens < 1 || int64(len(body)) > route.MaximumInputTokens || maximumOutput > route.MaximumOutputTokens {
+		writeError(w, 400, "invalid_request_error", "paid Messages requires valid input and output token limits")
+		return
+	}
+	if h.availability == nil || !h.availability.ConfiguredChannel(r.Context(), route.ChannelID, route.Provider) {
+		writeError(w, 503, "api_error", "provider unavailable")
+		return
+	}
+	key, keyErr := idempotency.Extract(r.Header)
+	if keyErr != nil {
+		writeError(w, 400, "invalid_request_error", "idempotency key is invalid")
+		return
+	}
+	var fingerprint [32]byte
+	if key != "" {
+		fingerprint = idempotency.Fingerprint("anthropic", operation.CreateMessage, route.ID, route.ChannelID, "text/event-stream", body)
+		if _, found, replayErr := h.billing.Replay(r.Context(), chatbilling.BeginRequest{Protocol: "anthropic", Operation: operation.CreateMessage, RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput, DeliveryMode: "stream"}); replayErr != nil || found {
+			if replayErr == nil {
+				replayErr = chatbilling.ErrConflict
+			}
+			h.writeBillingError(w, replayErr)
+			return
+		}
+	}
+	permit, allowed := h.claim(r, route.ChannelID)
+	if !allowed {
+		writeError(w, 503, "api_error", "provider unavailable")
+		return
+	}
+	begin := chatbilling.BeginRequest{Protocol: "anthropic", Operation: operation.CreateMessage, RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput, DeliveryMode: "stream"}
+	charge, beginErr := h.billing.Begin(r.Context(), begin)
+	if beginErr != nil {
+		if permit.Probe {
+			_ = h.health.Release(context.WithoutCancel(r.Context()), permit)
+		}
+		h.writeBillingError(w, beginErr)
+		return
+	}
+	if charge.Replay {
+		h.writeBillingError(w, chatbilling.ErrConflict)
+		return
+	}
+	response, executeErr := h.executor.CreateMessage(r.Context(), provider.MessagesRequest{ChannelID: route.ChannelID, ContentType: r.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: r.UserAgent(), Version: version, Beta: beta, ContentLength: int64(len(body)), Body: bytes.NewReader(body), Streaming: true})
+	h.observe(r, route.ChannelID, permit, response, executeErr)
+	if executeErr != nil {
+		reason := "executor_connection_lost"
+		if errors.Is(executeErr, provider.ErrTimeout) || errors.Is(executeErr, provider.ErrStreamIdle) {
+			reason = "executor_timeout"
+		}
+		_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, reason, "provider", "provider_error")
+		writeError(w, 502, "api_error", "provider unavailable")
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		responseBody, readErr := readBounded(response.Body, h.maximum)
+		if readErr != nil {
+			_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, "response_unavailable", "provider", "provider_error")
+			writeError(w, 502, "api_error", "provider response unavailable")
+			return
+		}
+		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeResponseHeaders(response.Header), Body: responseBody}
+		settled, settleErr := h.billing.Release(context.WithoutCancel(r.Context()), charge.ID, snapshot)
+		if settleErr != nil {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "settlement_failed", &snapshot)
+			writeError(w, 503, "api_error", "settlement unavailable")
+			return
+		}
+		h.writeSnapshot(w, settled.Response)
+		return
+	}
+	media, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if mediaErr != nil || !strings.EqualFold(media, "text/event-stream") {
+		_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, "stream_protocol_invalid", "provider", "invalid_usage")
+		writeError(w, 502, "api_error", "invalid provider stream")
+		return
+	}
+	copyStreamHeaders(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	streamStarted := time.Now()
+	result, relayErr := relayStream(w, response.Body, h.maximum, true)
+	if relayErr != nil || !result.Terminal || result.TerminalCategory != "complete" || !result.UsageFound || result.Usage.PromptTokens > charge.MaximumInputTokens || result.Usage.CompletionTokens > charge.MaximumOutputTokens {
+		reason, side, category := "stream_protocol_invalid", "provider", "invalid_usage"
+		if errors.Is(relayErr, errStreamWrite) {
+			reason, side, category = "stream_write_failed", "client", "write_failed"
+		} else if errors.Is(r.Context().Err(), context.Canceled) {
+			reason, side, category = "client_disconnect", "client", "client_disconnect"
+		} else if errors.Is(relayErr, provider.ErrStreamIdle) || errors.Is(relayErr, provider.ErrTimeout) {
+			reason, category = "executor_timeout", "provider_error"
+		} else if result.TerminalCategory == "error_event" {
+			category = "error_event"
+		} else if !result.UsageFound {
+			reason, category = "stream_usage_missing", "missing_usage"
+		} else if !result.Terminal {
+			category = "missing_terminal"
+		}
+		_ = h.billing.MarkStreamReconciling(context.WithoutCancel(r.Context()), charge.ID, reason, side, category)
+		h.recordStream(r.Context(), category, side, result.FirstByte, time.Since(streamStarted))
+		return
+	}
+	if _, settleErr := h.billing.CompleteStreamUsage(context.WithoutCancel(r.Context()), charge.ID, result.Usage, result.TerminalDigest); settleErr != nil {
+		_ = h.billing.MarkStreamReconcilingUsage(context.WithoutCancel(r.Context()), charge.ID, result.Usage, result.TerminalDigest)
+		h.recordStream(r.Context(), "complete", "none", result.FirstByte, time.Since(streamStarted))
+		return
+	}
+	h.recordStream(r.Context(), "complete", "none", result.FirstByte, time.Since(streamStarted))
+}
+func copyStreamHeaders(destination, source http.Header) {
+	for _, name := range []string{"Content-Type", "Cache-Control", "Request-Id", "Retry-After"} {
+		for _, value := range source.Values(name) {
+			destination.Add(name, value)
+		}
+	}
+}
+func (h *Handler) recordStream(ctx context.Context, category, side string, firstByte, duration time.Duration) {
+	if h.telemetry != nil {
+		h.telemetry.LLMStream(ctx, telemetry.LLMStreamRecord{Protocol: "anthropic", Operation: operation.CreateMessage, TerminalCategory: category, DisconnectSide: side, FirstByte: firstByte, Duration: duration})
+	}
 }
 
 func (h *Handler) serveBillable(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route operation.Model, version string, beta []string, body []byte) {
@@ -573,6 +752,14 @@ func (w *statusWriter) Write(body []byte) (int, error) {
 		w.WriteHeader(200)
 	}
 	return w.ResponseWriter.Write(body)
+}
+func (w *statusWriter) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 func (w *statusWriter) code() int {
 	if w.status == 0 {
