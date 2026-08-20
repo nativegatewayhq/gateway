@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/chatbilling"
+	"github.com/nativegatewayhq/gateway/internal/chatpricing"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
@@ -143,6 +146,99 @@ func TestManagedLLMGenerateContentFailsBeforeBodyBillingAndProvider(t *testing.T
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusPreconditionFailed || executor.calls != 0 || len(bill.events) != 0 || bill.replayCalls != 0 {
 		t.Fatalf("response=%d body=%s provider=%d billing_events=%v replay=%d", response.Code, response.Body.String(), executor.calls, bill.events, bill.replayCalls)
+	}
+}
+
+type geminiLLMBillingFake struct {
+	beginRequest chatbilling.BeginRequest
+	usage        chatpricing.Usage
+	snapshot     chargebilling.ResponseSnapshot
+	charge       chatbilling.Charge
+	reason       string
+	beginCalls   int
+	replay       bool
+	released     bool
+}
+
+func (fake *geminiLLMBillingFake) Begin(_ context.Context, request chatbilling.BeginRequest) (chatbilling.Charge, error) {
+	fake.beginCalls++
+	fake.beginRequest = request
+	charge := fake.charge
+	if charge.ID == "" {
+		charge.ID = "chc_00000000000000000000000000000001"
+	}
+	charge.MaximumInputTokens = request.MaximumInputTokens
+	charge.MaximumOutputTokens = request.MaximumOutputTokens
+	return charge, nil
+}
+func (fake *geminiLLMBillingFake) Replay(_ context.Context, _ chatbilling.BeginRequest) (chatbilling.Charge, bool, error) {
+	return fake.charge, fake.replay, nil
+}
+func (fake *geminiLLMBillingFake) CompleteUsage(_ context.Context, _ string, usage chatpricing.Usage, snapshot chargebilling.ResponseSnapshot) (chatbilling.Charge, error) {
+	fake.usage, fake.snapshot = usage, snapshot
+	return chatbilling.Charge{Response: snapshot}, nil
+}
+func (fake *geminiLLMBillingFake) Release(_ context.Context, _ string, snapshot chargebilling.ResponseSnapshot) (chatbilling.Charge, error) {
+	fake.released, fake.snapshot = true, snapshot
+	return chatbilling.Charge{Response: snapshot}, nil
+}
+func (fake *geminiLLMBillingFake) MarkReconciling(_ context.Context, _ string, reason string, _ *chargebilling.ResponseSnapshot) error {
+	fake.reason = reason
+	return nil
+}
+func (fake *geminiLLMBillingFake) MarkReconcilingUsage(_ context.Context, _ string, reason string, _ *chargebilling.ResponseSnapshot, usage chatpricing.Usage) error {
+	fake.reason, fake.usage = reason, usage
+	return nil
+}
+
+func TestManagedLLMReservesAndCapturesStrictGeminiUsage(t *testing.T) {
+	models, _ := geminioperation.NewRegistryWithLimits([]string{"gemini-2.5-pro"}, map[string]geminioperation.Limits{"gemini-2.5-pro": {MaximumInputTokens: 4096, MaximumOutputTokens: 100}})
+	providerBody := `{"candidates":[],"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":3,"toolUsePromptTokenCount":2,"candidatesTokenCount":5,"thoughtsTokenCount":4,"totalTokenCount":19}}`
+	executor := &stubExecutor{response: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(providerBody))}}
+	tokenBilling := &geminiLLMBillingFake{}
+	imageBilling := &geminiBillingFake{}
+	principal := apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test", APIKeyID: "key_test"}
+	handler := NewBillableHandlerWithLLMTokenBilling(testLogger(io.Discard), &stubAuthenticator{principal: principal}, nil, executor, 4096, imageBilling, tokenBilling, nil, nil, models)
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent?key=service-key", strings.NewReader(`{"contents":[{"parts":[{"text":"secret"}]}],"generationConfig":{"maxOutputTokens":20}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "gemini-managed-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || response.Body.String() != providerBody || executor.calls != 1 || tokenBilling.beginCalls != 1 {
+		t.Fatalf("response=%d %s provider=%d begin=%d", response.Code, response.Body.String(), executor.calls, tokenBilling.beginCalls)
+	}
+	if tokenBilling.beginRequest.Protocol != "gemini" || tokenBilling.beginRequest.Operation != "chat.completions" || tokenBilling.beginRequest.MaximumOutputTokens != 20 || tokenBilling.beginRequest.Fingerprint == ([32]byte{}) {
+		t.Fatalf("begin=%+v", tokenBilling.beginRequest)
+	}
+	if tokenBilling.usage != (chatpricing.Usage{PromptTokens: 12, CachedInputTokens: 3, CompletionTokens: 9, ToolUsePromptTokens: 2, ThoughtsTokens: 4}) {
+		t.Fatalf("usage=%+v", tokenBilling.usage)
+	}
+}
+
+func TestManagedLLMInvalidUsageHoldsReservation(t *testing.T) {
+	models, _ := geminioperation.NewRegistryWithLimits([]string{"gemini-2.5-pro"}, map[string]geminioperation.Limits{"gemini-2.5-pro": {MaximumInputTokens: 4096, MaximumOutputTokens: 100}})
+	executor := &stubExecutor{response: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":99}}`))}}
+	tokenBilling := &geminiLLMBillingFake{}
+	handler := NewBillableHandlerWithLLMTokenBilling(testLogger(io.Discard), &stubAuthenticator{principal: apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test", APIKeyID: "key_test"}}, nil, executor, 4096, &geminiBillingFake{}, tokenBilling, nil, nil, models)
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent?key=service-key", strings.NewReader(`{"contents":[],"generationConfig":{"maxOutputTokens":20}}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || tokenBilling.reason != "usage_invalid" || tokenBilling.released {
+		t.Fatalf("response=%d reason=%q released=%v", response.Code, tokenBilling.reason, tokenBilling.released)
+	}
+}
+
+func TestGeminiManagedParsersRejectDuplicateAndInvalidUsage(t *testing.T) {
+	for _, body := range []string{`{"generationConfig":{"maxOutputTokens":1,"maxOutputTokens":2}}`, `{"generationConfig":{"maxOutputTokens":1.5}}`, `{"generationConfig":{}}`} {
+		if _, err := extractGeminiMaximumOutput([]byte(body)); err == nil {
+			t.Fatalf("accepted limit %s", body)
+		}
+	}
+	for _, body := range []string{`{"usageMetadata":{"promptTokenCount":1,"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`, `{"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":-1,"totalTokenCount":0}}`, `{"usageMetadata":{"promptTokenCount":1,"cachedContentTokenCount":2,"candidatesTokenCount":1,"totalTokenCount":2}}`} {
+		if _, err := extractGeminiUsage([]byte(body)); err == nil {
+			t.Fatalf("accepted usage %s", body)
+		}
 	}
 }
 

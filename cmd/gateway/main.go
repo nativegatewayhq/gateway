@@ -168,7 +168,11 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway model registry initialization failed")
 		return 1
 	}
-	geminiLLMModels, err := geminioperation.NewRegistry(cfg.GeminiLLMModels)
+	geminiLimits := make(map[string]geminioperation.Limits, len(cfg.GeminiLLMModelLimits))
+	for model, limit := range cfg.GeminiLLMModelLimits {
+		geminiLimits[model] = geminioperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
+	}
+	geminiLLMModels, err := geminioperation.NewRegistryWithLimits(cfg.GeminiLLMModels, geminiLimits)
 	if err != nil {
 		logger.Error("gateway Gemini LLM model registry initialization failed")
 		return 1
@@ -278,7 +282,7 @@ func run(stdout, stderr io.Writer) int {
 		openAIImagesHandler = openaiProtocol.NewImagesHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, healthGate)
 		openAIImageEditsHandler = openaiProtocol.NewEditHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, healthGate)
 	} else {
-		geminiHandler = gemini.NewBillableHandlerWithLLMModels(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, providerCredentialRegistry, healthGate, geminiLLMModels)
+		geminiHandler = gemini.NewBillableHandlerWithLLMTokenBilling(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, chatChargeBilling, providerCredentialRegistry, healthGate, geminiLLMModels)
 		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
 		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry, healthGate)
 	}

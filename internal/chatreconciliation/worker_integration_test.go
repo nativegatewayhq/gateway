@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/chatbilling"
 	"github.com/nativegatewayhq/gateway/internal/chatpricing"
 	"github.com/nativegatewayhq/gateway/internal/database"
@@ -131,5 +132,35 @@ func TestWorkerRetriesResponsesStreamingSettlementExactlyOnce(t *testing.T) {
 	}
 	if chargeState != "CAPTURED" || taskState != "RESOLVED" || schema != "openai-responses-stream-usage-v1" || captures != 1 {
 		t.Fatalf("charge=%s task=%s schema=%s captures=%d", chargeState, taskState, schema, captures)
+	}
+}
+
+func TestWorkerRetriesGeminiSettlementWithDetailedUsageExactlyOnce(t *testing.T) {
+	worker, service, pool := streamingWorkerFixture(t)
+	ctx := context.Background()
+	prices, _ := chatpricing.New(pool, 0)
+	if _, err := prices.Publish(ctx, chatpricing.Price{Protocol: "gemini", Operation: "chat.completions", ChannelID: "channel_00000000000000000000000000000003", Model: "gemini-2.5-pro", EffectiveFrom: time.Now().Add(-time.Hour), Rates: chatpricing.Rates{InputCost: 1_000_000, InputSale: 2_000_000, CachedInputCost: 500_000, CachedInputSale: 1_000_000, OutputCost: 3_000_000, OutputSale: 4_000_000}}, "gemini-worker-price"); err != nil {
+		t.Fatal(err)
+	}
+	charge, err := service.Begin(ctx, chatbilling.BeginRequest{Protocol: "gemini", Operation: "chat.completions", RequestID: "gemini-reconcile", OrganizationID: "org_stream", ProjectID: "project_stream", APIKeyID: "key_stream", Model: "gemini-2.5-pro", ChannelID: "channel_00000000000000000000000000000003", MaximumInputTokens: 100, MaximumOutputTokens: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := chatpricing.Usage{PromptTokens: 12, CachedInputTokens: 3, CompletionTokens: 9, ToolUsePromptTokens: 2, ThoughtsTokens: 4}
+	snapshot := billing.ResponseSnapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: []byte(`{"usageMetadata":{"totalTokenCount":19}}`)}
+	if err = service.MarkReconcilingUsage(ctx, charge.ID, "settlement_failed", &snapshot, usage); err != nil {
+		t.Fatal(err)
+	}
+	worked, err := worker.RunOne(ctx)
+	if err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	var chargeState, taskState, schema string
+	var tool, thoughts int64
+	if err = pool.QueryRow(ctx, `SELECT c.state,r.state,e.schema_version,e.tool_use_prompt_tokens,e.thoughts_tokens FROM chat_request_charges c JOIN chat_charge_reconciliations r ON r.charge_id=c.id JOIN chat_usage_evidence e ON e.charge_id=c.id WHERE c.id=$1`, charge.ID).Scan(&chargeState, &taskState, &schema, &tool, &thoughts); err != nil {
+		t.Fatal(err)
+	}
+	if chargeState != "CAPTURED" || taskState != "RESOLVED" || schema != "gemini-usage-v1" || tool != 2 || thoughts != 4 {
+		t.Fatalf("charge=%s task=%s schema=%s tool=%d thoughts=%d", chargeState, taskState, schema, tool, thoughts)
 	}
 }

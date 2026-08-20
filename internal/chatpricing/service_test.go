@@ -22,6 +22,9 @@ func TestCalculateRejectsInvalidAndOverflow(t *testing.T) {
 	if _, ok := tokenAmount(math.MaxInt64, math.MaxInt64); ok {
 		t.Fatal("overflow accepted")
 	}
+	if _, err := Calculate(Rates{InputSale: 1, CachedInputSale: 1, OutputSale: 1}, Usage{PromptTokens: 2, CompletionTokens: 2, ToolUsePromptTokens: 3}); err == nil {
+		t.Fatal("invalid Gemini detail usage accepted")
+	}
 }
 func TestMarginAppliesToEveryDimension(t *testing.T) {
 	good := Rates{InputCost: 100, InputSale: 110, CachedInputCost: 50, CachedInputSale: 55, OutputCost: 200, OutputSale: 220}

@@ -18,6 +18,8 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/chatbilling"
+	"github.com/nativegatewayhq/gateway/internal/chatpricing"
 	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
@@ -68,6 +70,15 @@ type ResultManager interface {
 	MaximumResponseBytes() int64
 }
 
+type LLMBilling interface {
+	Begin(context.Context, chatbilling.BeginRequest) (chatbilling.Charge, error)
+	Replay(context.Context, chatbilling.BeginRequest) (chatbilling.Charge, bool, error)
+	CompleteUsage(context.Context, string, chatpricing.Usage, billing.ResponseSnapshot) (chatbilling.Charge, error)
+	Release(context.Context, string, billing.ResponseSnapshot) (chatbilling.Charge, error)
+	MarkReconciling(context.Context, string, string, *billing.ResponseSnapshot) error
+	MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error
+}
+
 type Handler struct {
 	logger        *slog.Logger
 	authenticator Authenticator
@@ -81,6 +92,7 @@ type Handler struct {
 	results       ResultManager
 	telemetry     *telemetry.Recorder
 	llmModels     *geminioperation.Registry
+	llmBilling    LLMBilling
 }
 
 func (handler *Handler) SetResultManager(manager ResultManager)    { handler.results = manager }
@@ -126,6 +138,12 @@ func NewBillableHandlerWithAvailabilityAndHealth(logger *slog.Logger, authentica
 func NewBillableHandlerWithLLMModels(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing, availability ProviderAvailability, health providerhealth.Gate, llmModels *geminioperation.Registry) *Handler {
 	handler := NewBillableHandlerWithAvailabilityAndHealth(logger, authenticator, models, executor, maxBodyBytes, chargeBilling, availability, health)
 	handler.llmModels = llmModels
+	return handler
+}
+
+func NewBillableHandlerWithLLMTokenBilling(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, imageBilling Billing, tokenBilling LLMBilling, availability ProviderAvailability, health providerhealth.Gate, llmModels *geminioperation.Registry) *Handler {
+	handler := NewBillableHandlerWithLLMModels(logger, authenticator, models, executor, maxBodyBytes, imageBilling, availability, health, llmModels)
+	handler.llmBilling = tokenBilling
 	return handler
 }
 
@@ -195,18 +213,21 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	var candidates []imageoperation.RoutingDecision
 	if handler.billing != nil {
 		if operation == geminioperation.ChatCompletions {
-			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "managed Gemini LLM billing is not enabled")
-			return
-		}
-		if handler.models == nil {
-			writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
-			return
-		}
-		var routeErr error
-		candidates, routeErr = handler.models.Candidates("gemini", model, imageoperation.Generate, imageoperation.JSON)
-		if routeErr != nil {
-			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
-			return
+			if handler.llmBilling == nil {
+				writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "managed Gemini LLM billing is not enabled")
+				return
+			}
+		} else {
+			if handler.models == nil {
+				writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
+				return
+			}
+			var routeErr error
+			candidates, routeErr = handler.models.Candidates("gemini", model, imageoperation.Generate, imageoperation.JSON)
+			if routeErr != nil {
+				writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
+				return
+			}
 		}
 	}
 	if !handler.authorizeModel(tracked, request, principal, model, operation) {
@@ -232,6 +253,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "could not read request body")
+		return
+	}
+	if operation == geminioperation.ChatCompletions && handler.llmBilling != nil {
+		handler.serveBillableLLM(tracked, request, principal, model, body)
 		return
 	}
 	if handler.billing == nil {
@@ -395,6 +420,259 @@ func (handler *Handler) executeProvider(ctx context.Context, operation string, p
 	response, err = handler.executor.GenerateContent(providerCtx, providerRequest)
 	handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: operation, Outcome: geminiProviderTelemetryOutcome(response, err)})
 	return response, err
+}
+
+func (handler *Handler) serveBillableLLM(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, model string, body []byte) {
+	configured, err := handler.llmModels.Resolve(model)
+	maximumOutput, limitErr := extractGeminiMaximumOutput(body)
+	if err != nil || limitErr != nil || configured.MaximumInputTokens < 1 || configured.MaximumOutputTokens < 1 || int64(len(body)) > configured.MaximumInputTokens || maximumOutput < 1 || maximumOutput > configured.MaximumOutputTokens {
+		writeError(writer, http.StatusBadRequest, "INVALID_ARGUMENT", "managed Gemini LLM requires valid input and output token limits")
+		return
+	}
+	channelID, ok := providercredentials.LegacyChannel(providercredentials.Google)
+	if !ok {
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+		return
+	}
+	if handler.availability != nil {
+		if channels, supported := handler.availability.(interface {
+			ConfiguredChannel(context.Context, string, providercredentials.ProviderID) bool
+		}); supported && !channels.ConfiguredChannel(request.Context(), channelID, providercredentials.Google) {
+			writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+			return
+		}
+	}
+	key, keyErr := idempotency.Extract(request.Header)
+	if keyErr != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_ARGUMENT", "idempotency key is invalid")
+		return
+	}
+	var fingerprint [32]byte
+	if key != "" {
+		query := request.URL.Query()
+		query.Del("key")
+		fingerprint = idempotency.Fingerprint("gemini", geminioperation.ChatCompletions, model, channelID, request.Method+" "+request.URL.EscapedPath()+"?"+query.Encode(), body)
+	}
+	begin := chatbilling.BeginRequest{Protocol: "gemini", Operation: geminioperation.ChatCompletions, RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: model, ChannelID: channelID, IdempotencyKey: key, Fingerprint: fingerprint, MaximumInputTokens: int64(len(body)), MaximumOutputTokens: maximumOutput}
+	if key != "" {
+		replayed, found, replayErr := handler.llmBilling.Replay(request.Context(), begin)
+		if replayErr != nil {
+			handler.recordLLMBilling(request.Context(), "replay", "failure")
+			handler.writeLLMBillingError(writer, replayErr)
+			return
+		}
+		if found {
+			handler.recordLLMBilling(request.Context(), "replay", "replay")
+			handler.writeSnapshot(writer, replayed.Response, true)
+			return
+		}
+	}
+	permit, allowed := handler.claimFixedHealth(writer, request, channelID)
+	if !allowed {
+		return
+	}
+	charge, beginErr := handler.llmBilling.Begin(request.Context(), begin)
+	if beginErr != nil {
+		handler.releaseHealthPermit(request, permit)
+		handler.recordLLMBilling(request.Context(), "begin", "failure")
+		handler.writeLLMBillingError(writer, beginErr)
+		return
+	}
+	handler.recordLLMBilling(request.Context(), "begin", "success")
+	if charge.Replay {
+		handler.releaseHealthPermit(request, permit)
+		handler.writeSnapshot(writer, charge.Response, true)
+		return
+	}
+	response, executeErr := handler.executeProvider(request.Context(), geminioperation.ChatCompletions, google.GenerateContentRequest{Model: model, ChannelID: channelID, Query: request.URL.Query(), ContentType: request.Header.Get("Content-Type"), Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), APIClient: request.Header.Get("x-goog-api-client"), Body: bytes.NewReader(body)})
+	handler.observeHealth(request, channelID, permit, response, executeErr)
+	if executeErr != nil {
+		reason := "executor_connection_lost"
+		if errors.Is(executeErr, google.ErrTimeout) {
+			reason = "executor_timeout"
+		}
+		_ = handler.llmBilling.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, reason, nil)
+		handler.recordLLMBilling(request.Context(), "reconciling", "success")
+		handler.writeExecutorError(writer, executeErr)
+		return
+	}
+	defer response.Body.Close()
+	responseBody, readErr := readBounded(response.Body, handler.maxBodyBytes)
+	if readErr != nil {
+		_ = handler.llmBilling.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "response_unavailable", nil)
+		handler.recordLLMBilling(request.Context(), "reconciling", "success")
+		writeError(writer, http.StatusBadGateway, "UNAVAILABLE", "provider response unavailable")
+		return
+	}
+	snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeGeminiResponseHeaders(response.Header), Body: responseBody}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		settled, settleErr := handler.llmBilling.Release(context.WithoutCancel(request.Context()), charge.ID, snapshot)
+		if settleErr != nil {
+			_ = handler.llmBilling.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "settlement_failed", &snapshot)
+			handler.recordLLMBilling(request.Context(), "reconciling", "failure")
+			writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "settlement unavailable")
+			return
+		}
+		handler.recordLLMBilling(request.Context(), "release", "success")
+		handler.writeSnapshot(writer, settled.Response, false)
+		return
+	}
+	usage, usageErr := extractGeminiUsage(responseBody)
+	if usageErr != nil || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
+		_ = handler.llmBilling.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "usage_invalid", &snapshot)
+		handler.recordLLMBilling(request.Context(), "reconciling", "success")
+		handler.writeSnapshot(writer, snapshot, false)
+		return
+	}
+	settled, settleErr := handler.llmBilling.CompleteUsage(context.WithoutCancel(request.Context()), charge.ID, usage, snapshot)
+	if settleErr != nil {
+		_ = handler.llmBilling.MarkReconcilingUsage(context.WithoutCancel(request.Context()), charge.ID, "settlement_failed", &snapshot, usage)
+		handler.recordLLMBilling(request.Context(), "reconciling", "failure")
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "settlement unavailable")
+		return
+	}
+	handler.recordLLMBilling(request.Context(), "capture", "success")
+	handler.writeSnapshot(writer, settled.Response, false)
+}
+
+func (handler *Handler) recordLLMBilling(ctx context.Context, transition, outcome string) {
+	if handler.telemetry != nil {
+		handler.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: "gemini", Operation: geminioperation.ChatCompletions, Transition: transition, Outcome: outcome})
+	}
+}
+
+func extractGeminiMaximumOutput(body []byte) (int64, error) {
+	root, err := strictJSONObject(body)
+	if err != nil {
+		return 0, err
+	}
+	raw, ok := root["generationConfig"]
+	if !ok {
+		return 0, errors.New("generationConfig missing")
+	}
+	config, err := strictJSONObject(raw)
+	if err != nil {
+		return 0, err
+	}
+	value, ok := config["maxOutputTokens"]
+	if !ok {
+		return 0, errors.New("maxOutputTokens invalid")
+	}
+	var result int64
+	if err := json.Unmarshal(value, &result); err != nil || result < 1 {
+		return 0, errors.New("maxOutputTokens invalid")
+	}
+	return result, nil
+}
+
+func extractGeminiUsage(body []byte) (chatpricing.Usage, error) {
+	root, err := strictJSONObject(body)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	raw, ok := root["usageMetadata"]
+	if !ok {
+		return chatpricing.Usage{}, errors.New("usageMetadata missing")
+	}
+	fields, err := strictJSONObject(raw)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	read := func(key string, required bool) (int64, error) {
+		value, exists := fields[key]
+		if !exists {
+			if required {
+				return 0, errors.New("usage field missing")
+			}
+			return 0, nil
+		}
+		var count int64
+		if err := json.Unmarshal(value, &count); err != nil || count < 0 {
+			return 0, errors.New("usage field invalid")
+		}
+		return count, nil
+	}
+	prompt, err := read("promptTokenCount", true)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	candidates, err := read("candidatesTokenCount", true)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	total, err := read("totalTokenCount", true)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	cached, err := read("cachedContentTokenCount", false)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	tool, err := read("toolUsePromptTokenCount", false)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	thoughts, err := read("thoughtsTokenCount", false)
+	if err != nil {
+		return chatpricing.Usage{}, err
+	}
+	if cached > prompt || prompt > int64(^uint64(0)>>1)-tool || candidates > int64(^uint64(0)>>1)-thoughts {
+		return chatpricing.Usage{}, errors.New("usage relationship invalid")
+	}
+	input, output := prompt+tool, candidates+thoughts
+	if prompt > int64(^uint64(0)>>1)-output || total != prompt+output {
+		return chatpricing.Usage{}, errors.New("usage total invalid")
+	}
+	return chatpricing.Usage{PromptTokens: input, CachedInputTokens: cached, CompletionTokens: output, ToolUsePromptTokens: tool, ThoughtsTokens: thoughts}, nil
+}
+
+func strictJSONObject(body []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errors.New("object required")
+	}
+	result := map[string]json.RawMessage{}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, errors.New("invalid key")
+		}
+		if _, duplicate := result[key]; duplicate {
+			return nil, errors.New("duplicate key")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, err
+		}
+		result[key] = raw
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New("trailing JSON")
+	}
+	return result, nil
+}
+
+func (handler *Handler) writeLLMBillingError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, chatbilling.ErrConflict), errors.Is(err, chatbilling.ErrPending):
+		writeError(writer, http.StatusConflict, "ALREADY_EXISTS", "idempotency request conflict")
+	case errors.Is(err, ledger.ErrInsufficientFunds):
+		writeError(writer, http.StatusPaymentRequired, "RESOURCE_EXHAUSTED", "insufficient balance")
+	case errors.Is(err, chatpricing.ErrUnavailable), errors.Is(err, chatpricing.ErrMargin):
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "pricing unavailable")
+	case errors.Is(err, costquota.ErrExceeded), errors.Is(err, spendcap.ErrExceeded):
+		writeError(writer, http.StatusPaymentRequired, "RESOURCE_EXHAUSTED", "cost limit exceeded")
+	default:
+		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
+	}
 }
 
 func geminiProviderTelemetryOutcome(response *http.Response, err error) string {

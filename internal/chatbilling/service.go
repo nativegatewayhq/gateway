@@ -32,7 +32,7 @@ var (
 
 type BeginRequest struct {
 	RequestID, OrganizationID, ProjectID, APIKeyID, Model, ChannelID, IdempotencyKey string
-	Operation                                                                        string
+	Protocol, Operation                                                              string
 	DeliveryMode                                                                     string
 	Fingerprint                                                                      [32]byte
 	MaximumInputTokens, MaximumOutputTokens                                          int64
@@ -48,7 +48,7 @@ type Charge struct {
 	Replay                                                                                                                        bool
 	DeliveryMode                                                                                                                  string
 	StreamCompleted                                                                                                               bool
-	Operation                                                                                                                     string
+	Protocol, Operation                                                                                                           string
 }
 type Estimator interface {
 	EstimateInTx(context.Context, pgx.Tx, chatpricing.Request) (chatpricing.Estimate, error)
@@ -91,6 +91,9 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 	if r.Operation == "" {
 		r.Operation = "chat.completions"
 	}
+	if r.Protocol == "" {
+		r.Protocol = "openai"
+	}
 	if r.DeliveryMode == "" {
 		r.DeliveryMode = "non_stream"
 	}
@@ -106,7 +109,7 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 	if r.IdempotencyKey != "" {
 		identity = r.IdempotencyKey
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, r.OrganizationID+":chat:"+identity); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, r.OrganizationID+":"+r.Protocol+":"+r.Operation+":"+identity); err != nil {
 		return Charge{}, err
 	}
 	existing, found, err := loadForBegin(ctx, tx, r)
@@ -126,7 +129,7 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 		existing.Replay = true
 		return existing, nil
 	}
-	estimate, err := s.estimator.EstimateInTx(ctx, tx, chatpricing.Request{ChannelID: r.ChannelID, Operation: r.Operation, Model: r.Model, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens})
+	estimate, err := s.estimator.EstimateInTx(ctx, tx, chatpricing.Request{ChannelID: r.ChannelID, Protocol: r.Protocol, Operation: r.Operation, Model: r.Model, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens})
 	if err != nil {
 		return Charge{}, err
 	}
@@ -139,22 +142,26 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 		sum := sha256.Sum256([]byte(r.IdempotencyKey))
 		operationIdentity = "idem_" + hex.EncodeToString(sum[:])
 	}
-	reservation, err := s.wallet.ReserveInTx(ctx, tx, r.OrganizationID, r.ProjectID, r.Operation+":"+operationIdentity, estimate.MaximumSale, r.Operation+":reserve:"+operationIdentity)
+	operationScope := r.Operation
+	if r.Protocol != "openai" {
+		operationScope = r.Protocol + ":" + r.Operation
+	}
+	reservation, err := s.wallet.ReserveInTx(ctx, tx, r.OrganizationID, r.ProjectID, operationScope+":"+operationIdentity, estimate.MaximumSale, operationScope+":reserve:"+operationIdentity)
 	if err != nil {
 		return Charge{}, err
 	}
-	charge := Charge{ID: id, Operation: r.Operation, RequestID: r.RequestID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID, APIKeyID: r.APIKeyID, Model: r.Model, ChannelID: r.ChannelID, PriceID: estimate.Price.ID, Currency: estimate.Price.Currency, ReservationID: reservation.Reservation.ID, State: "RESERVED", IdempotencyKey: r.IdempotencyKey, Fingerprint: r.Fingerprint, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens, EstimatedCost: estimate.EstimatedCost, ReservedSale: estimate.MaximumSale, Rates: estimate.Price.Rates, DeliveryMode: r.DeliveryMode}
+	charge := Charge{ID: id, Protocol: r.Protocol, Operation: r.Operation, RequestID: r.RequestID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID, APIKeyID: r.APIKeyID, Model: r.Model, ChannelID: r.ChannelID, PriceID: estimate.Price.ID, Currency: estimate.Price.Currency, ReservationID: reservation.Reservation.ID, State: "RESERVED", IdempotencyKey: r.IdempotencyKey, Fingerprint: r.Fingerprint, MaximumInputTokens: r.MaximumInputTokens, MaximumOutputTokens: r.MaximumOutputTokens, EstimatedCost: estimate.EstimatedCost, ReservedSale: estimate.MaximumSale, Rates: estimate.Price.Rates, DeliveryMode: r.DeliveryMode}
 	var key, fingerprint any
 	if r.IdempotencyKey != "" {
 		key = r.IdempotencyKey
 		fingerprint = r.Fingerprint[:]
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_request_charges(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,channel_id,price_id,maximum_input_tokens,maximum_output_tokens,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint,delivery_mode) VALUES($1,$2,$3,$4,$5,'openai',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'RESERVED',$16,$17,$18)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.APIKeyID, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.MaximumInputTokens, charge.MaximumOutputTokens, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, key, fingerprint, charge.DeliveryMode)
+	_, err = tx.Exec(ctx, `INSERT INTO chat_request_charges(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,channel_id,price_id,maximum_input_tokens,maximum_output_tokens,currency,estimated_cost,reserved_sale,reservation_id,state,idempotency_key,request_fingerprint,delivery_mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'RESERVED',$17,$18,$19)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.APIKeyID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.MaximumInputTokens, charge.MaximumOutputTokens, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, key, fingerprint, charge.DeliveryMode)
 	if err != nil {
 		return Charge{}, err
 	}
 	if s.quota != nil {
-		_, err = s.quota.ReserveInTx(ctx, tx, costquota.ReservationRequest{ChargeID: charge.ID, OrganizationID: charge.OrganizationID, ProjectID: charge.ProjectID, APIKeyID: charge.APIKeyID, Protocol: "openai", Operation: charge.Operation, Model: charge.Model, Currency: charge.Currency, Amount: charge.ReservedSale})
+		_, err = s.quota.ReserveInTx(ctx, tx, costquota.ReservationRequest{ChargeID: charge.ID, OrganizationID: charge.OrganizationID, ProjectID: charge.ProjectID, APIKeyID: charge.APIKeyID, Protocol: charge.Protocol, Operation: charge.Operation, Model: charge.Model, Currency: charge.Currency, Amount: charge.ReservedSale})
 		if err != nil {
 			return Charge{}, err
 		}
@@ -173,6 +180,9 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 func (s *Service) Replay(ctx context.Context, r BeginRequest) (Charge, bool, error) {
 	if r.Operation == "" {
 		r.Operation = "chat.completions"
+	}
+	if r.Protocol == "" {
+		r.Protocol = "openai"
 	}
 	if r.DeliveryMode == "" {
 		r.DeliveryMode = "non_stream"
@@ -207,7 +217,7 @@ func (s *Service) Replay(ctx context.Context, r BeginRequest) (Charge, bool, err
 
 // CompleteStreamUsage settles a streaming charge without retaining its SSE transcript.
 func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chatpricing.Usage, terminalDigest [32]byte) (Charge, error) {
-	if terminalDigest == ([32]byte{}) || usage.PromptTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.PromptTokens || usage.CompletionTokens < 0 {
+	if terminalDigest == ([32]byte{}) || !validUsage(usage) {
 		return Charge{}, ErrInvalid
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -222,7 +232,7 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 		}
 		return Charge{}, err
 	}
-	if (charge.Operation != "chat.completions" && charge.Operation != "responses.create") || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
+	if charge.Protocol != "openai" || (charge.Operation != "chat.completions" && charge.Operation != "responses.create") || charge.DeliveryMode != "stream" || usage.PromptTokens > charge.MaximumInputTokens || usage.CompletionTokens > charge.MaximumOutputTokens {
 		return Charge{}, ErrInvalid
 	}
 	amounts, err := chatpricing.Calculate(charge.Rates, usage)
@@ -274,7 +284,7 @@ func (s *Service) CompleteStreamUsage(ctx context.Context, id string, usage chat
 	return charge, nil
 }
 func (s *Service) CompleteUsage(ctx context.Context, id string, usage chatpricing.Usage, snapshot billing.ResponseSnapshot) (Charge, error) {
-	if usage.PromptTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.PromptTokens || usage.CompletionTokens < 0 {
+	if !validUsage(usage) {
 		return Charge{}, ErrInvalid
 	}
 	canonical, headersJSON, digest, err := s.snapshot(snapshot)
@@ -312,7 +322,11 @@ func (s *Service) CompleteUsage(ctx context.Context, id string, usage chatpricin
 	if charge.State != "RESERVED" && charge.State != "RECONCILING" {
 		return Charge{}, ErrState
 	}
-	if _, err = s.wallet.CaptureInTx(ctx, tx, charge.ReservationID, amounts.Sale, charge.Operation+":capture:"+id); err != nil {
+	operationScope := charge.Operation
+	if charge.Protocol != "openai" {
+		operationScope = charge.Protocol + ":" + charge.Operation
+	}
+	if _, err = s.wallet.CaptureInTx(ctx, tx, charge.ReservationID, amounts.Sale, operationScope+":capture:"+id); err != nil {
 		return Charge{}, err
 	}
 	if s.quota != nil {
@@ -328,8 +342,10 @@ func (s *Service) CompleteUsage(ctx context.Context, id string, usage chatpricin
 	schemaVersion := "openai-chat-usage-v1"
 	if charge.Operation == "responses.create" {
 		schemaVersion = "openai-responses-usage-v1"
+	} else if charge.Protocol == "gemini" {
+		schemaVersion = "gemini-usage-v1"
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,schema_version,body_sha256) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, schemaVersion, digest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO chat_usage_evidence(charge_id,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens,schema_version,body_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(charge_id) DO NOTHING`, id, usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens, usage.ToolUsePromptTokens, usage.ThoughtsTokens, schemaVersion, digest[:])
 	if err != nil {
 		return Charge{}, err
 	}
@@ -373,7 +389,11 @@ func (s *Service) Release(ctx context.Context, id string, snapshot billing.Respo
 	if charge.State != "RESERVED" && charge.State != "RECONCILING" {
 		return Charge{}, ErrState
 	}
-	if _, err = s.wallet.ReleaseInTx(ctx, tx, charge.ReservationID, charge.Operation+":release:"+id); err != nil {
+	operationScope := charge.Operation
+	if charge.Protocol != "openai" {
+		operationScope = charge.Protocol + ":" + charge.Operation
+	}
+	if _, err = s.wallet.ReleaseInTx(ctx, tx, charge.ReservationID, operationScope+":release:"+id); err != nil {
 		return Charge{}, err
 	}
 	if s.quota != nil {
@@ -402,13 +422,13 @@ func (s *Service) MarkReconciling(ctx context.Context, id, reason string, snapsh
 	return s.markReconciling(ctx, id, reason, snapshot, nil)
 }
 func (s *Service) MarkReconcilingUsage(ctx context.Context, id, reason string, snapshot *billing.ResponseSnapshot, usage chatpricing.Usage) error {
-	if usage.PromptTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.PromptTokens || usage.CompletionTokens < 0 {
+	if !validUsage(usage) {
 		return ErrInvalid
 	}
 	return s.markReconciling(ctx, id, reason, snapshot, &usage)
 }
 func (s *Service) MarkStreamReconcilingUsage(ctx context.Context, id string, usage chatpricing.Usage, terminalDigest [32]byte) error {
-	if terminalDigest == ([32]byte{}) || usage.PromptTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.PromptTokens || usage.CompletionTokens < 0 {
+	if terminalDigest == ([32]byte{}) || !validUsage(usage) {
 		return ErrInvalid
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -482,7 +502,11 @@ func (s *Service) markReconciling(ctx context.Context, id, reason string, snapsh
 	if usage != nil {
 		prompt, cached, completion = usage.PromptTokens, usage.CachedInputTokens, usage.CompletionTokens
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,response_status,response_headers,response_body,response_body_sha256,prompt_tokens,cached_input_tokens,completion_tokens) VALUES($1,$2,$3,$4::text::jsonb,$5,$6,$7,$8,$9) ON CONFLICT(charge_id) DO NOTHING`, id, reason, status, headers, body, digest, prompt, cached, completion)
+	var tool, thoughts any
+	if usage != nil {
+		tool, thoughts = usage.ToolUsePromptTokens, usage.ThoughtsTokens
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO chat_charge_reconciliations(charge_id,reason,response_status,response_headers,response_body,response_body_sha256,prompt_tokens,cached_input_tokens,completion_tokens,tool_use_prompt_tokens,thoughts_tokens) VALUES($1,$2,$3,$4::text::jsonb,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(charge_id) DO NOTHING`, id, reason, status, headers, body, digest, prompt, cached, completion, tool, thoughts)
 	if err != nil {
 		return err
 	}
@@ -507,14 +531,14 @@ func (s *Service) snapshot(v billing.ResponseSnapshot) (billing.ResponseSnapshot
 	return c, h, sha256.Sum256(c.Body), nil
 }
 
-const chargeSelect = `SELECT c.id,c.operation,c.request_id,c.organization_id,c.project_id,c.api_key_id,c.model,c.channel_id,c.price_id,c.currency,c.reservation_id,c.state,c.idempotency_key,c.request_fingerprint,c.maximum_input_tokens,c.maximum_output_tokens,c.estimated_cost,c.reserved_sale,c.actual_cost,c.captured_sale,c.response_snapshot_version,c.response_status,c.response_headers,c.response_body,c.delivery_mode,c.stream_completed,p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.output_cost_per_million,p.output_sale_per_million FROM chat_request_charges c JOIN chat_token_prices p ON p.id=c.price_id`
+const chargeSelect = `SELECT c.id,c.protocol,c.operation,c.request_id,c.organization_id,c.project_id,c.api_key_id,c.model,c.channel_id,c.price_id,c.currency,c.reservation_id,c.state,c.idempotency_key,c.request_fingerprint,c.maximum_input_tokens,c.maximum_output_tokens,c.estimated_cost,c.reserved_sale,c.actual_cost,c.captured_sale,c.response_snapshot_version,c.response_status,c.response_headers,c.response_body,c.delivery_mode,c.stream_completed,p.input_cost_per_million,p.input_sale_per_million,p.cached_input_cost_per_million,p.cached_input_sale_per_million,p.output_cost_per_million,p.output_sale_per_million FROM chat_request_charges c JOIN chat_token_prices p ON p.id=c.price_id`
 
 func scan(row pgx.Row) (Charge, bool, error) {
 	var c Charge
 	var key *string
 	var fp, headers, body []byte
 	var status *int
-	err := row.Scan(&c.ID, &c.Operation, &c.RequestID, &c.OrganizationID, &c.ProjectID, &c.APIKeyID, &c.Model, &c.ChannelID, &c.PriceID, &c.Currency, &c.ReservationID, &c.State, &key, &fp, &c.MaximumInputTokens, &c.MaximumOutputTokens, &c.EstimatedCost, &c.ReservedSale, &c.ActualCost, &c.CapturedSale, &c.SnapshotVersion, &status, &headers, &body, &c.DeliveryMode, &c.StreamCompleted, &c.Rates.InputCost, &c.Rates.InputSale, &c.Rates.CachedInputCost, &c.Rates.CachedInputSale, &c.Rates.OutputCost, &c.Rates.OutputSale)
+	err := row.Scan(&c.ID, &c.Protocol, &c.Operation, &c.RequestID, &c.OrganizationID, &c.ProjectID, &c.APIKeyID, &c.Model, &c.ChannelID, &c.PriceID, &c.Currency, &c.ReservationID, &c.State, &key, &fp, &c.MaximumInputTokens, &c.MaximumOutputTokens, &c.EstimatedCost, &c.ReservedSale, &c.ActualCost, &c.CapturedSale, &c.SnapshotVersion, &status, &headers, &body, &c.DeliveryMode, &c.StreamCompleted, &c.Rates.InputCost, &c.Rates.InputSale, &c.Rates.CachedInputCost, &c.Rates.CachedInputSale, &c.Rates.OutputCost, &c.Rates.OutputSale)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Charge{}, false, nil
 	}
@@ -536,9 +560,9 @@ func scan(row pgx.Row) (Charge, bool, error) {
 }
 func loadForBegin(ctx context.Context, tx pgx.Tx, r BeginRequest) (Charge, bool, error) {
 	if r.IdempotencyKey != "" {
-		return scan(tx.QueryRow(ctx, chargeSelect+` WHERE c.organization_id=$1 AND c.idempotency_key=$2`, r.OrganizationID, r.IdempotencyKey))
+		return scan(tx.QueryRow(ctx, chargeSelect+` WHERE c.organization_id=$1 AND c.protocol=$2 AND c.operation=$3 AND c.idempotency_key=$4`, r.OrganizationID, r.Protocol, r.Operation, r.IdempotencyKey))
 	}
-	return scan(tx.QueryRow(ctx, chargeSelect+` WHERE c.organization_id=$1 AND c.request_id=$2`, r.OrganizationID, r.RequestID))
+	return scan(tx.QueryRow(ctx, chargeSelect+` WHERE c.organization_id=$1 AND c.protocol=$2 AND c.operation=$3 AND c.request_id=$4`, r.OrganizationID, r.Protocol, r.Operation, r.RequestID))
 }
 func loadID(ctx context.Context, tx pgx.Tx, id string, lock bool) (Charge, bool, error) {
 	q := chargeSelect + ` WHERE c.id=$1`
@@ -549,14 +573,14 @@ func loadID(ctx context.Context, tx pgx.Tx, id string, lock bool) (Charge, bool,
 }
 func validBegin(r BeginRequest) bool {
 	has := r.Fingerprint != ([32]byte{})
-	return (r.Operation == "chat.completions" || r.Operation == "responses.create") && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
+	return ((r.Protocol == "openai" && (r.Operation == "chat.completions" || r.Operation == "responses.create")) || (r.Protocol == "gemini" && r.Operation == "chat.completions" && r.DeliveryMode == "non_stream")) && validPrefixed(r.OrganizationID, "org_") && validPrefixed(r.ProjectID, "project_") && validPrefixed(r.APIKeyID, "key_") && r.RequestID != "" && len(r.RequestID) <= 128 && r.Model != "" && len(r.Model) <= 200 && strings.TrimSpace(r.Model) == r.Model && validID(r.ChannelID, "channel_") && r.MaximumInputTokens > 0 && r.MaximumOutputTokens > 0 && (r.DeliveryMode == "non_stream" || r.DeliveryMode == "stream") && ((r.IdempotencyKey == "" && !has) || (idempotency.Valid(r.IdempotencyKey) && has))
 }
 func sameRequest(c Charge, r BeginRequest) bool {
 	identity := c.RequestID == r.RequestID
 	if r.IdempotencyKey != "" {
 		identity = c.IdempotencyKey == r.IdempotencyKey && bytes.Equal(c.Fingerprint[:], r.Fingerprint[:])
 	}
-	return identity && c.Operation == r.Operation && c.OrganizationID == r.OrganizationID && c.ProjectID == r.ProjectID && c.APIKeyID == r.APIKeyID && c.Model == r.Model && c.ChannelID == r.ChannelID && c.MaximumInputTokens == r.MaximumInputTokens && c.MaximumOutputTokens == r.MaximumOutputTokens && c.DeliveryMode == r.DeliveryMode
+	return identity && c.Protocol == r.Protocol && c.Operation == r.Operation && c.OrganizationID == r.OrganizationID && c.ProjectID == r.ProjectID && c.APIKeyID == r.APIKeyID && c.Model == r.Model && c.ChannelID == r.ChannelID && c.MaximumInputTokens == r.MaximumInputTokens && c.MaximumOutputTokens == r.MaximumOutputTokens && c.DeliveryMode == r.DeliveryMode
 }
 func sameSnapshot(a, b billing.ResponseSnapshot) bool {
 	return a.Status == b.Status && bytes.Equal(a.Body, b.Body)
@@ -567,6 +591,9 @@ func validReason(v string) bool {
 		return true
 	}
 	return false
+}
+func validUsage(usage chatpricing.Usage) bool {
+	return usage.PromptTokens >= 0 && usage.CachedInputTokens >= 0 && usage.CachedInputTokens <= usage.PromptTokens && usage.CompletionTokens >= 0 && usage.ToolUsePromptTokens >= 0 && usage.ToolUsePromptTokens <= usage.PromptTokens && usage.ThoughtsTokens >= 0 && usage.ThoughtsTokens <= usage.CompletionTokens
 }
 func validStreamMetadata(side, category string) bool {
 	if side != "" && side != "client" && side != "provider" {
