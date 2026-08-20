@@ -235,7 +235,7 @@ client endpoint, 인증과 성공 wire 형식은 바뀌지 않는다. logical mo
 - migration `000042` fresh 적용, immutable route evidence와 original-route idempotency replay 통과
 - 12개 동시 동일 idempotency 요청에서 하나의 charge와 Wallet reservation만 생성됨
 - spend-cap으로 첫 candidate transaction이 rollback된 뒤 최종 candidate 하나만 영속 예약됨
-- 구현 PR 및 GitHub CI run은 PR 생성 후 기록한다.
+- 구현 PR: [#64](https://github.com/nativegatewayhq/gateway/pull/64); GitHub `check`와 `validate` 결과는 merge gate로 확인한다.
 
 ## Rollback 계획
 
