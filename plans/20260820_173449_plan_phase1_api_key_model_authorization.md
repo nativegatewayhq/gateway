@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-019
 title: Phase 1 API Key Model Authorization
-status: in_progress
+status: completed
 created_at: 2026-08-20T17:34:49+09:00
-updated_at: 2026-08-20T17:34:49+09:00
+updated_at: 2026-08-20T17:49:14+09:00
 owners:
   - gateway
 initiative: phase-1-api-key-authorization
@@ -173,22 +173,30 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] 기존 Key가 default-all로 동일하게 동작함
-- [ ] allowlist Key가 exact logical protocol/operation/model만 허용함
-- [ ] Key와 permission 생성이 원자적이고 삭제 cascade가 검증됨
-- [ ] generation/edit/Gemini denial이 native 403으로 반환됨
-- [ ] denial은 candidate, replay, Billing, Wallet/Ledger와 Provider effect가 없음
-- [ ] `/v1/models`가 현재 Key permission과 dispatch availability 교집합만 표시함
-- [ ] rate limit 후 authorization 순서와 denied token 소비가 고정됨
-- [ ] raw credential과 Provider model이 authorization 관측성에 노출되지 않음
-- [ ] 기존 idempotency/fallback/reconciliation 불변 조건이 유지됨
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] 기존 Key가 default-all로 동일하게 동작함
+- [x] allowlist Key가 exact logical protocol/operation/model만 허용함
+- [x] Key와 permission 생성이 원자적이고 삭제 cascade가 검증됨
+- [x] generation/edit/Gemini denial이 native 403으로 반환됨
+- [x] denial은 candidate, replay, Billing, Wallet/Ledger와 Provider effect가 없음
+- [x] `/v1/models`가 현재 Key permission과 dispatch availability 교집합만 표시함
+- [x] rate limit 후 authorization 순서와 denied token 소비가 고정됨
+- [x] raw credential과 Provider model이 authorization 관측성에 노출되지 않음
+- [x] 기존 idempotency/fallback/reconciliation 불변 조건이 유지됨
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현: `86fecee` (`feat: enforce API key model authorization`)
+- Pull Request: https://github.com/nativegatewayhq/gateway/pull/18
+- 로컬 검증: `make check` 통과
+- PostgreSQL·Redis 통합 검증: `make integration-test` 통과
+- migration/정책 검증: 기존 Key default-all, Key/permission 원자 생성, cascade, corrupt empty allowlist fail-closed 통과
+- protocol 검증: OpenAI generation/edit, Gemini 403와 `/v1/models` permission 교집합 통과
+- replay 검증: 성공 snapshot 생성 후 permission 철회 시 replay/Provider/금전 변경 없이 403 통과
+- GitHub Actions: `check` 및 `validate` 통과
+- Cloud handoff: control plane은 Provider-native 이름이 아닌 canonical logical protocol/operation/model을 전달하고 allowlist Key가 존재하면 구버전 Gateway로 rollback하지 않는다.
 
 ## Rollback 계획
 
