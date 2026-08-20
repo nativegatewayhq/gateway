@@ -20,6 +20,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/observability"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
@@ -79,7 +80,7 @@ func run(stdout, stderr io.Writer) int {
 		return 1
 	}
 	apiKeyAuthenticator = networkGuard
-	ready := pool.Ping
+	readinessChecks := []func(context.Context) error{pool.Ping}
 	var redisLimiter *ratelimit.RedisLimiter
 	if cfg.RateLimitMode == config.RateLimitRequired {
 		redisLimiter, err = ratelimit.NewRedis(cfg.RedisURL, cfg.RateLimitTimeout)
@@ -94,12 +95,26 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		apiKeyAuthenticator = guarded
-		ready = func(ctx context.Context) error {
-			if pingErr := pool.Ping(ctx); pingErr != nil {
-				return pingErr
-			}
-			return redisLimiter.Ping(ctx)
+		readinessChecks = append(readinessChecks, redisLimiter.Ping)
+	}
+	var healthGate providerhealth.Gate = providerhealth.NoopGate{}
+	if cfg.ProviderHealthMode == config.ProviderHealthRequired {
+		redisHealth, healthErr := providerhealth.NewRedis(cfg.RedisURL, cfg.ProviderHealth)
+		if healthErr != nil {
+			logger.Error("gateway provider health initialization failed")
+			return 1
 		}
+		defer redisHealth.Close()
+		healthGate = redisHealth
+		readinessChecks = append(readinessChecks, redisHealth.Ping)
+	}
+	ready := func(ctx context.Context) error {
+		for _, check := range readinessChecks {
+			if checkErr := check(ctx); checkErr != nil {
+				return checkErr
+			}
+		}
+		return nil
 	}
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
 	imageModels := imageoperation.DefaultRegistry()
@@ -137,13 +152,13 @@ func run(stdout, stderr io.Writer) int {
 	var openAIImagesHandler *openaiProtocol.Handler
 	var openAIImageEditsHandler *openaiProtocol.EditHandler
 	if chargeBilling == nil {
-		geminiHandler = gemini.NewHandler(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes)
-		openAIImagesHandler = openaiProtocol.NewImagesHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes)
-		openAIImageEditsHandler = openaiProtocol.NewEditHandler(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit)
+		geminiHandler = gemini.NewHandlerWithHealth(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes, healthGate)
+		openAIImagesHandler = openaiProtocol.NewImagesHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, healthGate)
+		openAIImageEditsHandler = openaiProtocol.NewEditHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, healthGate)
 	} else {
-		geminiHandler = gemini.NewBillableHandlerWithAvailability(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, providerCredentialRegistry)
-		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailability(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerCredentialRegistry)
-		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailability(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry)
+		geminiHandler = gemini.NewBillableHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
+		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
+		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry, healthGate)
 	}
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 	clientIPResolver, resolverErr := clientip.New(cfg.TrustedProxyPrefixes)

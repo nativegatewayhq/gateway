@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/clientip"
+	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 )
 
 const (
@@ -38,12 +39,15 @@ type LookupEnv func(string) (string, bool)
 
 type BillingMode string
 type RateLimitMode string
+type ProviderHealthMode string
 
 const (
-	BillingDisabled   BillingMode   = "disabled"
-	BillingRequired   BillingMode   = "required"
-	RateLimitDisabled RateLimitMode = "disabled"
-	RateLimitRequired RateLimitMode = "required"
+	BillingDisabled        BillingMode        = "disabled"
+	BillingRequired        BillingMode        = "required"
+	RateLimitDisabled      RateLimitMode      = "disabled"
+	RateLimitRequired      RateLimitMode      = "required"
+	ProviderHealthDisabled ProviderHealthMode = "disabled"
+	ProviderHealthRequired ProviderHealthMode = "required"
 )
 
 // Config contains non-provider process settings. Provider credentials remain
@@ -71,6 +75,8 @@ type Config struct {
 	RateLimitMode        RateLimitMode
 	RedisURL             string
 	RateLimitTimeout     time.Duration
+	ProviderHealthMode   ProviderHealthMode
+	ProviderHealth       providerhealth.Config
 	TrustedProxyPrefixes []netip.Prefix
 }
 
@@ -97,6 +103,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		ReconcileMaxAttempts: 5,
 		RateLimitMode:        RateLimitDisabled,
 		RateLimitTimeout:     defaultRateLimitTimeout,
+		ProviderHealthMode:   ProviderHealthDisabled,
+		ProviderHealth:       providerhealth.DefaultConfig(),
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -208,6 +216,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		}
 		cfg.RateLimitTimeout = duration
 	}
+	if err := loadProviderHealth(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
 	if value, ok := lookup("GATEWAY_TRUSTED_PROXY_CIDRS"); ok {
 		parts := strings.Split(value, ",")
 		if len(parts) > 128 {
@@ -237,6 +248,9 @@ func Load(lookup LookupEnv) (Config, error) {
 	if cfg.RateLimitMode == RateLimitRequired && cfg.RedisURL == "" {
 		return Config{}, fmt.Errorf("GATEWAY_REDIS_URL: must not be empty when rate limiting is required")
 	}
+	if cfg.ProviderHealthMode == ProviderHealthRequired && cfg.RedisURL == "" {
+		return Config{}, fmt.Errorf("GATEWAY_REDIS_URL: must not be empty when provider health is required")
+	}
 	if cfg.RedisURL != "" {
 		parsed, err := url.Parse(cfg.RedisURL)
 		if err != nil || (parsed.Scheme != "redis" && parsed.Scheme != "rediss") || parsed.Host == "" {
@@ -245,6 +259,62 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadProviderHealth(cfg *Config, lookup LookupEnv) error {
+	if value, ok := lookup("GATEWAY_PROVIDER_HEALTH_MODE"); ok {
+		switch ProviderHealthMode(strings.ToLower(strings.TrimSpace(value))) {
+		case ProviderHealthDisabled:
+			cfg.ProviderHealthMode = ProviderHealthDisabled
+		case ProviderHealthRequired:
+			cfg.ProviderHealthMode = ProviderHealthRequired
+		default:
+			return fmt.Errorf("GATEWAY_PROVIDER_HEALTH_MODE: must be disabled or required")
+		}
+	}
+	durations := []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"GATEWAY_PROVIDER_HEALTH_WINDOW", &cfg.ProviderHealth.Window},
+		{"GATEWAY_PROVIDER_HEALTH_BUCKET", &cfg.ProviderHealth.Bucket},
+		{"GATEWAY_PROVIDER_HEALTH_OPEN_DURATION", &cfg.ProviderHealth.OpenDuration},
+		{"GATEWAY_PROVIDER_HEALTH_MAXIMUM_OPEN_DURATION", &cfg.ProviderHealth.MaximumOpenDuration},
+		{"GATEWAY_PROVIDER_HEALTH_PROBE_LEASE", &cfg.ProviderHealth.ProbeLease},
+		{"GATEWAY_PROVIDER_HEALTH_COMMAND_TIMEOUT", &cfg.ProviderHealth.CommandTimeout},
+	}
+	for _, setting := range durations {
+		if value, ok := lookup(setting.key); ok {
+			duration, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded duration", setting.key)
+			}
+			*setting.target = duration
+		}
+	}
+	integers := []struct {
+		key    string
+		target *int64
+	}{
+		{"GATEWAY_PROVIDER_HEALTH_MINIMUM_SAMPLES", &cfg.ProviderHealth.MinimumSamples},
+		{"GATEWAY_PROVIDER_HEALTH_FAILURE_THRESHOLD_BPS", &cfg.ProviderHealth.FailureThresholdBPS},
+	}
+	for _, setting := range integers {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded integer", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	if value, ok := lookup("GATEWAY_PROVIDER_HEALTH_KEY_PREFIX"); ok {
+		cfg.ProviderHealth.KeyPrefix = strings.TrimSpace(value)
+	}
+	if !cfg.ProviderHealth.Valid() {
+		return fmt.Errorf("GATEWAY_PROVIDER_HEALTH_*: settings are outside allowed bounds")
+	}
+	return nil
 }
 
 func loadReconciliation(cfg *Config, lookup LookupEnv) error {

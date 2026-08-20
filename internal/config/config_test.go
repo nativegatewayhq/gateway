@@ -52,35 +52,48 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RateLimitMode != RateLimitDisabled || cfg.RedisURL != "" || cfg.RateLimitTimeout != 100*time.Millisecond {
 		t.Errorf("rate limit config = %+v", cfg)
 	}
+	if cfg.ProviderHealthMode != ProviderHealthDisabled || !cfg.ProviderHealth.Valid() || cfg.ProviderHealth.Window != time.Minute || cfg.ProviderHealth.FailureThresholdBPS != 5_000 {
+		t.Errorf("provider health config = %+v", cfg)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]string{
-		"GATEWAY_HTTP_ADDR":                            "127.0.0.1:9090",
-		"GATEWAY_LOG_LEVEL":                            "debug",
-		"GATEWAY_SHUTDOWN_TIMEOUT":                     "3s",
-		"GATEWAY_DATABASE_URL":                         "postgres://gateway:test@localhost/gateway",
-		"GATEWAY_GOOGLE_REQUEST_TIMEOUT":               "90s",
-		"GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES":        "1048576",
-		"GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT":        "80s",
-		"GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES": "524288",
-		"GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES":   "33554432",
-		"GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS":     "4",
-		"GATEWAY_BILLING_MODE":                         "required",
-		"GATEWAY_MINIMUM_MARGIN_BPS":                   "1250",
-		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":       "16777216",
-		"GATEWAY_RECONCILIATION_INTERVAL":              "2s",
-		"GATEWAY_RECONCILIATION_LEASE":                 "20s",
-		"GATEWAY_RECONCILIATION_BASE_BACKOFF":          "3s",
-		"GATEWAY_RECONCILIATION_MAX_BACKOFF":           "30m",
-		"GATEWAY_RECONCILIATION_BATCH_SIZE":            "20",
-		"GATEWAY_RECONCILIATION_MAX_ATTEMPTS":          "7",
-		"GATEWAY_RATE_LIMIT_MODE":                      "required",
-		"GATEWAY_REDIS_URL":                            "rediss://user:secret@redis.example:6380/1",
-		"GATEWAY_RATE_LIMIT_TIMEOUT":                   "250ms",
-		"GATEWAY_TRUSTED_PROXY_CIDRS":                  "10.0.0.8/8, 2001:db8::1/32",
+		"GATEWAY_HTTP_ADDR":                             "127.0.0.1:9090",
+		"GATEWAY_LOG_LEVEL":                             "debug",
+		"GATEWAY_SHUTDOWN_TIMEOUT":                      "3s",
+		"GATEWAY_DATABASE_URL":                          "postgres://gateway:test@localhost/gateway",
+		"GATEWAY_GOOGLE_REQUEST_TIMEOUT":                "90s",
+		"GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES":         "1048576",
+		"GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT":         "80s",
+		"GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES":  "524288",
+		"GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES":    "33554432",
+		"GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS":      "4",
+		"GATEWAY_BILLING_MODE":                          "required",
+		"GATEWAY_MINIMUM_MARGIN_BPS":                    "1250",
+		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":        "16777216",
+		"GATEWAY_RECONCILIATION_INTERVAL":               "2s",
+		"GATEWAY_RECONCILIATION_LEASE":                  "20s",
+		"GATEWAY_RECONCILIATION_BASE_BACKOFF":           "3s",
+		"GATEWAY_RECONCILIATION_MAX_BACKOFF":            "30m",
+		"GATEWAY_RECONCILIATION_BATCH_SIZE":             "20",
+		"GATEWAY_RECONCILIATION_MAX_ATTEMPTS":           "7",
+		"GATEWAY_RATE_LIMIT_MODE":                       "required",
+		"GATEWAY_REDIS_URL":                             "rediss://user:secret@redis.example:6380/1",
+		"GATEWAY_RATE_LIMIT_TIMEOUT":                    "250ms",
+		"GATEWAY_PROVIDER_HEALTH_MODE":                  "required",
+		"GATEWAY_PROVIDER_HEALTH_WINDOW":                "2m",
+		"GATEWAY_PROVIDER_HEALTH_BUCKET":                "5s",
+		"GATEWAY_PROVIDER_HEALTH_MINIMUM_SAMPLES":       "20",
+		"GATEWAY_PROVIDER_HEALTH_FAILURE_THRESHOLD_BPS": "6000",
+		"GATEWAY_PROVIDER_HEALTH_OPEN_DURATION":         "20s",
+		"GATEWAY_PROVIDER_HEALTH_MAXIMUM_OPEN_DURATION": "2m",
+		"GATEWAY_PROVIDER_HEALTH_PROBE_LEASE":           "5s",
+		"GATEWAY_PROVIDER_HEALTH_COMMAND_TIMEOUT":       "300ms",
+		"GATEWAY_PROVIDER_HEALTH_KEY_PREFIX":            "gateway:test:health",
+		"GATEWAY_TRUSTED_PROXY_CIDRS":                   "10.0.0.8/8, 2001:db8::1/32",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -118,6 +131,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.RateLimitMode != RateLimitRequired || cfg.RedisURL != values["GATEWAY_REDIS_URL"] || cfg.RateLimitTimeout != 250*time.Millisecond {
 		t.Errorf("rate limit overrides=%+v", cfg)
+	}
+	if cfg.ProviderHealthMode != ProviderHealthRequired || cfg.ProviderHealth.Window != 2*time.Minute || cfg.ProviderHealth.Bucket != 5*time.Second || cfg.ProviderHealth.MinimumSamples != 20 || cfg.ProviderHealth.FailureThresholdBPS != 6_000 || cfg.ProviderHealth.OpenDuration != 20*time.Second || cfg.ProviderHealth.MaximumOpenDuration != 2*time.Minute || cfg.ProviderHealth.ProbeLease != 5*time.Second || cfg.ProviderHealth.CommandTimeout != 300*time.Millisecond || cfg.ProviderHealth.KeyPrefix != "gateway:test:health" {
+		t.Errorf("provider health overrides=%+v", cfg.ProviderHealth)
 	}
 	if len(cfg.TrustedProxyPrefixes) != 2 || cfg.TrustedProxyPrefixes[0].String() != "10.0.0.0/8" || cfg.TrustedProxyPrefixes[1].String() != "2001:db8::/32" {
 		t.Errorf("trusted proxies=%v", cfg.TrustedProxyPrefixes)
@@ -194,6 +210,10 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "invalid rate limit mode", key: "GATEWAY_RATE_LIMIT_MODE", value: "secret-mode", marker: "secret-mode"},
 		{name: "invalid Redis URL", key: "GATEWAY_REDIS_URL", value: "http://secret-password", marker: "secret-password"},
 		{name: "invalid rate limit timeout", key: "GATEWAY_RATE_LIMIT_TIMEOUT", value: "secret-timeout", marker: "secret-timeout"},
+		{name: "invalid provider health mode", key: "GATEWAY_PROVIDER_HEALTH_MODE", value: "secret-health-mode", marker: "secret-health-mode"},
+		{name: "invalid provider health duration", key: "GATEWAY_PROVIDER_HEALTH_WINDOW", value: "secret-health-duration", marker: "secret-health-duration"},
+		{name: "invalid provider health integer", key: "GATEWAY_PROVIDER_HEALTH_MINIMUM_SAMPLES", value: "secret-health-count", marker: "secret-health-count"},
+		{name: "invalid provider health prefix", key: "GATEWAY_PROVIDER_HEALTH_KEY_PREFIX", value: "secret health prefix", marker: "secret health prefix"},
 	}
 
 	for _, tt := range tests {
@@ -223,6 +243,21 @@ func TestRateLimitRequiredNeedsRedisURL(t *testing.T) {
 		case "GATEWAY_DATABASE_URL":
 			return "postgres://gateway:test@localhost/gateway", true
 		case "GATEWAY_RATE_LIMIT_MODE":
+			return "required", true
+		}
+		return "", false
+	})
+	if err == nil || !strings.Contains(err.Error(), "GATEWAY_REDIS_URL") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestProviderHealthRequiredNeedsRedisURL(t *testing.T) {
+	_, err := Load(func(key string) (string, bool) {
+		switch key {
+		case "GATEWAY_DATABASE_URL":
+			return "postgres://gateway:test@localhost/gateway", true
+		case "GATEWAY_PROVIDER_HEALTH_MODE":
 			return "required", true
 		}
 		return "", false
