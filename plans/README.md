@@ -156,6 +156,7 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-014` | completed | [Phase 1 Gemini Image Billing and Idempotency](./20260820_161342_plan_phase1_gemini_image_billing_idempotency.md) | `phase-1-gemini-image-billing` |
 | `gateway-20260820-015` | completed | [Allow Gemini Protocol in Image Charge Schema](./20260820_162516_change_allow_gemini_image_charge_protocol.md) | `phase-1-gemini-image-billing` |
 | `gateway-20260820-016` | completed | [Phase 1 Provider Channel Candidates and Priority Routing](./20260820_163602_plan_phase1_provider_channel_priority_routing.md) | `phase-1-provider-routing` |
-| `gateway-20260820-017` | in_progress | [Phase 1 Pre-dispatch Candidate Fallback](./20260820_165240_plan_phase1_predispatch_candidate_fallback.md) | `phase-1-provider-routing` |
+| `gateway-20260820-017` | completed | [Phase 1 Pre-dispatch Candidate Fallback](./20260820_165240_plan_phase1_predispatch_candidate_fallback.md) | `phase-1-provider-routing` |
+| `gateway-20260820-018` | completed | [Phase 1 API Key Distributed Rate Limiting](./20260820_171128_plan_phase1_api_key_distributed_rate_limiting.md) | `phase-1-api-key-rate-limiting` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

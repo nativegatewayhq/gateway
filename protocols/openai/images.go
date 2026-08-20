@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
@@ -386,6 +388,18 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 	}
 	principal, err := handler.authenticator.Authenticate(request.Context(), raw)
 	if err != nil {
+		var limited *ratelimit.LimitError
+		if errors.As(err, &limited) {
+			handler.logger.Info("API key request rate limited", "request_id", requestid.FromContext(request.Context()), "api_key_id", limited.APIKeyID, "project_id", limited.ProjectID, "outcome", "limited", "retry_after_ms", limited.Decision.RetryAfter.Milliseconds())
+			writeRateLimitHeaders(writer, limited.Decision)
+			writeError(writer, http.StatusTooManyRequests, "rate_limit_error", "rate_limit_exceeded", "rate limit exceeded")
+			return apikey.Principal{}, false
+		}
+		if errors.Is(err, ratelimit.ErrUnavailable) {
+			handler.logger.Warn("API key rate limiter unavailable", "request_id", requestid.FromContext(request.Context()), "outcome", "unavailable")
+			writeError(writer, http.StatusServiceUnavailable, "server_error", "rate_limit_unavailable", "rate limit service unavailable")
+			return apikey.Principal{}, false
+		}
 		if errors.Is(err, apikey.ErrUnavailable) {
 			writeError(writer, http.StatusServiceUnavailable, "server_error", "authentication_unavailable", "authentication service unavailable")
 			return apikey.Principal{}, false
@@ -393,7 +407,24 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusUnauthorized, "invalid_request_error", "authentication_required", "authentication required")
 		return apikey.Principal{}, false
 	}
+	if principal.RateLimitState != nil {
+		writer.Header().Set("X-RateLimit-Limit", strconv.FormatInt(principal.RateLimitState.Limit, 10))
+		writer.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(principal.RateLimitState.Remaining, 10))
+		writer.Header().Set("X-RateLimit-Reset", strconv.FormatInt(principal.RateLimitState.ResetAt.Unix(), 10))
+		handler.logger.Debug("API key request rate allowed", "request_id", requestid.FromContext(request.Context()), "api_key_id", principal.APIKeyID, "project_id", principal.ProjectID, "outcome", "allowed")
+	}
 	return principal, true
+}
+
+func writeRateLimitHeaders(writer http.ResponseWriter, decision ratelimit.Decision) {
+	retrySeconds := int64((decision.RetryAfter + time.Second - 1) / time.Second)
+	if retrySeconds < 1 {
+		retrySeconds = 1
+	}
+	writer.Header().Set("Retry-After", strconv.FormatInt(retrySeconds, 10))
+	writer.Header().Set("X-RateLimit-Limit", strconv.FormatInt(decision.Limit, 10))
+	writer.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(decision.Remaining, 10))
+	writer.Header().Set("X-RateLimit-Reset", strconv.FormatInt(decision.ResetAt.Unix(), 10))
 }
 
 func (handler *Handler) complete(ctx context.Context, chargeID string, success bool, snapshot billing.ResponseSnapshot) (billing.Charge, error) {

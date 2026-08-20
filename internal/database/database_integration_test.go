@@ -57,6 +57,13 @@ func TestMigrateIsRepeatable(t *testing.T) {
 	if nullable != "NO" {
 		t.Fatalf("service_api_keys.project_id nullable=%s", nullable)
 	}
+	var rateLimitConstraint string
+	if err := pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='service_api_keys'::regclass AND conname='service_api_keys_rate_limit_policy_check'`).Scan(&rateLimitConstraint); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rateLimitConstraint, "requests_per_minute") || !strings.Contains(rateLimitConstraint, "burst") {
+		t.Fatalf("rate limit constraint=%s", rateLimitConstraint)
+	}
 	var protocolConstraint string
 	if err := pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='image_request_charges'::regclass AND conname='image_request_charges_protocol_check'`).Scan(&protocolConstraint); err != nil {
 		t.Fatal(err)

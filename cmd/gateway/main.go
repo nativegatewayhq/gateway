@@ -17,6 +17,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/observability"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
@@ -55,7 +56,29 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway database migration failed")
 		return 1
 	}
-	apiKeyAuthenticator := apikey.NewService(apikey.NewPostgresStore(pool))
+	var apiKeyAuthenticator gemini.Authenticator = apikey.NewService(apikey.NewPostgresStore(pool))
+	ready := pool.Ping
+	var redisLimiter *ratelimit.RedisLimiter
+	if cfg.RateLimitMode == config.RateLimitRequired {
+		redisLimiter, err = ratelimit.NewRedis(cfg.RedisURL, cfg.RateLimitTimeout)
+		if err != nil {
+			logger.Error("gateway rate limiter initialization failed")
+			return 1
+		}
+		defer redisLimiter.Close()
+		guarded, guardErr := ratelimit.NewGuardedAuthenticator(apiKeyAuthenticator, redisLimiter)
+		if guardErr != nil {
+			logger.Error("gateway rate limiter initialization failed")
+			return 1
+		}
+		apiKeyAuthenticator = guarded
+		ready = func(ctx context.Context) error {
+			if pingErr := pool.Ping(ctx); pingErr != nil {
+				return pingErr
+			}
+			return redisLimiter.Ping(ctx)
+		}
+	}
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
 	imageModels := imageoperation.DefaultRegistry()
 	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
@@ -115,7 +138,7 @@ func run(stdout, stderr io.Writer) int {
 		close(workerDone)
 	}
 	err = app.Run(ctx, cfg, logger, app.Dependencies{
-		Ready:               pool.Ping,
+		Ready:               ready,
 		ProviderCredentials: providerCredentialRegistry,
 		Gemini:              geminiHandler,
 		OpenAIImages:        openAIImagesHandler,

@@ -28,7 +28,7 @@ func TestPostgresStoreLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewPostgresStore(pool)
-	record, raw, err := Generate(bytes.NewReader(bytes.Repeat([]byte{9}, randomKeyBytes+16)), "integration", nil)
+	record, raw, err := GenerateForProjectWithPolicy(bytes.NewReader(bytes.Repeat([]byte{9}, randomKeyBytes+16)), "integration", "project_legacy", nil, RateLimitPolicy{RequestsPerMinute: 60, Burst: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestPostgresStoreLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	principal, err := NewService(store).Authenticate(ctx, raw)
-	if err != nil || principal.APIKeyID != record.ID || principal.ProjectID != "project_legacy" || principal.OrganizationID != "org_legacy" {
+	if err != nil || principal.APIKeyID != record.ID || principal.ProjectID != "project_legacy" || principal.OrganizationID != "org_legacy" || principal.RateLimit.RequestsPerMinute != 60 || principal.RateLimit.Burst != 5 {
 		t.Fatalf("Authenticate()=%+v, %v", principal, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE service_api_keys SET status='disabled' WHERE id=$1`, record.ID); err != nil {

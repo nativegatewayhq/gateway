@@ -9,12 +9,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
@@ -208,6 +210,20 @@ func TestBillableImagesAllCandidatesUnavailableHasNoFinancialOrProviderEffect(t 
 	}, 1024, fake, availability{})
 	response := billableImageRequest(handler, `{"model":"logical-image","prompt":"secret"}`)
 	if response.Code != 503 || providerCalls != 0 || len(fake.events) != 0 || len(fake.beginChannels) != 0 {
+		t.Fatalf("response=%d providers=%d events=%v begin=%v", response.Code, providerCalls, fake.events, fake.beginChannels)
+	}
+}
+
+func TestBillableImagesRateLimitHasNoBillingOrProviderEffect(t *testing.T) {
+	fake := &billingFake{}
+	providerCalls := 0
+	handler := NewBillableImagesHandler(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) {
+		return apikey.Principal{}, &ratelimit.LimitError{Decision: ratelimit.Decision{Limit: 60, RetryAfter: time.Second, ResetAt: time.Unix(2_000_000_000, 0)}}
+	}), testRegistry(t), map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) { providerCalls++; return nil, nil }),
+	}, 1024, fake)
+	response := requestImages(handler, http.MethodPost, `{"model":"gpt-image-1"}`, "Authorization", "Bearer service-secret")
+	if response.Code != 429 || providerCalls != 0 || len(fake.events) != 0 || len(fake.beginChannels) != 0 {
 		t.Fatalf("response=%d providers=%d events=%v begin=%v", response.Code, providerCalls, fake.events, fake.beginChannels)
 	}
 }

@@ -13,8 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
@@ -38,6 +41,20 @@ func multipartEdit(t *testing.T, model string) ([]byte, string) {
 		t.Fatal(err)
 	}
 	return buffer.Bytes(), writer.FormDataContentType()
+}
+
+func TestEditHandlerRateLimitStopsBeforeMultipartSpool(t *testing.T) {
+	handler := NewEditHandler(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) {
+		return apikey.Principal{}, &ratelimit.LimitError{Decision: ratelimit.Decision{Limit: 10, RetryAfter: time.Second, ResetAt: time.Unix(2_000_000_000, 0)}}
+	}), testRegistry(t), nil, 1024, 1)
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", panicReader{})
+	request.Header.Set("Authorization", "Bearer service-secret")
+	request.Header.Set("Content-Type", "multipart/form-data; boundary=secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 429 || response.Header().Get("X-RateLimit-Limit") != "10" {
+		t.Fatalf("response=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
 }
 
 func TestEditHandlerPreservesOpenAIMultipartAndCleansSpool(t *testing.T) {

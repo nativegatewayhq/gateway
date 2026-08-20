@@ -16,7 +16,8 @@ test:
 
 integration-test:
 	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi
-	TEST_DATABASE_URL="$$TEST_DATABASE_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./internal/billing ./internal/ledger ./internal/pricing ./internal/reconciliation ./protocols/gemini ./protocols/openai ./providers/google ./providers/openai ./providers/xai ./cmd/gateway-key ./cmd/gateway
+	@if [ -z "$$TEST_REDIS_URL" ]; then echo "TEST_REDIS_URL is required"; exit 1; fi
+	TEST_DATABASE_URL="$$TEST_DATABASE_URL" TEST_REDIS_URL="$$TEST_REDIS_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./internal/billing ./internal/ledger ./internal/pricing ./internal/ratelimit ./internal/reconciliation ./protocols/gemini ./protocols/openai ./providers/google ./providers/openai ./providers/xai ./cmd/gateway-key ./cmd/gateway
 
 vet:
 	go vet ./...
