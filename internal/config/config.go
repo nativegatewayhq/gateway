@@ -21,6 +21,7 @@ const (
 	maxImagesTimeout           = 10 * time.Minute
 	defaultImagesBodyBytes     = int64(1024 * 1024)
 	defaultImageEditsBodyBytes = int64(64 * 1024 * 1024)
+	defaultReplayBodyBytes     = int64(32 * 1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -48,6 +49,7 @@ type Config struct {
 	ImageEditSpoolLimit int
 	BillingMode         BillingMode
 	MinimumMarginBPS    int64
+	ReplayBodyBytes     int64
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -64,6 +66,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ImageEditsBodyBytes: defaultImageEditsBodyBytes,
 		ImageEditSpoolLimit: 8,
 		BillingMode:         BillingDisabled,
+		ReplayBodyBytes:     defaultReplayBodyBytes,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -144,6 +147,13 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_MINIMUM_MARGIN_BPS: must be an integer between 0 and 10000")
 		}
 		cfg.MinimumMarginBPS = margin
+	}
+	if value, ok := lookup("GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES"); ok {
+		limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || limit < 1 || limit > 256*1024*1024 {
+			return Config{}, fmt.Errorf("GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES: must be an integer between 1 and 268435456")
+		}
+		cfg.ReplayBodyBytes = limit
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {

@@ -43,6 +43,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.BillingMode != BillingDisabled || cfg.MinimumMarginBPS != 0 {
 		t.Errorf("Billing config = %q, %d", cfg.BillingMode, cfg.MinimumMarginBPS)
 	}
+	if cfg.ReplayBodyBytes != 32*1024*1024 {
+		t.Errorf("ReplayBodyBytes = %d", cfg.ReplayBodyBytes)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -61,6 +64,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS":     "4",
 		"GATEWAY_BILLING_MODE":                         "required",
 		"GATEWAY_MINIMUM_MARGIN_BPS":                   "1250",
+		"GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES":       "16777216",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -89,6 +93,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.BillingMode != BillingRequired || cfg.MinimumMarginBPS != 1250 {
 		t.Errorf("Billing config = %q, %d", cfg.BillingMode, cfg.MinimumMarginBPS)
+	}
+	if cfg.ReplayBodyBytes != 16777216 {
+		t.Errorf("ReplayBodyBytes = %d", cfg.ReplayBodyBytes)
 	}
 }
 
@@ -122,6 +129,8 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "invalid billing mode", key: "GATEWAY_BILLING_MODE", value: "secret-mode", marker: "secret-mode"},
 		{name: "invalid margin", key: "GATEWAY_MINIMUM_MARGIN_BPS", value: "secret-margin", marker: "secret-margin"},
 		{name: "excessive margin", key: "GATEWAY_MINIMUM_MARGIN_BPS", value: "10001", marker: ""},
+		{name: "invalid replay limit", key: "GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES", value: "secret-size", marker: "secret-size"},
+		{name: "excessive replay limit", key: "GATEWAY_IDEMPOTENCY_MAX_RESPONSE_BYTES", value: "268435457", marker: ""},
 	}
 
 	for _, tt := range tests {
