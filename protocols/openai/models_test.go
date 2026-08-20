@@ -11,6 +11,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 )
 
 type availability []providercredentials.ProviderID
@@ -49,6 +50,25 @@ func TestModelsHandlerReturnsEmptyListWithoutProviderCredentials(t *testing.T) {
 	response := modelsRequest(handler, http.MethodGet, true)
 	if response.Code != 200 || response.Body.String() != "{\"object\":\"list\",\"data\":[]}\n" {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestModelsHandlerListsLogicalModelOnceForMultipleCandidates(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 20},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 10},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewModelsHandler(slog.Default(), acceptingAuth(t), registry, availability{providercredentials.OpenAI, providercredentials.XAI})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "logical-image" {
+		t.Fatalf("response=%d list=%+v", response.Code, list)
 	}
 }
 

@@ -45,11 +45,12 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	started := time.Now()
 	provider := providercredentials.ProviderID("")
 	logModel := "invalid"
+	candidateID, channelID, routingPolicy := "", "", ""
 	defer func() {
 		if recover() != nil && !tracked.wroteHeader {
 			writeError(tracked, 500, "server_error", "internal_error", "internal server error")
 		}
-		handler.common.logger.Info("openai image edit request completed", "request_id", requestid.FromContext(request.Context()), "protocol", "openai", "operation", "image.edit", "provider", string(provider), "model", logModel, "status", tracked.statusCode(), "duration", time.Since(started))
+		handler.common.logger.Info("openai image edit request completed", "request_id", requestid.FromContext(request.Context()), "protocol", "openai", "operation", "image.edit", "provider", string(provider), "candidate_id", candidateID, "channel_id", channelID, "routing_policy", routingPolicy, "model", logModel, "status", tracked.statusCode(), "duration", time.Since(started))
 	}()
 	if request.Method != http.MethodPost {
 		tracked.Header().Set("Allow", http.MethodPost)
@@ -81,7 +82,7 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 			selector, modelErr = imageoperation.ParseOpenAIJSONPricingSelector(body)
 			model = selector.Model
 		}
-		var route imageoperation.ModelRoute
+		var route imageoperation.RoutingDecision
 		routed := false
 		if modelErr == nil {
 			route, routed = handler.routeModel(tracked, model, imageoperation.JSON, &provider, &logModel)
@@ -92,6 +93,12 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 			}
 			return
 		}
+		candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
+		outboundBody, rewriteErr := imageoperation.RewriteJSONModel(body, route.ProviderModel)
+		if rewriteErr != nil {
+			writeError(tracked, 400, "invalid_request_error", "invalid_model", "request must contain one model")
+			return
+		}
 		var begin *billing.BeginRequest
 		if handler.common.billing != nil {
 			idempotencyKey, keyErr := idempotency.Extract(request.Header)
@@ -100,13 +107,15 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 				return
 			}
 			var fingerprint [32]byte
+			var legacyFingerprint [32]byte
 			if idempotencyKey != "" {
-				fingerprint = idempotency.Fingerprint("openai", string(imageoperation.Edit), selector.Model, route.ChannelID, mediaType, body)
+				fingerprint = idempotency.Fingerprint("openai", string(imageoperation.Edit), selector.Model, "logical-route-v1", mediaType, body)
+				legacyFingerprint = idempotency.Fingerprint("openai", string(imageoperation.Edit), selector.Model, route.ChannelID, mediaType, body)
 			}
-			value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint}
+			value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprint: legacyFingerprint}
 			begin = &value
 		}
-		handler.execute(tracked, request, route, begin, request.Header.Get("Content-Type"), int64(len(body)), bytes.NewReader(body))
+		handler.execute(tracked, request, route, begin, request.Header.Get("Content-Type"), int64(len(outboundBody)), bytes.NewReader(outboundBody))
 		return
 	}
 	boundary := parameters["boundary"]
@@ -146,7 +155,7 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 			model = selector.Model
 		}
 	}
-	var route imageoperation.ModelRoute
+	var route imageoperation.RoutingDecision
 	routed := false
 	if err == nil {
 		route, routed = handler.routeModel(tracked, model, imageoperation.Multipart, &provider, &logModel)
@@ -155,6 +164,28 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		if err != nil {
 			writeError(tracked, 400, "invalid_request_error", "invalid_model", "request must contain one model")
 		}
+		return
+	}
+	candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(tracked, 500, "server_error", "internal_error", "internal server error")
+		return
+	}
+	providerFile, err := os.CreateTemp(handler.tempDir, "gateway-image-edit-routed-*")
+	if err != nil {
+		writeError(tracked, 503, "server_error", "spool_unavailable", "edit capacity unavailable")
+		return
+	}
+	providerName := providerFile.Name()
+	defer os.Remove(providerName)
+	defer providerFile.Close()
+	providerWritten, err := imageoperation.RewriteMultipartModel(file, boundary, route.ProviderModel, providerFile)
+	if err != nil || providerWritten > handler.maxBodyBytes {
+		writeError(tracked, 400, "invalid_request_error", "invalid_model", "request must contain one model")
+		return
+	}
+	if _, err := providerFile.Seek(0, io.SeekStart); err != nil {
+		writeError(tracked, 500, "server_error", "internal_error", "internal server error")
 		return
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
@@ -169,8 +200,18 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 			return
 		}
 		var fingerprint [32]byte
+		var legacyFingerprint [32]byte
 		if idempotencyKey != "" {
-			fingerprint, err = idempotency.FingerprintReader("openai", string(imageoperation.Edit), selector.Model, route.ChannelID, mediaType, file, written)
+			fingerprint, err = idempotency.FingerprintReader("openai", string(imageoperation.Edit), selector.Model, "logical-route-v1", mediaType, file, written)
+			if err != nil {
+				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
+				return
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
+				return
+			}
+			legacyFingerprint, err = idempotency.FingerprintReader("openai", string(imageoperation.Edit), selector.Model, route.ChannelID, mediaType, file, written)
 			if err != nil {
 				writeError(tracked, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
 				return
@@ -180,13 +221,15 @@ func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 				return
 			}
 		}
-		value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint}
+		value := billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Edit), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprint: legacyFingerprint}
 		begin = &value
 	}
-	handler.execute(tracked, request, route, begin, request.Header.Get("Content-Type"), written, file)
+	_ = file.Close()
+	_ = os.Remove(name)
+	handler.execute(tracked, request, route, begin, request.Header.Get("Content-Type"), providerWritten, providerFile)
 }
 
-func (handler *EditHandler) routeModel(writer http.ResponseWriter, model string, media imageoperation.MediaType, provider *providercredentials.ProviderID, logModel *string) (imageoperation.ModelRoute, bool) {
+func (handler *EditHandler) routeModel(writer http.ResponseWriter, model string, media imageoperation.MediaType, provider *providercredentials.ProviderID, logModel *string) (imageoperation.RoutingDecision, bool) {
 	route, err := handler.common.models.Resolve(model, imageoperation.Edit, media)
 	if err != nil {
 		if errors.Is(err, imageoperation.ErrModelNotFound) {
@@ -194,13 +237,13 @@ func (handler *EditHandler) routeModel(writer http.ResponseWriter, model string,
 		} else {
 			writeError(writer, 400, "invalid_request_error", "unsupported_media_type_for_model", "content type is not supported for model")
 		}
-		return imageoperation.ModelRoute{}, false
+		return imageoperation.RoutingDecision{}, false
 	}
 	*provider, *logModel = route.Provider, model
 	return route, true
 }
 
-func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Request, route imageoperation.ModelRoute, begin *billing.BeginRequest, contentType string, length int64, body io.Reader) {
+func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Request, route imageoperation.RoutingDecision, begin *billing.BeginRequest, contentType string, length int64, body io.Reader) {
 	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
@@ -212,10 +255,6 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 		}
 	}()
 	executor := handler.common.executors[route.Provider]
-	if executor == nil {
-		writeError(writer, 503, "server_error", "provider_unavailable", "provider unavailable")
-		return
-	}
 	if begin != nil {
 		started, err := handler.common.billing.Begin(request.Context(), *begin)
 		if err != nil {
@@ -227,6 +266,10 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 			handler.common.writeSnapshot(writer, charge.Response, true)
 			return
 		}
+	}
+	if executor == nil {
+		writeError(writer, 503, "server_error", "provider_unavailable", "provider unavailable")
+		return
 	}
 	response, err := executor.Generate(request.Context(), openaiimages.Request{Operation: openaiimages.Edit, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
 	if err != nil {

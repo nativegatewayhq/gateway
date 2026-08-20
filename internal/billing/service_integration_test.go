@@ -205,6 +205,11 @@ func TestIdempotencyReplayConflictAndSafeSnapshot(t *testing.T) {
 	if !replayed.Replay || replayed.ID != charge.ID || replayed.Response.Status != 201 || string(replayed.Response.Body) != `{"native":"response"}` || replayed.Response.Headers["Retry-After"][0] != "2" {
 		t.Fatalf("replay=%+v", replayed)
 	}
+	routedRetry := retryRequest
+	routedRetry.ChannelID = "channel_00000000000000000000000000000002"
+	if routed, err := restarted.Begin(ctx, routedRetry); err != nil || !routed.Replay || routed.ID != charge.ID {
+		t.Fatalf("route-independent replay=%+v error=%v", routed, err)
+	}
 	conflict := retryRequest
 	conflict.RequestFingerprint = [32]byte{9}
 	if _, err := service.Begin(ctx, conflict); !errors.Is(err, ErrRequestConflict) {

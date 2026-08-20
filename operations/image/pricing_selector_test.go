@@ -3,6 +3,7 @@ package image
 import (
 	"bytes"
 	"errors"
+	"io"
 	"mime/multipart"
 	"testing"
 )
@@ -33,6 +34,18 @@ func TestParseOpenAIJSONPricingSelectorRejectsAmbiguity(t *testing.T) {
 		if _, err := ParseOpenAIJSONPricingSelector([]byte(body)); !errors.Is(err, ErrInvalidPricingSelector) {
 			t.Fatalf("body=%q error=%v", body, err)
 		}
+	}
+}
+
+func TestRewriteJSONModelPreservesOtherWireValues(t *testing.T) {
+	body := []byte(" {\n \"prompt\" : \"secret\", \"number\":1.00, \"model\" : \"logical-model\", \"unknown\" : {\"x\":true} } ")
+	rewritten, err := RewriteJSONModel(body, "provider-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := " {\n \"prompt\" : \"secret\", \"number\":1.00, \"model\" : \"provider-model\", \"unknown\" : {\"x\":true} } "
+	if string(rewritten) != want {
+		t.Fatalf("rewrite=%q", rewritten)
 	}
 }
 
@@ -73,5 +86,34 @@ func TestParseOpenAIMultipartPricingSelectorDiscardsFiles(t *testing.T) {
 	}
 	if selector.Model != "gpt-image-1" || selector.Quantity != 1 || selector.Size != "1024x1024" || selector.Quality != "standard" {
 		t.Fatalf("selector=%+v", selector)
+	}
+}
+
+func TestRewriteMultipartModelPreservesFileAndMetadata(t *testing.T) {
+	var source bytes.Buffer
+	writer := multipart.NewWriter(&source)
+	_ = writer.WriteField("model", "logical-model")
+	file, _ := writer.CreateFormFile("image", "input.png")
+	payload := bytes.Repeat([]byte{7}, 4096)
+	_, _ = file.Write(payload)
+	_ = writer.Close()
+	var destination bytes.Buffer
+	written, err := RewriteMultipartModel(&source, writer.Boundary(), "provider-model", &destination)
+	if err != nil || written != int64(destination.Len()) {
+		t.Fatalf("written=%d len=%d error=%v", written, destination.Len(), err)
+	}
+	reader := multipart.NewReader(&destination, writer.Boundary())
+	modelPart, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, _ := io.ReadAll(modelPart)
+	imagePart, err := reader.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, _ := io.ReadAll(imagePart)
+	if string(model) != "provider-model" || imagePart.FormName() != "image" || imagePart.FileName() != "input.png" || !bytes.Equal(image, payload) {
+		t.Fatalf("model=%q form=%q file=%q image=%d", model, imagePart.FormName(), imagePart.FileName(), len(image))
 	}
 }

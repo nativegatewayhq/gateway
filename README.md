@@ -141,6 +141,10 @@ The request's exact `model` value selects a provider. Phase 0 does not guess by 
 | `gpt-image-1` | OpenAI | `GATEWAY_OPENAI_API_KEY` |
 | `grok-imagine-image-quality` | xAI | `GATEWAY_XAI_API_KEY` |
 
+Image models are logical protocol models backed by one or more immutable channel candidates. Each candidate identifies a Provider, provider-native model, pricing channel, enabled state, and priority. Built-in models currently use a single `fixed` candidate. A `priority` model selects the enabled candidate with the lowest numeric priority and then candidate ID, once before billing begins. The selected provider model is applied only to the outbound request; the client-visible model and charge identity remain logical.
+
+This routing foundation does not retry another Provider after an upstream call. Missing prices, credentials, disabled candidates, timeout, or other Provider errors fail closed through the existing native error and reconciliation paths. Weighted, lowest-cost, health-aware routing and fallback are separate plans.
+
 Python:
 
 ```python

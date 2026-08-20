@@ -36,7 +36,7 @@ type Executor interface {
 }
 
 type ModelRegistry interface {
-	ResolveProtocol(string, string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.ModelRoute, error)
+	ResolveProtocol(string, string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.RoutingDecision, error)
 }
 
 type Billing interface {
@@ -70,6 +70,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	tracked := &statusWriter{ResponseWriter: writer}
 	started := time.Now()
 	model, _ := modelFromRequest(request)
+	providerModel := model
+	candidateID, channelID, routingPolicy := "", "", ""
 	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
@@ -85,6 +87,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"protocol", "gemini",
 			"operation", "generateContent",
 			"provider", "google",
+			"candidate_id", candidateID,
+			"channel_id", channelID,
+			"routing_policy", routingPolicy,
 			"model", safeModelForLog(model),
 			"status", tracked.statusCode(),
 			"duration", time.Since(started),
@@ -138,6 +143,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
 			return
 		}
+		providerModel = route.ProviderModel
+		candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 		selector, selectorErr := imageoperation.ParseGeminiJSONPricingSelector(model, body)
 		if selectorErr != nil {
 			writeError(tracked, http.StatusBadRequest, "INVALID_ARGUMENT", "request contains unsupported billing options")
@@ -149,17 +156,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		var fingerprint [32]byte
+		var legacyFingerprint [32]byte
 		if idempotencyKey != "" {
 			query := request.URL.Query()
 			query.Del("key")
 			wireIdentity := request.Method + " " + request.URL.EscapedPath() + "?" + query.Encode() + " " + request.Header.Get("Content-Type")
-			fingerprint = idempotency.Fingerprint("gemini", string(imageoperation.Generate), model, route.ChannelID, wireIdentity, body)
+			fingerprint = idempotency.Fingerprint("gemini", string(imageoperation.Generate), model, "logical-route-v1", wireIdentity, body)
+			legacyFingerprint = idempotency.Fingerprint("gemini", string(imageoperation.Generate), model, route.ChannelID, wireIdentity, body)
 		}
 		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{
 			RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID,
 			Protocol: "gemini", Operation: string(imageoperation.Generate), Model: model, ChannelID: route.ChannelID,
 			Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality,
-			IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint,
+			IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprint: legacyFingerprint,
 		})
 		if billingErr != nil {
 			handler.writeBillingError(tracked, billingErr)
@@ -173,7 +182,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 
 	response, err := handler.executor.GenerateContent(request.Context(), google.GenerateContentRequest{
-		Model:       model,
+		Model:       providerModel,
 		Query:       request.URL.Query(),
 		ContentType: request.Header.Get("Content-Type"),
 		Accept:      request.Header.Get("Accept"),

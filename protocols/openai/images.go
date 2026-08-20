@@ -31,7 +31,7 @@ type Authenticator interface {
 }
 
 type ModelRegistry interface {
-	Resolve(string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.ModelRoute, error)
+	Resolve(string, imageoperation.Operation, imageoperation.MediaType) (imageoperation.RoutingDecision, error)
 	List() []imageoperation.ModelRoute
 }
 
@@ -75,6 +75,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	model := "invalid"
 	logModel := "invalid"
 	provider := providercredentials.ProviderID("")
+	candidateID, channelID, routingPolicy := "", "", ""
 	var charge *billing.Charge
 	defer func() {
 		if recover() != nil {
@@ -90,6 +91,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"protocol", "openai",
 			"operation", "image.generate",
 			"provider", string(provider),
+			"candidate_id", candidateID,
+			"channel_id", channelID,
+			"routing_policy", routingPolicy,
 			"model", logModel,
 			"status", tracked.statusCode(),
 			"duration", time.Since(started),
@@ -147,12 +151,14 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	provider = route.Provider
+	candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
 	logModel = model
-	executor := handler.executors[provider]
-	if executor == nil {
-		writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+	outboundBody, rewriteErr := imageoperation.RewriteJSONModel(body, route.ProviderModel)
+	if rewriteErr != nil {
+		writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_model", "request must contain one model")
 		return
 	}
+	executor := handler.executors[provider]
 	if handler.billing != nil {
 		selector, selectorErr := imageoperation.ParseOpenAIJSONPricingSelector(body)
 		if selectorErr != nil {
@@ -165,10 +171,12 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		var fingerprint [32]byte
+		var legacyFingerprint [32]byte
 		if idempotencyKey != "" {
-			fingerprint = idempotency.Fingerprint("openai", string(imageoperation.Generate), selector.Model, route.ChannelID, mediaType, body)
+			fingerprint = idempotency.Fingerprint("openai", string(imageoperation.Generate), selector.Model, "logical-route-v1", mediaType, body)
+			legacyFingerprint = idempotency.Fingerprint("openai", string(imageoperation.Generate), selector.Model, route.ChannelID, mediaType, body)
 		}
-		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Generate), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint})
+		startedCharge, billingErr := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, Protocol: "openai", Operation: string(imageoperation.Generate), Model: selector.Model, ChannelID: route.ChannelID, Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality, IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprint: legacyFingerprint})
 		if billingErr != nil {
 			handler.writeBillingError(tracked, billingErr)
 			return
@@ -179,11 +187,15 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 	}
+	if executor == nil {
+		writeError(tracked, http.StatusServiceUnavailable, "server_error", "provider_unavailable", "provider unavailable")
+		return
+	}
 	response, err := executor.Generate(request.Context(), openaiimages.Request{
 		ContentType: request.Header.Get("Content-Type"),
 		Accept:      request.Header.Get("Accept"),
 		UserAgent:   request.UserAgent(),
-		Body:        bytes.NewReader(body),
+		Body:        bytes.NewReader(outboundBody),
 	})
 	if err != nil {
 		if charge != nil {

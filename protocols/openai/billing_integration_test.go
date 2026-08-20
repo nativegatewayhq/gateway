@@ -51,6 +51,38 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	chargeService, _ := chargebilling.NewService(pool, estimator, wallet)
+	if _, err := estimator.Publish(ctx, pricing.Price{ChannelID: "channel_00000000000000000000000000000002", Protocol: "openai", Operation: "image.generate", Model: "logical-image", UnitCost: 30, UnitSale: 50, EffectiveFrom: time.Now().Add(-time.Hour)}, "routing-price"); err != nil {
+		t.Fatal(err)
+	}
+	routingRegistry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 20},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 10},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routingCalls := 0
+	routingHandler := NewBillableImagesHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), apikey.NewService(store), routingRegistry, map[providercredentials.ProviderID]Executor{providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+		routingCalls++
+		body, _ := io.ReadAll(request.Body)
+		if string(body) != `{"model":"xai-provider-model"}` {
+			t.Fatalf("routed body=%s", body)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"routed":true}`))}, nil
+	})}, 2048, chargeService)
+	routedRequest := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"logical-image"}`))
+	routedRequest.Header.Set("Content-Type", "application/json")
+	routedRequest.Header.Set("Authorization", "Bearer "+raw)
+	routedRequest.Header.Set(requestid.HeaderName, "priority-routing")
+	routedResponse := httptest.NewRecorder()
+	requestid.Middleware(routingHandler).ServeHTTP(routedResponse, routedRequest)
+	if routedResponse.Code != 200 || routingCalls != 1 {
+		t.Fatalf("routed response=%d calls=%d", routedResponse.Code, routingCalls)
+	}
+	var routedChannel string
+	if err := pool.QueryRow(ctx, `SELECT channel_id FROM image_request_charges WHERE organization_id='org_protocol_billing' AND request_id='priority-routing'`).Scan(&routedChannel); err != nil || routedChannel != "channel_00000000000000000000000000000002" {
+		t.Fatalf("routed channel=%s error=%v", routedChannel, err)
+	}
 	calls := 0
 	executor := executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
 		calls++
@@ -91,7 +123,7 @@ func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state='CAPTURED'),count(*) FILTER (WHERE state='RELEASED'),count(*) FILTER (WHERE state='RECONCILING') FROM image_request_charges WHERE organization_id='org_protocol_billing'`).Scan(&captured, &released, &reconciling); err != nil {
 		t.Fatal(err)
 	}
-	if available != 200 || reserved != 100 || captured != 1 || released != 1 || reconciling != 1 {
+	if available != 150 || reserved != 100 || captured != 2 || released != 1 || reconciling != 1 {
 		t.Fatalf("wallet=%d/%d charges=%d/%d/%d", available, reserved, captured, released, reconciling)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE projects SET status='disabled' WHERE id='project_protocol_billing'`); err != nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
 
@@ -91,6 +92,36 @@ func TestBillableImagesCapturesSuccessBeforeReturningNativeBody(t *testing.T) {
 	request := fake.beginRequest
 	if request.OrganizationID != "org_billing" || request.ProjectID != "project_billing" || request.RequestID != "client-request" || request.ChannelID != "channel_00000000000000000000000000000001" || request.Quantity != 2 || request.Size != "1024x1024" || request.Quality != "high" {
 		t.Fatalf("begin request=%+v", request)
+	}
+}
+
+func TestBillableImagesUsesPriorityCandidateChannelAndProviderModel(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 20},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 10},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{}
+	openAICalls, xAICalls := 0, 0
+	handler := NewBillableImagesHandler(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			openAICalls++
+			return nil, errors.New("unexpected OpenAI call")
+		}),
+		providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+			xAICalls++
+			body, _ := io.ReadAll(request.Body)
+			if string(body) != `{"model":"xai-provider-model","prompt":"secret"}` {
+				t.Fatalf("provider body=%s", body)
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+		}),
+	}, 1024, fake)
+	response := billableImageRequest(handler, `{"model":"logical-image","prompt":"secret"}`)
+	if response.Code != 200 || openAICalls != 0 || xAICalls != 1 || fake.beginRequest.Model != "logical-image" || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000002" {
+		t.Fatalf("response=%d calls=%d/%d begin=%+v", response.Code, openAICalls, xAICalls, fake.beginRequest)
 	}
 }
 
