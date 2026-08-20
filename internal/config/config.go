@@ -14,6 +14,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
 )
 
 const (
@@ -79,6 +80,7 @@ type Config struct {
 	ProviderHealthMode   ProviderHealthMode
 	ProviderHealth       providerhealth.Config
 	ImageStorage         imagestorage.Config
+	Telemetry            telemetry.Config
 	TrustedProxyPrefixes []netip.Prefix
 }
 
@@ -108,6 +110,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ProviderHealthMode:   ProviderHealthDisabled,
 		ProviderHealth:       providerhealth.DefaultConfig(),
 		ImageStorage:         imagestorage.DefaultConfig(),
+		Telemetry:            telemetry.DefaultConfig(),
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -225,6 +228,9 @@ func Load(lookup LookupEnv) (Config, error) {
 	if err := loadImageStorage(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
+	if err := loadTelemetry(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
 	if value, ok := lookup("GATEWAY_TRUSTED_PROXY_CIDRS"); ok {
 		parts := strings.Split(value, ",")
 		if len(parts) > 128 {
@@ -268,6 +274,53 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadTelemetry(cfg *Config, lookup LookupEnv) error {
+	if value, ok := lookup("GATEWAY_TELEMETRY_MODE"); ok {
+		cfg.Telemetry.Mode = telemetry.Mode(strings.ToLower(strings.TrimSpace(value)))
+	}
+	for _, setting := range []struct {
+		key    string
+		target *string
+	}{
+		{"GATEWAY_TELEMETRY_OTLP_ENDPOINT", &cfg.Telemetry.Endpoint},
+		{"GATEWAY_TELEMETRY_OTLP_AUTHORIZATION", &cfg.Telemetry.Authorization},
+		{"GATEWAY_TELEMETRY_SERVICE_NAME", &cfg.Telemetry.ServiceName},
+		{"GATEWAY_TELEMETRY_SERVICE_VERSION", &cfg.Telemetry.ServiceVersion},
+		{"GATEWAY_TELEMETRY_ENVIRONMENT", &cfg.Telemetry.Environment},
+	} {
+		if value, ok := lookup(setting.key); ok {
+			*setting.target = strings.TrimSpace(value)
+		}
+	}
+	if value, ok := lookup("GATEWAY_TELEMETRY_SAMPLE_RATIO"); ok {
+		ratio, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return fmt.Errorf("GATEWAY_TELEMETRY_SAMPLE_RATIO: must be a number between 0 and 1")
+		}
+		cfg.Telemetry.SampleRatio = ratio
+	}
+	for _, setting := range []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"GATEWAY_TELEMETRY_EXPORT_INTERVAL", &cfg.Telemetry.ExportInterval},
+		{"GATEWAY_TELEMETRY_EXPORT_TIMEOUT", &cfg.Telemetry.ExportTimeout},
+		{"GATEWAY_TELEMETRY_SHUTDOWN_TIMEOUT", &cfg.Telemetry.ShutdownTimeout},
+	} {
+		if value, ok := lookup(setting.key); ok {
+			duration, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded duration", setting.key)
+			}
+			*setting.target = duration
+		}
+	}
+	if err := cfg.Telemetry.Validate(); err != nil {
+		return fmt.Errorf("GATEWAY_TELEMETRY_*: settings are invalid")
+	}
+	return nil
 }
 
 func loadImageStorage(cfg *Config, lookup LookupEnv) error {

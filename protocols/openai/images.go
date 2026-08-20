@@ -28,6 +28,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
@@ -74,9 +75,11 @@ type Handler struct {
 	weighted      imageoperation.WeightedSampler
 	health        providerhealth.Gate
 	results       ResultManager
+	telemetry     *telemetry.Recorder
 }
 
-func (handler *Handler) SetResultManager(manager ResultManager) { handler.results = manager }
+func (handler *Handler) SetResultManager(manager ResultManager)    { handler.results = manager }
+func (handler *Handler) SetTelemetry(recorder *telemetry.Recorder) { handler.telemetry = recorder }
 
 func NewBillableImagesHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executors map[providercredentials.ProviderID]Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
 	return NewBillableImagesHandlerWithAvailability(logger, authenticator, models, executors, maxBodyBytes, chargeBilling, nil)
@@ -242,6 +245,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		if found {
+			if handler.telemetry != nil {
+				handler.telemetry.Billing(request.Context(), telemetry.BillingRecord{Protocol: "openai", Operation: string(imageoperation.Generate), Transition: "replay", Outcome: "replay"})
+			}
 			for index, candidate := range candidates {
 				if candidate.ChannelID == replayed.ChannelID {
 					provider, candidateID, channelID, routingPolicy, fallbackDepth = candidate.Provider, candidate.CandidateID, candidate.ChannelID, string(candidate.Policy), index
@@ -265,6 +271,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	provider = route.Provider
 	candidateID, channelID, routingPolicy = route.CandidateID, route.ChannelID, string(route.Policy)
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "openai", Operation: string(imageoperation.Generate), Policy: string(route.Policy), Outcome: "success"})
+	}
 	outboundBody, rewriteErr := imageoperation.RewriteJSONModel(body, route.ProviderModel)
 	if rewriteErr != nil {
 		handler.releaseHealthPermit(request, healthPermit)
@@ -278,7 +287,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	dispatched = true
-	response, err := executor.Generate(request.Context(), openaiimages.Request{
+	response, err := handler.executeProvider(request.Context(), executor, route, imageoperation.Generate, openaiimages.Request{
 		ChannelID:   route.ChannelID,
 		ContentType: request.Header.Get("Content-Type"),
 		Accept:      request.Header.Get("Accept"),
@@ -358,6 +367,41 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
+func (handler *Handler) executeProvider(ctx context.Context, executor Executor, route imageoperation.RoutingDecision, operation imageoperation.Operation, providerRequest openaiimages.Request) (response *http.Response, err error) {
+	if handler.telemetry == nil {
+		return executor.Generate(ctx, providerRequest)
+	}
+	providerCtx, span, started := handler.telemetry.StartProvider(ctx, string(route.Provider), "openai", string(operation))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: string(route.Provider), Protocol: "openai", Operation: string(operation), Outcome: "failure"})
+			panic(recovered)
+		}
+	}()
+	response, err = executor.Generate(providerCtx, providerRequest)
+	handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: string(route.Provider), Protocol: "openai", Operation: string(operation), Outcome: providerTelemetryOutcome(response, err)})
+	return response, err
+}
+
+func providerTelemetryOutcome(response *http.Response, err error) string {
+	switch {
+	case errors.Is(err, openaiimages.ErrTimeout):
+		return "timeout"
+	case errors.Is(err, openaiimages.ErrCanceled):
+		return "canceled"
+	case err != nil || response == nil:
+		return "connection"
+	case response.StatusCode >= 200 && response.StatusCode <= 299:
+		return "success"
+	case response.StatusCode == http.StatusTooManyRequests:
+		return "rate_limited"
+	case response.StatusCode >= 500:
+		return "server_error"
+	default:
+		return "neutral"
+	}
+}
+
 func (handler *Handler) storageErrorSnapshot() billing.ResponseSnapshot {
 	body := []byte(`{"error":{"message":"managed image result unavailable","type":"server_error","code":"image_storage_unavailable"}}`)
 	return billing.ResponseSnapshot{Status: http.StatusBadGateway, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
@@ -420,7 +464,10 @@ func providerConfigured(ctx context.Context, availability ProviderAvailability, 
 }
 
 func (handler *Handler) logCandidateSkip(request *http.Request, decision imageoperation.RoutingDecision, category string) {
-	handler.logger.Info("image routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
+	handler.logger.InfoContext(request.Context(), "image routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "openai", Operation: string(imageoperation.Generate), Policy: string(decision.Policy), Outcome: "failure", Rejection: category})
+	}
 }
 
 func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageoperation.RoutingDecision, err error) {
@@ -430,10 +477,16 @@ func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageope
 		attributes = append(attributes, "period", limitErr.Period, "reset_at", limitErr.ResetAt)
 	}
 	handler.logger.Info("image routing candidate skipped", attributes...)
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "openai", Operation: string(imageoperation.Generate), Policy: string(decision.Policy), Outcome: "failure", Rejection: "spend_cap_exhausted"})
+	}
 }
 
 func (handler *Handler) logCredentialSkip(request *http.Request, decision imageoperation.RoutingDecision) {
 	handler.logger.Info("image routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", "credential_unavailable")
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "openai", Operation: string(imageoperation.Generate), Policy: string(decision.Policy), Outcome: "failure", Rejection: "credential_unavailable"})
+	}
 }
 
 func (handler *Handler) healthyCandidates(request *http.Request, candidates []imageoperation.RoutingDecision) ([]imageoperation.RoutingDecision, error) {
@@ -588,7 +641,7 @@ func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, r
 					return billableSelection{}, false
 				}
 			}
-			started, beginErr := handler.billing.Begin(request.Context(), attempt)
+			started, beginErr := handler.beginBilling(request.Context(), attempt)
 			if beginErr != nil {
 				handler.releaseHealthPermit(request, permit)
 				if lowestCost && errors.Is(beginErr, billing.ErrPriceSnapshotChanged) {
@@ -670,7 +723,7 @@ func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, requ
 			handler.releaseHealthPermit(request, permit)
 			return billableSelection{}, false
 		}
-		started, err := handler.billing.Begin(request.Context(), attempt)
+		started, err := handler.beginBilling(request.Context(), attempt)
 		if err != nil {
 			handler.releaseHealthPermit(request, permit)
 			if errors.Is(err, spendcap.ErrExceeded) {
@@ -749,7 +802,16 @@ func (handler *Handler) prepareBillableAttempts(request *http.Request, candidate
 	return attempts, nil
 }
 
-func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {
+func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (principal apikey.Principal, allowed bool) {
+	defer func() {
+		if handler.telemetry != nil {
+			outcome := "failure"
+			if allowed {
+				outcome = "success"
+			}
+			handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "openai", Stage: "authenticate", Outcome: outcome})
+		}
+	}()
 	if handler.authenticator == nil {
 		writeError(writer, http.StatusServiceUnavailable, "server_error", "authentication_unavailable", "authentication service unavailable")
 		return apikey.Principal{}, false
@@ -763,10 +825,13 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusUnauthorized, "invalid_request_error", "authentication_required", "authentication required")
 		return apikey.Principal{}, false
 	}
-	principal, err := handler.authenticator.Authenticate(request.Context(), raw)
+	principal, err = handler.authenticator.Authenticate(request.Context(), raw)
 	if err != nil {
 		var denied *networkauth.DeniedError
 		if errors.As(err, &denied) {
+			if handler.telemetry != nil {
+				handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "openai", Stage: "network", Outcome: "failure"})
+			}
 			attributes := []any{"request_id", requestid.FromContext(request.Context()), "api_key_id", denied.APIKeyID, "project_id", denied.ProjectID, "category", "network_not_allowed"}
 			if denied.ClientIP.IsValid() {
 				attributes = append(attributes, "client_ip", denied.ClientIP.String())
@@ -777,6 +842,9 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 		}
 		var limited *ratelimit.LimitError
 		if errors.As(err, &limited) {
+			if handler.telemetry != nil {
+				handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "openai", Stage: "rate_limit", Outcome: "rate_limited"})
+			}
 			handler.logger.Info("API key request rate limited", "request_id", requestid.FromContext(request.Context()), "api_key_id", limited.APIKeyID, "project_id", limited.ProjectID, "outcome", "limited", "retry_after_ms", limited.Decision.RetryAfter.Milliseconds())
 			writeRateLimitHeaders(writer, limited.Decision)
 			writeError(writer, http.StatusTooManyRequests, "rate_limit_error", "rate_limit_exceeded", "rate limit exceeded")
@@ -795,6 +863,9 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 		return apikey.Principal{}, false
 	}
 	if principal.RateLimitState != nil {
+		if handler.telemetry != nil {
+			handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "openai", Stage: "rate_limit", Outcome: "success"})
+		}
 		writer.Header().Set("X-RateLimit-Limit", strconv.FormatInt(principal.RateLimitState.Limit, 10))
 		writer.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(principal.RateLimitState.Remaining, 10))
 		writer.Header().Set("X-RateLimit-Reset", strconv.FormatInt(principal.RateLimitState.ResetAt.Unix(), 10))
@@ -816,7 +887,13 @@ func writeRateLimitHeaders(writer http.ResponseWriter, decision ratelimit.Decisi
 
 func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, protocol, operation, model string) bool {
 	if principal.AuthorizeModel(protocol, operation, model) {
+		if handler.telemetry != nil {
+			handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: protocol, Stage: "model_authorization", Outcome: "success"})
+		}
 		return true
+	}
+	if handler.telemetry != nil {
+		handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: protocol, Stage: "model_authorization", Outcome: "failure"})
 	}
 	handler.logger.Info("API key model authorization denied", "request_id", requestid.FromContext(request.Context()), "api_key_id", principal.APIKeyID, "project_id", principal.ProjectID, "protocol", protocol, "operation", operation, "model", model, "category", "denied")
 	writeError(writer, http.StatusForbidden, "permission_error", "model_not_allowed", "API key is not permitted to use this model")
@@ -826,13 +903,41 @@ func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http
 func (handler *Handler) complete(ctx context.Context, chargeID string, success bool, snapshot billing.ResponseSnapshot) (billing.Charge, error) {
 	settlementContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	return handler.billing.Complete(settlementContext, chargeID, success, snapshot)
+	charge, err := handler.billing.Complete(settlementContext, chargeID, success, snapshot)
+	if handler.telemetry != nil {
+		protocol, operation := telemetry.ProtocolOperation(ctx)
+		transition, outcome := "release", "success"
+		if success {
+			transition = "capture"
+		}
+		if err != nil {
+			outcome = "failure"
+		}
+		handler.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: protocol, Operation: operation, Transition: transition, Outcome: outcome})
+	}
+	return charge, err
+}
+
+func (handler *Handler) beginBilling(ctx context.Context, request billing.BeginRequest) (billing.Charge, error) {
+	charge, err := handler.billing.Begin(ctx, request)
+	if handler.telemetry != nil {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		handler.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: request.Protocol, Operation: request.Operation, Transition: "begin", Outcome: outcome})
+	}
+	return charge, err
 }
 
 func (handler *Handler) reconciliationError(writer http.ResponseWriter, ctx context.Context, chargeID string, observation billing.Observation) {
 	markContext, markCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer markCancel()
 	_ = handler.billing.MarkReconciling(markContext, chargeID, observation)
+	if handler.telemetry != nil {
+		protocol, operation := telemetry.ProtocolOperation(ctx)
+		handler.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: protocol, Operation: operation, Transition: "reconciling", Outcome: "success"})
+	}
 	writeError(writer, http.StatusServiceUnavailable, "server_error", "billing_reconciliation_required", "billing settlement is pending")
 }
 

@@ -103,9 +103,25 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_OPENAI` | unset | Exact comma-separated HTTPS origins allowed for OpenAI result URL collection |
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_XAI` | unset | Exact comma-separated HTTPS origins allowed for xAI result URL collection |
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_GOOGLE` | unset | Exact comma-separated HTTPS origins allowed for Google result URL collection |
+| `GATEWAY_TELEMETRY_MODE` | `disabled` | `optional` or `required` enables process-owned OTLP tracing and metrics; runtime collector failures never fail traffic or readiness |
+| `GATEWAY_TELEMETRY_OTLP_ENDPOINT` | unset | OTLP HTTP/protobuf base endpoint; production requires HTTPS and local development may use loopback HTTP |
+| `GATEWAY_TELEMETRY_OTLP_AUTHORIZATION` | unset | Secret-manager supplied collector authorization value; never logged |
+| `GATEWAY_TELEMETRY_SERVICE_NAME` | `native-ai-gateway` | Bounded OpenTelemetry service name |
+| `GATEWAY_TELEMETRY_SERVICE_VERSION` | `development` | Bounded deployed service version |
+| `GATEWAY_TELEMETRY_ENVIRONMENT` | `development` | Bounded deployment environment resource attribute |
+| `GATEWAY_TELEMETRY_SAMPLE_RATIO` | `0.1` | Parent-based trace sampling ratio from 0 through 1 |
+| `GATEWAY_TELEMETRY_EXPORT_INTERVAL` | `30s` | Periodic metric export interval from 1 second through 10 minutes |
+| `GATEWAY_TELEMETRY_EXPORT_TIMEOUT` | `10s` | Per-export timeout up to 1 minute |
+| `GATEWAY_TELEMETRY_SHUTDOWN_TIMEOUT` | `5s` | Bounded metric flush and trace shutdown timeout up to 1 minute |
 | `GATEWAY_TRUSTED_PROXY_CIDRS` | unset | Comma-separated reverse-proxy CIDRs allowed to supply `Forwarded` or `X-Forwarded-For` |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
+
+## OpenTelemetry observability
+
+Telemetry is disabled by default. Both enabled modes export OTLP HTTP/protobuf traces and metrics; `required` additionally treats exporter construction failure as a startup error. Collector connection, timeout, 401, 429, or 5xx failures after startup are isolated from native responses, Wallet/Ledger settlement, managed assets, readiness, and reconciliation leases. Graceful shutdown flushes metrics and traces only within `GATEWAY_TELEMETRY_SHUTDOWN_TIMEOUT`.
+
+The stable instruments are `gateway.http.server.*`, `gateway.authentication.decisions`, `gateway.routing.decisions`, `gateway.provider.*`, `gateway.billing.transitions`, `gateway.storage.operations`, and `gateway.reconciliation.tasks`. Their labels use bounded protocol, operation, policy, Provider, stage, status class, rejection, transition, and outcome values. Never add prompts, bodies, headers, query strings, raw URLs or errors, credentials, tenant/API Key/request/charge/object identities, model/channel/candidate IDs, prices, balances, margins, or limits as telemetry attributes. Inbound propagation reads only W3C `traceparent` and `tracestate`; baggage is ignored and inbound trace headers are not forwarded to Providers. Active request logs include trace and span IDs for correlation.
 
 ## API Key rate limiting
 

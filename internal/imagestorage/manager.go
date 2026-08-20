@@ -10,6 +10,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
 )
 
 type TransformInput struct {
@@ -22,7 +24,10 @@ type Manager struct {
 	collector *Collector
 	objects   ObjectStore
 	assets    AssetRepository
+	telemetry *telemetry.Recorder
 }
+
+func (manager *Manager) SetTelemetry(recorder *telemetry.Recorder) { manager.telemetry = recorder }
 
 func (manager *Manager) MaximumResponseBytes() int64 {
 	// Base64 expands by 4/3. The bounded allowance covers native JSON fields
@@ -37,7 +42,20 @@ func NewManager(config Config, collector *Collector, objects ObjectStore, assets
 	return &Manager{config: config, collector: collector, objects: objects, assets: assets}, nil
 }
 
-func (manager *Manager) Transform(ctx context.Context, input TransformInput) ([]byte, error) {
+func (manager *Manager) Transform(ctx context.Context, input TransformInput) (result []byte, returnedErr error) {
+	defer func() {
+		recovered := recover()
+		if manager.telemetry != nil {
+			outcome := "success"
+			if returnedErr != nil || recovered != nil {
+				outcome = "failure"
+			}
+			manager.telemetry.Storage(ctx, telemetry.StorageRecord{Protocol: input.Protocol, Stage: "transform", Outcome: outcome})
+		}
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
 	if len(input.Body) == 0 || input.RequestID == "" || input.ChannelID == "" {
 		return nil, ErrInvalidContent
 	}
@@ -73,12 +91,14 @@ func (manager *Manager) transformOpenAI(ctx context.Context, input TransformInpu
 				return nil, ErrInvalidContent
 			}
 			collected, err = manager.collector.DecodeBase64(encoded, "")
+			manager.recordCollection(ctx, input.Protocol, "base64", err)
 		} else if raw, exists := item["url"]; exists {
 			var assetURL string
 			if json.Unmarshal(raw, &assetURL) != nil {
 				return nil, ErrInvalidContent
 			}
 			collected, err = manager.collector.Fetch(ctx, input.Provider, assetURL)
+			manager.recordCollection(ctx, input.Protocol, "url", err)
 		} else {
 			continue
 		}
@@ -157,6 +177,7 @@ func (manager *Manager) transformGemini(ctx context.Context, input TransformInpu
 				continue
 			}
 			collected, err := manager.collector.DecodeBase64(encoded, contentType)
+			manager.recordCollection(ctx, input.Protocol, "inline", err)
 			if err != nil {
 				return nil, err
 			}
@@ -245,6 +266,13 @@ func (manager *Manager) persist(ctx context.Context, input TransformInput, index
 		return "", ErrUnavailable
 	}
 	stored, err := manager.objects.Put(ctx, Object{Key: key, ContentType: collected.ContentType, Size: collected.Size, SHA256: collected.SHA256}, collected.File)
+	if manager.telemetry != nil {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		manager.telemetry.Storage(ctx, telemetry.StorageRecord{Protocol: input.Protocol, Stage: "upload", Outcome: outcome})
+	}
 	if err != nil {
 		manager.release(id, owner, "upload_failed")
 		return "", ErrUnavailable
@@ -257,6 +285,17 @@ func (manager *Manager) persist(ctx context.Context, input TransformInput, index
 		return "", fmt.Errorf("asset persistence: %w", ErrUnavailable)
 	}
 	return stored.URL, nil
+}
+
+func (manager *Manager) recordCollection(ctx context.Context, protocol, source string, err error) {
+	if manager.telemetry == nil {
+		return
+	}
+	outcome := "success"
+	if err != nil {
+		outcome = "failure"
+	}
+	manager.telemetry.Storage(ctx, telemetry.StorageRecord{Protocol: protocol, Stage: "fetch", Source: source, Outcome: outcome})
 }
 
 func (manager *Manager) release(id, owner, category string) {

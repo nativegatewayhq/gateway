@@ -8,6 +8,8 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // ReadyFunc checks dependencies required to accept traffic. A nil check means
@@ -29,6 +31,10 @@ func NewHandler(logger *slog.Logger, ready ReadyFunc, routeSets ...Routes) http.
 
 // NewHandlerWithClientIP resolves the client address before protocol authentication.
 func NewHandlerWithClientIP(logger *slog.Logger, ready ReadyFunc, resolver *clientip.Resolver, routeSets ...Routes) http.Handler {
+	return NewHandlerWithTelemetry(logger, ready, resolver, nil, nil, routeSets...)
+}
+
+func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *clientip.Resolver, recorder *telemetry.Recorder, propagator propagation.TextMapPropagator, routeSets ...Routes) http.Handler {
 	mux := http.NewServeMux()
 	if len(routeSets) > 0 && routeSets[0].Gemini != nil {
 		mux.Handle("/v1beta/models/", routeSets[0].Gemini)
@@ -59,6 +65,9 @@ func NewHandlerWithClientIP(logger *slog.Logger, ready ReadyFunc, resolver *clie
 	handler := recovery(logger, mux)
 	handler = accessLog(logger, handler)
 	handler = resolver.Middleware(handler)
+	if recorder != nil {
+		handler = recorder.Middleware(propagator, handler)
+	}
 	handler = requestid.Middleware(handler)
 	return handler
 }
