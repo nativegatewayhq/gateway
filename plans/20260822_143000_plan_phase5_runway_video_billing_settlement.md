@@ -1,9 +1,9 @@
 ---
 id: gateway-20260822-051
 title: Phase 5 Runway Video Credit Billing and Settlement
-status: accepted
+status: completed
 created_at: 2026-08-22T14:30:00+09:00
-updated_at: 2026-08-22T16:20:00+09:00
+updated_at: 2026-08-22T17:00:00+09:00
 owners:
   - gateway
 initiative: phase-5-runway-video-billing-settlement
@@ -221,6 +221,7 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/r
 
 ## 검증 증거
 
+- 구현 PR: `#71`, merge commit `f6731b7` (`feat: settle managed Runway video credits`)
 - `GOCACHE=/private/tmp/gateway-go-cache make check`
 - `GOCACHE=/private/tmp/gateway-go-cache GOFLAGS=-p=1 TEST_DATABASE_URL='postgres://gateway:***@127.0.0.1:55433/gateway_plan051c?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/14' make integration-test`
 - `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/runway -count=1`
