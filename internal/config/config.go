@@ -22,6 +22,10 @@ const (
 	defaultImagesBodyBytes     = int64(1024 * 1024)
 	defaultImageEditsBodyBytes = int64(64 * 1024 * 1024)
 	defaultReplayBodyBytes     = int64(32 * 1024 * 1024)
+	defaultReconcileInterval   = 5 * time.Second
+	defaultReconcileLease      = 30 * time.Second
+	defaultReconcileBackoff    = 5 * time.Second
+	defaultReconcileMaxBackoff = time.Hour
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -37,36 +41,48 @@ const (
 // Config contains non-provider process settings. Provider credentials remain
 // in their opaque registry and are never exposed through this structure.
 type Config struct {
-	HTTPAddr            string
-	LogLevel            slog.Level
-	ShutdownTimeout     time.Duration
-	DatabaseURL         string
-	GoogleTimeout       time.Duration
-	GeminiBodyBytes     int64
-	ImagesTimeout       time.Duration
-	ImagesBodyBytes     int64
-	ImageEditsBodyBytes int64
-	ImageEditSpoolLimit int
-	BillingMode         BillingMode
-	MinimumMarginBPS    int64
-	ReplayBodyBytes     int64
+	HTTPAddr             string
+	LogLevel             slog.Level
+	ShutdownTimeout      time.Duration
+	DatabaseURL          string
+	GoogleTimeout        time.Duration
+	GeminiBodyBytes      int64
+	ImagesTimeout        time.Duration
+	ImagesBodyBytes      int64
+	ImageEditsBodyBytes  int64
+	ImageEditSpoolLimit  int
+	BillingMode          BillingMode
+	MinimumMarginBPS     int64
+	ReplayBodyBytes      int64
+	ReconcileInterval    time.Duration
+	ReconcileLease       time.Duration
+	ReconcileBackoff     time.Duration
+	ReconcileMaxBackoff  time.Duration
+	ReconcileBatchSize   int
+	ReconcileMaxAttempts int
 }
 
 // Load reads configuration through lookup and validates every value before
 // the server starts. Errors name the setting but never echo its value.
 func Load(lookup LookupEnv) (Config, error) {
 	cfg := Config{
-		HTTPAddr:            defaultHTTPAddr,
-		LogLevel:            slog.LevelInfo,
-		ShutdownTimeout:     defaultShutdownTimeout,
-		GoogleTimeout:       defaultGoogleTimeout,
-		GeminiBodyBytes:     defaultGeminiBodyBytes,
-		ImagesTimeout:       defaultImagesTimeout,
-		ImagesBodyBytes:     defaultImagesBodyBytes,
-		ImageEditsBodyBytes: defaultImageEditsBodyBytes,
-		ImageEditSpoolLimit: 8,
-		BillingMode:         BillingDisabled,
-		ReplayBodyBytes:     defaultReplayBodyBytes,
+		HTTPAddr:             defaultHTTPAddr,
+		LogLevel:             slog.LevelInfo,
+		ShutdownTimeout:      defaultShutdownTimeout,
+		GoogleTimeout:        defaultGoogleTimeout,
+		GeminiBodyBytes:      defaultGeminiBodyBytes,
+		ImagesTimeout:        defaultImagesTimeout,
+		ImagesBodyBytes:      defaultImagesBodyBytes,
+		ImageEditsBodyBytes:  defaultImageEditsBodyBytes,
+		ImageEditSpoolLimit:  8,
+		BillingMode:          BillingDisabled,
+		ReplayBodyBytes:      defaultReplayBodyBytes,
+		ReconcileInterval:    defaultReconcileInterval,
+		ReconcileLease:       defaultReconcileLease,
+		ReconcileBackoff:     defaultReconcileBackoff,
+		ReconcileMaxBackoff:  defaultReconcileMaxBackoff,
+		ReconcileBatchSize:   10,
+		ReconcileMaxAttempts: 5,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -155,6 +171,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		}
 		cfg.ReplayBodyBytes = limit
 	}
+	if err := loadReconciliation(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {
 		return Config{}, fmt.Errorf("GATEWAY_HTTP_ADDR: %w", err)
@@ -164,6 +183,49 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadReconciliation(cfg *Config, lookup LookupEnv) error {
+	durations := []struct {
+		key     string
+		target  *time.Duration
+		maximum time.Duration
+	}{
+		{"GATEWAY_RECONCILIATION_INTERVAL", &cfg.ReconcileInterval, time.Minute},
+		{"GATEWAY_RECONCILIATION_LEASE", &cfg.ReconcileLease, 10 * time.Minute},
+		{"GATEWAY_RECONCILIATION_BASE_BACKOFF", &cfg.ReconcileBackoff, time.Hour},
+		{"GATEWAY_RECONCILIATION_MAX_BACKOFF", &cfg.ReconcileMaxBackoff, 24 * time.Hour},
+	}
+	for _, setting := range durations {
+		if value, ok := lookup(setting.key); ok {
+			duration, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil || duration <= 0 || duration > setting.maximum {
+				return fmt.Errorf("%s: must be a positive duration within its supported limit", setting.key)
+			}
+			*setting.target = duration
+		}
+	}
+	if cfg.ReconcileMaxBackoff < cfg.ReconcileBackoff {
+		return fmt.Errorf("GATEWAY_RECONCILIATION_MAX_BACKOFF: must not be less than base backoff")
+	}
+	integers := []struct {
+		key     string
+		target  *int
+		maximum int
+	}{
+		{"GATEWAY_RECONCILIATION_BATCH_SIZE", &cfg.ReconcileBatchSize, 100},
+		{"GATEWAY_RECONCILIATION_MAX_ATTEMPTS", &cfg.ReconcileMaxAttempts, 100},
+	}
+	for _, setting := range integers {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil || parsed < 1 || parsed > setting.maximum {
+				return fmt.Errorf("%s: must be an integer between 1 and %d", setting.key, setting.maximum)
+			}
+			*setting.target = parsed
+		}
+	}
+	return nil
 }
 
 func parseLogLevel(value string) (slog.Level, error) {

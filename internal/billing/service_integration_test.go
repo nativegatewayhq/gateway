@@ -149,7 +149,7 @@ func TestRequestConflictAndReconcilingSettlement(t *testing.T) {
 	if _, err := service.Begin(ctx, conflict); !errors.Is(err, ErrRequestConflict) {
 		t.Fatalf("conflict error=%v", err)
 	}
-	if err := service.MarkReconciling(ctx, charge.ID); err != nil {
+	if err := service.MarkReconciling(ctx, charge.ID, Observation{Outcome: Unknown, Reason: ExecutorTimeout}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Release(ctx, charge.ID); err != nil {

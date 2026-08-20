@@ -52,6 +52,27 @@ type ResponseSnapshot struct {
 	Body    []byte
 }
 
+type Outcome string
+type Reason string
+
+const (
+	KnownSuccess Outcome = "KNOWN_SUCCESS"
+	KnownFailure Outcome = "KNOWN_FAILURE"
+	Unknown      Outcome = "UNKNOWN"
+
+	ResponseUnavailable Reason = "response_unavailable"
+	SettlementFailed    Reason = "settlement_failed"
+	ExecutorTimeout     Reason = "executor_timeout"
+	ExecutorConnection  Reason = "executor_connection_lost"
+	ProviderPanic       Reason = "provider_panic"
+)
+
+type Observation struct {
+	Outcome  Outcome
+	Reason   Reason
+	Snapshot ResponseSnapshot
+}
+
 type Charge struct {
 	ID                 string
 	RequestID          string
@@ -252,18 +273,90 @@ func (service *Service) Complete(ctx context.Context, chargeID string, success b
 	return charge, nil
 }
 
-func (service *Service) MarkReconciling(ctx context.Context, chargeID string) error {
+func (service *Service) MarkReconciling(ctx context.Context, chargeID string, observation Observation) error {
 	if !validID(chargeID, "charge_") {
 		return ErrInvalidRequest
 	}
-	result, err := service.pool.Exec(ctx, `UPDATE image_request_charges SET state='RECONCILING',updated_at=now() WHERE id=$1 AND state IN ('RESERVED','RECONCILING')`, chargeID)
+	var canonical ResponseSnapshot
+	var headersJSON []byte
+	var bodyDigest [32]byte
+	var err error
+	if observation.Outcome == KnownSuccess || observation.Outcome == KnownFailure {
+		if observation.Reason != ResponseUnavailable && observation.Reason != SettlementFailed {
+			return ErrInvalidRequest
+		}
+		canonical, headersJSON, bodyDigest, err = service.prepareSnapshot(observation.Snapshot)
+		if err != nil {
+			return err
+		}
+	} else if observation.Outcome != Unknown || (observation.Reason != ExecutorTimeout && observation.Reason != ExecutorConnection && observation.Reason != ProviderPanic) {
+		return ErrInvalidRequest
+	}
+	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	charge, found, err := loadByID(ctx, tx, chargeID, true)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrInvalidState
+	}
+	if charge.State == "CAPTURED" || charge.State == "RELEASED" {
+		return nil
+	}
+	if charge.State != "RESERVED" && charge.State != "RECONCILING" {
+		return ErrInvalidState
+	}
+	if _, err := tx.Exec(ctx, `UPDATE image_request_charges SET state='RECONCILING',updated_at=now() WHERE id=$1`, chargeID); err != nil {
+		return err
+	}
+	var status, headers, body, digest any
+	if observation.Outcome != Unknown {
+		status = canonical.Status
+		headers = string(headersJSON)
+		body = canonical.Body
+		digest = bodyDigest[:]
+	}
+	result, err := tx.Exec(ctx, `INSERT INTO image_charge_reconciliations(charge_id,outcome,reason,response_status,response_headers,response_body,response_body_sha256)
+		VALUES($1,$2,$3,$4,$5::text::jsonb,$6,$7) ON CONFLICT(charge_id) DO NOTHING`, chargeID, observation.Outcome, observation.Reason, status, headers, body, digest)
 	if err != nil {
 		return err
 	}
 	if result.RowsAffected() == 0 {
-		return ErrInvalidState
+		matching, err := reconciliationMatches(ctx, tx, chargeID, observation, canonical, bodyDigest)
+		if err != nil {
+			return err
+		}
+		if !matching {
+			return ErrRequestConflict
+		}
 	}
-	return nil
+	return tx.Commit(ctx)
+}
+
+func reconciliationMatches(ctx context.Context, tx pgx.Tx, chargeID string, observation Observation, canonical ResponseSnapshot, digest [32]byte) (bool, error) {
+	var outcome Outcome
+	var reason Reason
+	var status *int
+	var headersJSON, body, storedDigest []byte
+	err := tx.QueryRow(ctx, `SELECT outcome,reason,response_status,response_headers,response_body,response_body_sha256 FROM image_charge_reconciliations WHERE charge_id=$1`, chargeID).Scan(&outcome, &reason, &status, &headersJSON, &body, &storedDigest)
+	if err != nil {
+		return false, err
+	}
+	if outcome != observation.Outcome || reason != observation.Reason {
+		return false, nil
+	}
+	if outcome == Unknown {
+		return true, nil
+	}
+	var headers map[string][]string
+	if err := json.Unmarshal(headersJSON, &headers); err != nil || status == nil {
+		return false, ErrSnapshotCorrupt
+	}
+	return *status == canonical.Status && bytes.Equal(body, canonical.Body) && bytes.Equal(storedDigest, digest[:]) && reflect.DeepEqual(headers, canonical.Headers), nil
 }
 
 func loadByRequest(ctx context.Context, tx pgx.Tx, organizationID, requestID string, lock bool) (Charge, bool, error) {

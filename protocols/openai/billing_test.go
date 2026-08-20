@@ -26,6 +26,7 @@ type billingFake struct {
 	captureErr   error
 	releaseErr   error
 	maxResponse  int64
+	observation  chargebilling.Observation
 	events       []string
 }
 
@@ -46,7 +47,8 @@ func (fake *billingFake) Release(context.Context, string) (chargebilling.Charge,
 	fake.events = append(fake.events, "release")
 	return chargebilling.Charge{}, fake.releaseErr
 }
-func (fake *billingFake) MarkReconciling(context.Context, string) error {
+func (fake *billingFake) MarkReconciling(_ context.Context, _ string, observation chargebilling.Observation) error {
+	fake.observation = observation
 	fake.events = append(fake.events, "reconciling")
 	return nil
 }
@@ -98,9 +100,10 @@ func TestBillableImagesReleasesProviderFailures(t *testing.T) {
 		response    *http.Response
 		executorErr error
 		want        int
+		events      string
 	}{
-		{"native non-2xx", &http.Response{StatusCode: 429, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"native"}`))}, nil, 429},
-		{"executor error", nil, openaiimages.ErrTimeout, 504},
+		{"native non-2xx", &http.Response{StatusCode: 429, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"native"}`))}, nil, 429, "begin,provider,release"},
+		{"executor timeout", nil, openaiimages.ErrTimeout, 503, "begin,provider,reconciling"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fake := &billingFake{}
@@ -111,7 +114,7 @@ func TestBillableImagesReleasesProviderFailures(t *testing.T) {
 				}),
 			}, 1024, fake)
 			response := billableImageRequest(handler, `{"model":"gpt-image-1"}`)
-			if response.Code != test.want || strings.Join(fake.events, ",") != "begin,provider,release" {
+			if response.Code != test.want || strings.Join(fake.events, ",") != test.events {
 				t.Fatalf("response=%d events=%v body=%s", response.Code, fake.events, response.Body.String())
 			}
 		})
