@@ -109,4 +109,5 @@ func ClearApplied(request *http.Request) {
 	}
 	request.Header.Del("Authorization")
 	request.Header.Del("x-goog-api-key")
+	request.Header.Del("x-api-key")
 }

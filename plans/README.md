@@ -184,6 +184,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260821-042` | completed | [Phase 4 Gemini Native LLM generateContent Foundation](./20260821_143000_plan_phase4_gemini_llm_generate_content_foundation.md) | `phase-4-gemini-llm-generate-content-foundation` |
 | `gateway-20260821-043` | completed | [Phase 4 Gemini Token Usage Billing and Settlement](./20260821_160000_plan_phase4_gemini_token_usage_settlement.md) | `phase-4-gemini-token-usage-settlement` |
 | `gateway-20260821-044` | completed | [Phase 4 Gemini Native SSE Streaming and Disconnect Settlement](./20260821_190000_plan_phase4_gemini_streaming_settlement.md) | `phase-4-gemini-streaming-settlement` |
-| `gateway-20260821-045` | proposed | [Phase 4 Anthropic Messages Native Non-streaming Foundation](./20260821_220000_plan_phase4_anthropic_messages_foundation.md) | `phase-4-anthropic-messages-foundation` |
+| `gateway-20260821-045` | completed | [Phase 4 Anthropic Messages Native Non-streaming Foundation](./20260821_220000_plan_phase4_anthropic_messages_foundation.md) | `phase-4-anthropic-messages-foundation` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

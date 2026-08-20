@@ -97,6 +97,9 @@ type Config struct {
 	ResponsesTimeout               time.Duration
 	ResponsesStreamIdleTimeout     time.Duration
 	ResponsesBodyBytes             int64
+	AnthropicTimeout               time.Duration
+	AnthropicBodyBytes             int64
+	AnthropicMessagesModels        []string
 	ImageEditsBodyBytes            int64
 	ImageEditSpoolLimit            int
 	BillingMode                    BillingMode
@@ -165,6 +168,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		ResponsesTimeout:           defaultImagesTimeout,
 		ResponsesStreamIdleTimeout: 30 * time.Second,
 		ResponsesBodyBytes:         defaultChatBodyBytes,
+		AnthropicTimeout:           defaultImagesTimeout,
+		AnthropicBodyBytes:         defaultChatBodyBytes,
 		ImageEditsBodyBytes:        defaultImageEditsBodyBytes,
 		ImageEditSpoolLimit:        8,
 		BillingMode:                BillingDisabled,
@@ -355,6 +360,36 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES: must be an integer between 1 and 33554432")
 		}
 		cfg.ResponsesBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_ANTHROPIC_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.AnthropicTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_ANTHROPIC_MAX_BODY_BYTES"); ok {
+		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || bodyBytes <= 0 || bodyBytes > 32*1024*1024 {
+			return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MAX_BODY_BYTES: must be an integer between 1 and 33554432")
+		}
+		cfg.AnthropicBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_ANTHROPIC_MESSAGES_MODELS"); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || seen[model] {
+				return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MESSAGES_MODELS: must contain unique non-empty model IDs")
+			}
+			for _, character := range model {
+				if character <= 0x20 || character == 0x7f {
+					return Config{}, fmt.Errorf("GATEWAY_ANTHROPIC_MESSAGES_MODELS: contains an invalid model ID")
+				}
+			}
+			seen[model] = true
+			cfg.AnthropicMessagesModels = append(cfg.AnthropicMessagesModels, model)
+		}
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS"); ok {
 		for _, part := range strings.Split(value, ",") {

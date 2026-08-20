@@ -32,15 +32,18 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	anthropicoperation "github.com/nativegatewayhq/gateway/operations/anthropic"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	geminioperation "github.com/nativegatewayhq/gateway/operations/gemini"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
+	anthropicProtocol "github.com/nativegatewayhq/gateway/protocols/anthropic"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
 	managementProtocol "github.com/nativegatewayhq/gateway/protocols/management"
 	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
 	replicateProtocol "github.com/nativegatewayhq/gateway/protocols/replicate"
+	anthropicProvider "github.com/nativegatewayhq/gateway/providers/anthropic"
 	falProvider "github.com/nativegatewayhq/gateway/providers/fal"
 	"github.com/nativegatewayhq/gateway/providers/google"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
@@ -195,6 +198,17 @@ func run(stdout, stderr io.Writer) int {
 	if err != nil {
 		logger.Error("gateway Responses model registry initialization failed")
 		return 1
+	}
+	anthropicModels, err := anthropicoperation.NewRegistry(cfg.AnthropicMessagesModels)
+	if err != nil {
+		logger.Error("gateway Anthropic model registry initialization failed")
+		return 1
+	}
+	var anthropicHandler http.Handler
+	if len(cfg.AnthropicMessagesModels) > 0 {
+		handler := anthropicProtocol.NewHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, cfg.BillingMode == config.BillingRequired)
+		handler.SetTelemetry(telemetryRuntime.Recorder)
+		anthropicHandler = handler
 	}
 	var openAIChatHandler http.Handler
 	var openAIResponsesHandler http.Handler
@@ -457,6 +471,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIModels:        openAIModelsHandler,
 		OpenAIChat:          openAIChatHandler,
 		OpenAIResponses:     openAIResponsesHandler,
+		Anthropic:           anthropicHandler,
 		Replicate:           replicateHandler,
 		ReplicateWebhook:    replicateWebhookHandler,
 		Fal:                 falHandler,

@@ -19,6 +19,7 @@ var environmentKeys = map[ProviderID]string{
 	XAI:       "GATEWAY_XAI_API_KEY",
 	Replicate: "GATEWAY_REPLICATE_API_TOKEN",
 	Fal:       "GATEWAY_FAL_API_KEY",
+	Anthropic: "GATEWAY_ANTHROPIC_API_KEY",
 }
 
 type LookupEnv func(string) (string, bool)
@@ -50,6 +51,7 @@ var legacyChannels = map[string]ProviderID{
 	"channel_00000000000000000000000000000003": Google,
 	"channel_00000000000000000000000000000004": Replicate,
 	"channel_00000000000000000000000000000005": Fal,
+	"channel_00000000000000000000000000000006": Anthropic,
 }
 
 func LegacyChannel(provider ProviderID) (string, bool) {
@@ -63,7 +65,7 @@ func LegacyChannel(provider ProviderID) (string, bool) {
 
 func Load(lookup LookupEnv) (*Registry, error) {
 	registry := &Registry{credentials: make(map[ProviderID]Credential, len(environmentKeys))}
-	for _, provider := range []ProviderID{Google, OpenAI, XAI, Replicate, Fal} {
+	for _, provider := range []ProviderID{Google, OpenAI, XAI, Replicate, Fal, Anthropic} {
 		environmentKey := environmentKeys[provider]
 		value, configured := lookup(environmentKey)
 		if !configured {
@@ -170,6 +172,8 @@ func (credential Credential) Apply(request *http.Request, provider ProviderID) e
 		request.Header.Set("Authorization", "Bearer "+string(credential.value))
 	case Fal:
 		request.Header.Set("Authorization", "Key "+string(credential.value))
+	case Anthropic:
+		request.Header.Set("x-api-key", string(credential.value))
 	default:
 		return ErrUnknownProvider
 	}
