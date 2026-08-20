@@ -10,6 +10,9 @@ import (
 	"testing"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/chatbilling"
+	"github.com/nativegatewayhq/gateway/internal/chatpricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	operation "github.com/nativegatewayhq/gateway/operations/anthropic"
 	provider "github.com/nativegatewayhq/gateway/providers/anthropic"
@@ -100,5 +103,65 @@ func TestMessagesRejectsStreamingDuplicateModelAndUnsafeHeaders(t *testing.T) {
 				t.Fatalf("code=%d called=%v", recorder.Code, executor.called)
 			}
 		})
+	}
+}
+
+type billingStub struct {
+	begin    chatbilling.BeginRequest
+	usage    chatpricing.Usage
+	complete int
+}
+
+func (stub *billingStub) Begin(_ context.Context, request chatbilling.BeginRequest) (chatbilling.Charge, error) {
+	stub.begin = request
+	return chatbilling.Charge{ID: "chc_00000000000000000000000000000001", MaximumInputTokens: request.MaximumInputTokens, MaximumOutputTokens: request.MaximumOutputTokens}, nil
+}
+func (*billingStub) Replay(context.Context, chatbilling.BeginRequest) (chatbilling.Charge, bool, error) {
+	return chatbilling.Charge{}, false, nil
+}
+func (stub *billingStub) CompleteUsage(_ context.Context, _ string, usage chatpricing.Usage, snapshot billing.ResponseSnapshot) (chatbilling.Charge, error) {
+	stub.complete++
+	stub.usage = usage
+	return chatbilling.Charge{Response: snapshot}, nil
+}
+func (*billingStub) Release(_ context.Context, _ string, snapshot billing.ResponseSnapshot) (chatbilling.Charge, error) {
+	return chatbilling.Charge{Response: snapshot}, nil
+}
+func (*billingStub) MarkReconciling(context.Context, string, string, *billing.ResponseSnapshot) error {
+	return nil
+}
+func (*billingStub) MarkReconcilingUsage(context.Context, string, string, *billing.ResponseSnapshot, chatpricing.Usage) error {
+	return nil
+}
+
+type managedExecutor struct{ called bool }
+
+func (stub *managedExecutor) CreateMessage(context.Context, provider.MessagesRequest) (*http.Response, error) {
+	stub.called = true
+	body := `{"id":"msg_paid","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4}}`
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+func TestManagedMessagesReservesThenSettlesFourUsageAxes(t *testing.T) {
+	models, _ := operation.NewRegistryWithLimits([]string{"claude-test"}, map[string]operation.Limits{"claude-test": {MaximumInputTokens: 4096, MaximumOutputTokens: 100}})
+	executor := &managedExecutor{}
+	charges := &billingStub{}
+	handler := NewBillableHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authStub{}, models, executor, availableStub{}, nil, 4096, charges)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request(`{"model":"claude-test","max_tokens":16,"messages":[]}`))
+	if recorder.Code != 200 || !executor.called || charges.complete != 1 || charges.begin.Protocol != "anthropic" || charges.begin.Operation != operation.CreateMessage || charges.begin.MaximumOutputTokens != 16 {
+		t.Fatalf("code=%d called=%v begin=%+v complete=%d", recorder.Code, executor.called, charges.begin, charges.complete)
+	}
+	want := chatpricing.Usage{PromptTokens: 10, CachedInputTokens: 3, CacheWriteTokens: 2, CompletionTokens: 4}
+	if charges.usage != want {
+		t.Fatalf("usage=%+v", charges.usage)
+	}
+}
+
+func TestAnthropicUsageParserRejectsDuplicateAndOverflow(t *testing.T) {
+	for _, body := range []string{`{"usage":{"input_tokens":1,"input_tokens":2,"output_tokens":1}}`, `{"usage":{"input_tokens":9223372036854775807,"cache_read_input_tokens":1,"output_tokens":1}}`, `{"usage":{"input_tokens":1}}`} {
+		if _, err := extractUsage([]byte(body)); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
 	}
 }

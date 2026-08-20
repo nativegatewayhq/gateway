@@ -199,17 +199,16 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway Responses model registry initialization failed")
 		return 1
 	}
-	anthropicModels, err := anthropicoperation.NewRegistry(cfg.AnthropicMessagesModels)
+	anthropicLimits := make(map[string]anthropicoperation.Limits, len(cfg.AnthropicMessagesModelLimits))
+	for model, limit := range cfg.AnthropicMessagesModelLimits {
+		anthropicLimits[model] = anthropicoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
+	}
+	anthropicModels, err := anthropicoperation.NewRegistryWithLimits(cfg.AnthropicMessagesModels, anthropicLimits)
 	if err != nil {
 		logger.Error("gateway Anthropic model registry initialization failed")
 		return 1
 	}
 	var anthropicHandler http.Handler
-	if len(cfg.AnthropicMessagesModels) > 0 {
-		handler := anthropicProtocol.NewHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, cfg.BillingMode == config.BillingRequired)
-		handler.SetTelemetry(telemetryRuntime.Recorder)
-		anthropicHandler = handler
-	}
 	var openAIChatHandler http.Handler
 	var openAIResponsesHandler http.Handler
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
@@ -222,6 +221,7 @@ func run(stdout, stderr io.Writer) int {
 	var reconciliationWorker *reconciliation.Worker
 	var chatChargeBilling openaiProtocol.ChatBilling
 	var responsesChargeBilling openaiProtocol.ResponsesBilling
+	var anthropicChargeBilling anthropicProtocol.Billing
 	var chatReconciliationWorker *chatreconciliation.Worker
 	if cfg.BillingMode == config.BillingRequired {
 		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
@@ -248,6 +248,7 @@ func run(stdout, stderr io.Writer) int {
 		}
 		chatChargeBilling = chatService
 		responsesChargeBilling = chatService
+		anthropicChargeBilling = chatService
 		chatReconciliationWorker, chatBillingErr = chatreconciliation.New(pool, chatService, fmt.Sprintf("gateway-%d", os.Getpid()), cfg.ReconcileLease, cfg.ReconcileMaxAttempts)
 		if chatBillingErr != nil {
 			logger.Error("gateway Chat reconciliation initialization failed")
@@ -287,6 +288,16 @@ func run(stdout, stderr io.Writer) int {
 		}
 		responsesHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIResponsesHandler = responsesHandler
+	}
+	if len(cfg.AnthropicMessagesModels) > 0 {
+		var handler *anthropicProtocol.Handler
+		if anthropicChargeBilling == nil {
+			handler = anthropicProtocol.NewHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, false)
+		} else {
+			handler = anthropicProtocol.NewBillableHandler(logger, apiKeyAuthenticator, anthropicModels, anthropicProvider.New(providerCredentialRegistry, cfg.AnthropicTimeout), providerCredentialRegistry, healthGate, cfg.AnthropicBodyBytes, anthropicChargeBilling)
+		}
+		handler.SetTelemetry(telemetryRuntime.Recorder)
+		anthropicHandler = handler
 	}
 	var geminiHandler *gemini.Handler
 	var openAIImagesHandler *openaiProtocol.Handler

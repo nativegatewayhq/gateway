@@ -17,13 +17,20 @@ var (
 )
 
 type Model struct {
-	ID, ProviderModel, ChannelID string
-	Provider                     providercredentials.ProviderID
+	ID, ProviderModel, ChannelID            string
+	Provider                                providercredentials.ProviderID
+	MaximumInputTokens, MaximumOutputTokens int64
 }
+
+type Limits struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 
 type Registry struct{ models map[string]Model }
 
 func NewRegistry(ids []string) (*Registry, error) {
+	return NewRegistryWithLimits(ids, nil)
+}
+
+func NewRegistryWithLimits(ids []string, limits map[string]Limits) (*Registry, error) {
 	registry := &Registry{models: make(map[string]Model, len(ids))}
 	channelID, _ := providercredentials.LegacyChannel(providercredentials.Anthropic)
 	for _, id := range ids {
@@ -33,7 +40,11 @@ func NewRegistry(ids []string) (*Registry, error) {
 		if _, exists := registry.models[id]; exists {
 			return nil, ErrInvalidModel
 		}
-		registry.models[id] = Model{ID: id, ProviderModel: id, ChannelID: channelID, Provider: providercredentials.Anthropic}
+		limit := limits[id]
+		if (limit.MaximumInputTokens == 0) != (limit.MaximumOutputTokens == 0) || limit.MaximumInputTokens < 0 || limit.MaximumOutputTokens < 0 {
+			return nil, ErrInvalidModel
+		}
+		registry.models[id] = Model{ID: id, ProviderModel: id, ChannelID: channelID, Provider: providercredentials.Anthropic, MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
 	}
 	return registry, nil
 }

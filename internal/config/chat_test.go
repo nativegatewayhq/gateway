@@ -80,3 +80,16 @@ func TestGeminiLLMConfiguration(t *testing.T) {
 		t.Fatalf("managed cfg=%+v err=%v", cfg, err)
 	}
 }
+
+func TestAnthropicConfigurationRequiresLimitsWithBilling(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_ANTHROPIC_MESSAGES_MODELS": "claude-test", "GATEWAY_BILLING_MODE": "required"}
+	lookup := func(key string) (string, bool) { value, ok := values[key]; return value, ok }
+	if _, err := Load(lookup); err == nil {
+		t.Fatal("managed Anthropic accepted without limits")
+	}
+	values["GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS"] = "claude-test:200000:8192"
+	cfg, err := Load(lookup)
+	if err != nil || cfg.AnthropicMessagesModelLimits["claude-test"].MaximumOutputTokens != 8192 {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+}

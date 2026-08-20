@@ -67,6 +67,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_RESPONSES_STREAM_IDLE_TIMEOUT` | `30s` | Maximum idle interval between upstream Responses streaming reads; maximum `10m` |
 | `GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES` | `8388608` | Maximum Responses request and response body; maximum 32 MiB |
 | `GATEWAY_ANTHROPIC_MESSAGES_MODELS` | unset | Comma-separated exact Anthropic Messages model IDs |
+| `GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS` | unset | Required in billing mode: comma-separated `model:maximum_input_tokens:maximum_output_tokens` entries |
 | `GATEWAY_ANTHROPIC_REQUEST_TIMEOUT` | `2m` | Anthropic response-header/request timeout; maximum `10m` |
 | `GATEWAY_ANTHROPIC_MAX_BODY_BYTES` | `8388608` | Maximum Anthropic request and response body; maximum 32 MiB |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
@@ -234,7 +235,9 @@ BYOK mode preserves native pass-through behavior. In billing-required mode, ever
 
 ### Anthropic Messages foundation
 
-Set `GATEWAY_ANTHROPIC_MESSAGES_MODELS` and `GATEWAY_ANTHROPIC_API_KEY` to enable native non-streaming `POST /v1/messages`. Official Anthropic clients can use the Gateway URL as `base_url` and a service key as their API key. The Gateway validates `anthropic-version`, bounded `anthropic-beta` headers, exact model authorization, and then replaces the service credential with the upstream credential at the fixed Anthropic origin. Native success and error bodies are returned without schema conversion. Streaming and token settlement are follow-up plans; billing-required deployments fail closed before reading the request body or resolving provider credentials.
+Set `GATEWAY_ANTHROPIC_MESSAGES_MODELS` and `GATEWAY_ANTHROPIC_API_KEY` to enable native non-streaming `POST /v1/messages`. Official Anthropic clients can use the Gateway URL as `base_url` and a service key as their API key. The Gateway validates `anthropic-version`, bounded `anthropic-beta` headers, exact model authorization, and then replaces the service credential with the upstream credential at the fixed Anthropic origin. Native success and error bodies are returned without schema conversion.
+
+In billing-required mode, every enabled model needs a `GATEWAY_ANTHROPIC_MESSAGES_MODEL_LIMITS` entry. Publish an immutable `anthropic/messages.create` token price with `gateway-chat-price`; input, cache-read (`cached-input-*`), cache-write (`cache-write-*`), and output cost/sale rates are expressed in `USD_TICKS` per million tokens. The Gateway reserves the most expensive possible input class plus `max_tokens`, then captures native `usage` or releases a known non-2xx response. Missing or invalid usage and uncertain Provider outcomes enter reconciliation. Streaming remains a follow-up plan.
 
 The Gateway reserves the request byte upper bound plus the output limit before Provider dispatch, then captures strict native `usage.input_tokens`, `input_tokens_details.cached_tokens`, and `output_tokens`. Reasoning tokens must be a valid subset of output tokens and are not charged twice. Confirmed non-2xx responses release the reservation. Timeout, response loss, invalid or missing usage, and settlement failure keep it for durable reconciliation. `Idempotency-Key` replays the bounded native terminal response without another Provider call or Ledger mutation.
 

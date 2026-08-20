@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-046
 title: Phase 4 Anthropic Messages Token Usage Billing and Settlement
-status: proposed
+status: completed
 created_at: 2026-08-21T23:30:00+09:00
-updated_at: 2026-08-21T23:30:00+09:00
+updated_at: 2026-08-22T01:10:00+09:00
 owners:
   - gateway
 initiative: phase-4-anthropic-token-usage-settlement
@@ -180,20 +180,25 @@ go test -tags=sdkconformance ./protocols/anthropic -run TestOfficialAnthropicMan
 
 ## 완료 조건
 
-- [ ] 관리형 Anthropic 요청이 Provider 호출 전에 최대 cost/sale을 원자적으로 예약함
-- [ ] input/output/cache-write/cache-read usage가 네 가격 축으로 정확히 정산됨
-- [ ] balance/quota/spend-cap/model-limit 실패가 zero dispatch를 보장함
-- [ ] 2xx valid usage는 capture, known non-2xx는 release, 불확실 결과는 reconciliation됨
-- [ ] idempotency replay가 Provider 재호출·이중 과금 없이 native 응답을 재생함
-- [ ] 동시 요청에서도 Wallet이 음수가 되지 않고 ledger/charge 전이가 exactly once임
-- [ ] 기존 OpenAI/Gemini token 가격과 settlement 의미가 보존됨
-- [ ] 공식 Anthropic Python sync/async 및 TypeScript managed SDK 검증이 통과함
-- [ ] README, migration, CLI와 multi-repo handoff가 갱신됨
-- [ ] 전체 unit/race/integration/security 회귀가 통과함
+- [x] 관리형 Anthropic 요청이 Provider 호출 전에 최대 cost/sale을 원자적으로 예약함
+- [x] input/output/cache-write/cache-read usage가 네 가격 축으로 정확히 정산됨
+- [x] balance/quota/spend-cap/model-limit 실패가 zero dispatch를 보장함
+- [x] 2xx valid usage는 capture, known non-2xx는 release, 불확실 결과는 reconciliation됨
+- [x] idempotency replay가 Provider 재호출·이중 과금 없이 native 응답을 재생함
+- [x] 동시 요청에서도 Wallet이 음수가 되지 않고 ledger/charge 전이가 exactly once임
+- [x] 기존 OpenAI/Gemini token 가격과 settlement 의미가 보존됨
+- [x] 공식 Anthropic Python sync/async 및 TypeScript managed SDK 검증이 통과함
+- [x] README, migration, CLI와 multi-repo handoff가 갱신됨
+- [x] 전체 unit/race/integration/security 회귀가 통과함
 
 ## 검증 증거
 
-구현 PR에서 commit, CI run, migration DB, 공식 SDK 버전, 필수 명령과 결과를 기록한다.
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- 격리 PostgreSQL `gateway_plan046`, Redis DB 14에서 Anthropic package를 포함한 `GOFLAGS=-p=1 make integration-test` 통과
+- fresh migration과 `internal/chatbilling` 네 축 price/reserve/capture/evidence integration 통과
+- `go test -tags=sdkconformance ./protocols/anthropic -run 'TestOfficialAnthropic(Managed)?MessagesSDKs' -v` 통과
+- 공식 SDK: Anthropic Python `0.68.0`, `@anthropic-ai/sdk` `0.68.0`; BYOK 및 managed Python sync/async·TypeScript 검증
+- 구현 PR과 GitHub CI run은 PR 생성 후 기록한다.
 
 ## Rollback 계획
 
