@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-045
 title: Phase 4 Anthropic Messages Native Non-streaming Foundation
-status: proposed
+status: completed
 created_at: 2026-08-21T22:00:00+09:00
-updated_at: 2026-08-21T22:00:00+09:00
+updated_at: 2026-08-21T23:45:00+09:00
 owners:
   - gateway
 initiative: phase-4-anthropic-messages-foundation
@@ -183,20 +183,24 @@ go test -tags=sdkconformance ./protocols/anthropic -run TestOfficialAnthropicMes
 
 ## 완료 조건
 
-- [ ] 공식 Anthropic Python/TypeScript SDK가 key/base URL 변경만으로 native Message를 소비함
-- [ ] `/v1/messages` request/response와 text/tool/future content block이 변형 없이 전달됨
-- [ ] service credential이 Anthropic channel key로 교체되고 client/log에 Provider key가 노출되지 않음
-- [ ] version/beta header, exact model과 API Key authorization이 pre-dispatch 검증됨
-- [ ] billing-required mode가 body/credential/Provider side effect 전에 fail closed함
-- [ ] trusted origin, redirect 거부, single dispatch와 timeout/cancel/error mapping이 검증됨
-- [ ] network/rate-limit/health denial이 Provider 호출과 secret-bearing body read를 발생시키지 않음
-- [ ] native error status/body와 safe response headers가 유지됨
-- [ ] 전체 unit/race/integration/공식 SDK/security 회귀가 통과함
-- [ ] README, multi-repo handoff와 재현 가능한 검증 증거가 갱신됨
+- [x] 공식 Anthropic Python/TypeScript SDK가 key/base URL 변경만으로 native Message를 소비함
+- [x] `/v1/messages` request/response와 text/tool/future content block이 변형 없이 전달됨
+- [x] service credential이 Anthropic channel key로 교체되고 client/log에 Provider key가 노출되지 않음
+- [x] version/beta header, exact model과 API Key authorization이 pre-dispatch 검증됨
+- [x] billing-required mode가 body/credential/Provider side effect 전에 fail closed함
+- [x] trusted origin, redirect 거부, single dispatch와 timeout/cancel/error mapping이 검증됨
+- [x] network/rate-limit/health denial이 Provider 호출과 secret-bearing body read를 발생시키지 않음
+- [x] native error status/body와 safe response headers가 유지됨
+- [x] 전체 unit/race/integration/공식 SDK/security 회귀가 통과함
+- [x] README, multi-repo handoff와 재현 가능한 검증 증거가 갱신됨
 
 ## 검증 증거
 
-구현 PR에서 commit, CI run, 공식 SDK 버전, 필수 명령과 결과를 기록한다.
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- 격리 PostgreSQL `gateway_plan045`, Redis DB 13에서 `GOFLAGS=-p=1 make integration-test` 통과. 최초 전체 실행의 기존 image-storage timing failure는 해당 package 격리 재실행 통과 후 전체 재실행으로 확인했다.
+- `go test -tags=sdkconformance ./protocols/anthropic -run TestOfficialAnthropicMessagesSDKs -v` 통과
+- 공식 SDK: Anthropic Python `0.68.0`, `@anthropic-ai/sdk` `0.68.0`; Python sync/async 및 TypeScript `messages.create` 검증
+- 구현 PR 및 CI run은 PR 생성 후 기록한다.
 
 ## Rollback 계획
 
