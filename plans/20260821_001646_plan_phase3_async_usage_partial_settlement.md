@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-034
 title: Phase 3 Async Usage and Partial-output Settlement
-status: in_progress
+status: completed
 created_at: 2026-08-21T00:16:46+09:00
-updated_at: 2026-08-21T00:46:05+09:00
+updated_at: 2026-08-21T00:49:50+09:00
 owners:
   - gateway
 initiative: phase-3-async-usage-partial-settlement
@@ -201,7 +201,7 @@ make integration-test
 - [x] usage evidence와 telemetry에 payload/URL/credential/tenant secret이 노출되지 않음
 - [x] migration fresh/current, race와 전체 integration test가 통과함
 - [x] README와 Cloud/Conformance handoff가 갱신됨
-- [ ] commit, PR과 최종 CI 증거가 기록됨
+- [x] commit, PR과 최종 CI 증거가 기록됨
 
 ## 검증 증거
 
@@ -215,7 +215,8 @@ make integration-test
 - 호환성: usage capability가 없는 기존 model/Job은 legacy contract를 유지하고 OpenAI/Gemini 및 기존 Replicate/fal protocol·webhook suite가 회귀하지 않음.
 - 로컬 검증: `make check` 통과.
 - 통합 검증: Compose PostgreSQL/Redis에서 전체 migration, Wallet/Ledger, race, Provider/protocol 회귀를 포함한 `make integration-test` 통과.
-- PR 및 최종 GitHub Actions 증거는 본 구현 PR 통과 후 기록함.
+- PR: https://github.com/nativegatewayhq/gateway/pull/36
+- CI: GitHub Actions `check`(run `32388175288`) 및 `Plan policy / validate`(run `32388175366`) 통과.
 
 ## Rollback 계획
 
