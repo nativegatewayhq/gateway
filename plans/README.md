@@ -176,9 +176,9 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260821-034` | completed | [Phase 3 Async Usage and Partial-output Settlement](./20260821_001646_plan_phase3_async_usage_partial_settlement.md) | `phase-3-async-usage-partial-settlement` |
 | `gateway-20260821-035` | completed | [Phase 3 Async Job Management Read API](./20260821_005344_plan_phase3_async_job_management_read_api.md) | `phase-3-async-job-management-read-api` |
 | `gateway-20260821-036` | completed | [Phase 4 OpenAI Chat Completions Non-streaming Foundation](./20260821_011141_plan_phase4_openai_chat_completions_foundation.md) | `phase-4-openai-chat-completions-foundation` |
-| `gateway-20260821-037` | accepted | [Phase 4 OpenAI Chat Token Usage Billing and Settlement](./20260821_013812_plan_phase4_openai_chat_token_settlement.md) | `phase-4-openai-chat-token-settlement` |
-| `gateway-20260821-038` | accepted | [Phase 4 OpenAI Chat SSE Streaming and Disconnect Settlement](./20260821_042500_plan_phase4_openai_chat_streaming_settlement.md) | `phase-4-openai-chat-streaming-settlement` |
-| `gateway-20260821-039` | accepted | [Phase 4 OpenAI Responses Native Non-streaming Foundation](./20260821_064000_plan_phase4_openai_responses_foundation.md) | `phase-4-openai-responses-foundation` |
+| `gateway-20260821-037` | completed | [Phase 4 OpenAI Chat Token Usage Billing and Settlement](./20260821_013812_plan_phase4_openai_chat_token_settlement.md) | `phase-4-openai-chat-token-settlement` |
+| `gateway-20260821-038` | completed | [Phase 4 OpenAI Chat SSE Streaming and Disconnect Settlement](./20260821_042500_plan_phase4_openai_chat_streaming_settlement.md) | `phase-4-openai-chat-streaming-settlement` |
+| `gateway-20260821-039` | completed | [Phase 4 OpenAI Responses Native Non-streaming Foundation](./20260821_064000_plan_phase4_openai_responses_foundation.md) | `phase-4-openai-responses-foundation` |
 | `gateway-20260821-040` | completed | [Phase 4 OpenAI Responses Token Usage Billing and Settlement](./20260821_080000_plan_phase4_openai_responses_token_settlement.md) | `phase-4-openai-responses-token-settlement` |
 | `gateway-20260821-041` | completed | [Phase 4 OpenAI Responses SSE Streaming and Disconnect Settlement](./20260821_123000_plan_phase4_openai_responses_streaming_settlement.md) | `phase-4-openai-responses-streaming-settlement` |
 | `gateway-20260821-042` | completed | [Phase 4 Gemini Native LLM generateContent Foundation](./20260821_143000_plan_phase4_gemini_llm_generate_content_foundation.md) | `phase-4-gemini-llm-generate-content-foundation` |

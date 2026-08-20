@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-037
 title: Phase 4 OpenAI Chat Token Usage Billing and Settlement
-status: accepted
+status: completed
 created_at: 2026-08-21T01:38:12+09:00
-updated_at: 2026-08-21T04:20:00+09:00
+updated_at: 2026-08-22T10:30:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-chat-token-settlement
@@ -201,6 +201,7 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAISDKsUseOn
 
 ## 검증 증거
 
+- 구현 및 머지: `8aac98f` (`feat: settle OpenAI Chat token usage`, PR #42)
 - `make check`
 - `TEST_DATABASE_URL=... TEST_REDIS_URL=... make integration-test`
 - `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAISDKsUseOnlyBaseURLAndKey`

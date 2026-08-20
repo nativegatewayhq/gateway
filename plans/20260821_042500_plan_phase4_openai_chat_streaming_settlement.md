@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-038
 title: Phase 4 OpenAI Chat SSE Streaming and Disconnect Settlement
-status: accepted
+status: completed
 created_at: 2026-08-21T04:25:00+09:00
-updated_at: 2026-08-21T06:10:00+09:00
+updated_at: 2026-08-22T10:30:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-chat-streaming-settlement
@@ -193,6 +193,7 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIStreaming
 
 ## 검증 증거
 
+- 구현 및 머지: `71e05da` (`feat: settle OpenAI Chat streams`, PR #44)
 - `make check`
 - `TEST_DATABASE_URL=... TEST_REDIS_URL=... make integration-test`
 - `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAIStreamingSDKs`
