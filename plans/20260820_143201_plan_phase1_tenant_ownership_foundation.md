@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-008
 title: Phase 1 Tenant Ownership Foundation
-status: in_progress
+status: completed
 created_at: 2026-08-20T14:32:01+09:00
-updated_at: 2026-08-20T14:32:01+09:00
+updated_at: 2026-08-20T14:37:59+09:00
 owners:
   - gateway
 initiative: phase-1-tenant-ownership
@@ -172,23 +172,40 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] users, organizations, memberships와 projects schema가 존재함
-- [ ] 모든 service API Key가 NOT NULL project에 귀속됨
-- [ ] 기존 Key가 손실 없이 legacy project로 backfill되고 계속 인증됨
-- [ ] principal이 project와 organization ID를 포함함
-- [ ] disabled Key/project/organization이 인증되지 않음
-- [ ] 신규 Key가 존재하는 active project에만 생성됨
-- [ ] CLI가 project를 선택하고 plaintext Key를 한 번만 출력함
-- [ ] tenant foreign key와 unique invariant가 검증됨
-- [ ] migration이 반복·동시 실행에 안전함
-- [ ] 공개 오류와 로그에 Key, email 또는 불필요한 tenant 정보가 없음
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Dashboard 후속 계약이 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] users, organizations, memberships와 projects schema가 존재함
+- [x] 모든 service API Key가 NOT NULL project에 귀속됨
+- [x] 기존 Key가 손실 없이 legacy project로 backfill되고 계속 인증됨
+- [x] principal이 project와 organization ID를 포함함
+- [x] disabled Key/project/organization이 인증되지 않음
+- [x] 신규 Key가 존재하는 active project에만 생성됨
+- [x] CLI가 project를 선택하고 plaintext Key를 한 번만 출력함
+- [x] tenant foreign key와 unique invariant가 검증됨
+- [x] migration이 반복·동시 실행에 안전함
+- [x] 공개 오류와 로그에 Key, email 또는 불필요한 tenant 정보가 없음
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Dashboard 후속 계약이 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 로컬 검증:
+  - `make check`: formatter, vet, 전체 race test와 binary build 통과
+  - `make integration-test`: tenant schema, Key lifecycle, native protocol과 CLI 통합 suite 통과
+  - `git diff --check`: 통과
+  - `go test -cover ./internal/apikey`: 82.2%
+- migration 및 tenant invariant 검증:
+  - isolated schema에서 `000001` Key 생성 후 `000002` 적용, digest·prefix 보존과 `project_legacy` backfill 확인
+  - `project_id` NOT NULL, tenant table·foreign key·unique constraint 확인
+  - 동일 DB에서 migration 반복 실행과 4개 goroutine 동시 migration 통과
+  - active tenant principal의 Key/project/organization ID와 disabled Key/project/organization 거부
+  - missing project Key 생성 거부 및 CLI plaintext 단일 출력 확인
+- 구현 commits:
+  - [`ab97998`](https://github.com/nativegatewayhq/gateway/commit/ab97998)
+  - [`aa30581`](https://github.com/nativegatewayhq/gateway/commit/aa30581)
+- pull request: [#8](https://github.com/nativegatewayhq/gateway/pull/8)
+- CI:
+  - [`check`](https://github.com/nativegatewayhq/gateway/actions/runs/32336386690/job/96326678131): 통과
+  - [`validate`](https://github.com/nativegatewayhq/gateway/actions/runs/32336386688/job/96326678164): 통과
 
 ## Rollback 계획
 
