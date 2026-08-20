@@ -8,10 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/app"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/chatbilling"
+	"github.com/nativegatewayhq/gateway/internal/chatpricing"
+	"github.com/nativegatewayhq/gateway/internal/chatreconciliation"
 	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/config"
 	"github.com/nativegatewayhq/gateway/internal/costquota"
@@ -163,17 +167,16 @@ func run(stdout, stderr io.Writer) int {
 		return 1
 	}
 	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
-	chatModels, err := chatoperation.NewRegistry(cfg.OpenAIChatModels)
+	chatLimits := make(map[string]chatoperation.Limits, len(cfg.OpenAIChatModelLimits))
+	for model, limit := range cfg.OpenAIChatModelLimits {
+		chatLimits[model] = chatoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
+	}
+	chatModels, err := chatoperation.NewRegistryWithLimits(cfg.OpenAIChatModels, chatLimits)
 	if err != nil {
 		logger.Error("gateway chat model registry initialization failed")
 		return 1
 	}
 	var openAIChatHandler http.Handler
-	if len(cfg.OpenAIChatModels) > 0 {
-		chatHandler := openaiProtocol.NewChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes)
-		chatHandler.SetTelemetry(telemetryRuntime.Recorder)
-		openAIChatHandler = chatHandler
-	}
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
@@ -182,6 +185,8 @@ func run(stdout, stderr io.Writer) int {
 	var chargeBilling openaiProtocol.Billing
 	var billingService *chargebilling.Service
 	var reconciliationWorker *reconciliation.Worker
+	var chatChargeBilling openaiProtocol.ChatBilling
+	var chatReconciliationWorker *chatreconciliation.Worker
 	if cfg.BillingMode == config.BillingRequired {
 		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
 		if pricingErr != nil {
@@ -195,6 +200,22 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		chargeBilling = billingService
+		chatPrices, chatPriceErr := chatpricing.New(pool, cfg.MinimumMarginBPS)
+		if chatPriceErr != nil {
+			logger.Error("gateway Chat pricing initialization failed")
+			return 1
+		}
+		chatService, chatBillingErr := chatbilling.NewWithControls(pool, chatPrices, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool), cfg.ReplayBodyBytes)
+		if chatBillingErr != nil {
+			logger.Error("gateway Chat billing initialization failed")
+			return 1
+		}
+		chatChargeBilling = chatService
+		chatReconciliationWorker, chatBillingErr = chatreconciliation.New(pool, chatService, fmt.Sprintf("gateway-%d", os.Getpid()), cfg.ReconcileLease, cfg.ReconcileMaxAttempts)
+		if chatBillingErr != nil {
+			logger.Error("gateway Chat reconciliation initialization failed")
+			return 1
+		}
 		reconciliationConfig := reconciliation.Config{
 			Interval: cfg.ReconcileInterval, Lease: cfg.ReconcileLease,
 			BaseBackoff: cfg.ReconcileBackoff, MaxBackoff: cfg.ReconcileMaxBackoff,
@@ -209,6 +230,16 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway reconciliation initialization failed")
 			return 1
 		}
+	}
+	if len(cfg.OpenAIChatModels) > 0 {
+		var chatHandler *openaiProtocol.ChatHandler
+		if chatChargeBilling == nil {
+			chatHandler = openaiProtocol.NewChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes)
+		} else {
+			chatHandler = openaiProtocol.NewBillableChatHandler(logger, apiKeyAuthenticator, chatModels, openaiProvider.NewChat(providerCredentialRegistry, cfg.ChatTimeout), providerCredentialRegistry, healthGate, cfg.ChatBodyBytes, chatChargeBilling)
+		}
+		chatHandler.SetTelemetry(telemetryRuntime.Recorder)
+		openAIChatHandler = chatHandler
 	}
 	var geminiHandler *gemini.Handler
 	var openAIImagesHandler *openaiProtocol.Handler
@@ -339,7 +370,7 @@ func run(stdout, stderr io.Writer) int {
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
 	workerCount := 0
-	workerFinished := make(chan struct{}, 2)
+	workerFinished := make(chan struct{}, 3)
 	if reconciliationWorker != nil {
 		workerCount++
 		go func() {
@@ -347,6 +378,24 @@ func run(stdout, stderr io.Writer) int {
 			reconciliationWorker.Run(workerCtx, func(err error) {
 				logger.Warn("reconciliation cycle failed", "category", "worker_cycle_failed")
 			})
+		}()
+	}
+	if chatReconciliationWorker != nil {
+		workerCount++
+		go func() {
+			defer func() { workerFinished <- struct{}{} }()
+			ticker := time.NewTicker(cfg.ReconcileInterval)
+			defer ticker.Stop()
+			for {
+				if _, workerErr := chatReconciliationWorker.RunOne(workerCtx); workerErr != nil {
+					logger.Warn("Chat reconciliation cycle failed", "category", "chat_reconciliation_failed")
+				}
+				select {
+				case <-workerCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
 		}()
 	}
 	if asyncWorker != nil {

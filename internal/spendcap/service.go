@@ -174,7 +174,7 @@ func (store *Store) DisablePolicy(ctx context.Context, id, actor, reason string)
 }
 
 func (store *Store) ReserveInTx(ctx context.Context, tx pgx.Tx, request Reservation) ([]Allocation, error) {
-	if tx == nil || !validID(request.ChargeID, "charge_") || !validID(request.ChannelID, "channel_") || request.Currency != ledger.Currency || request.EstimatedCost < 0 {
+	if tx == nil || !validChargeID(request.ChargeID) || !validID(request.ChannelID, "channel_") || request.Currency != ledger.Currency || request.EstimatedCost < 0 {
 		return nil, ErrInvalid
 	}
 	rows, err := tx.Query(ctx, `SELECT p.id,p.version,p.channel_id,p.period,p.limit_amount,c.provider FROM provider_channel_spend_policies p JOIN provider_channels c ON c.id=p.channel_id WHERE p.channel_id=$1 AND p.status='active' ORDER BY p.id FOR SHARE`, request.ChannelID)
@@ -240,7 +240,7 @@ func (store *Store) ReleaseInTx(ctx context.Context, tx pgx.Tx, chargeID string)
 	return store.finish(ctx, tx, chargeID, 0, "released")
 }
 func (store *Store) finish(ctx context.Context, tx pgx.Tx, chargeID string, actual int64, target string) error {
-	if tx == nil || !validID(chargeID, "charge_") || actual < 0 || (target != "captured" && target != "released") {
+	if tx == nil || !validChargeID(chargeID) || actual < 0 || (target != "captured" && target != "released") {
 		return ErrInvalid
 	}
 	rows, err := tx.Query(ctx, `SELECT policy_id,period_start,reserved_cost,state,captured_cost FROM provider_channel_spend_allocations WHERE charge_id=$1 ORDER BY policy_id FOR UPDATE`, chargeID)
@@ -341,6 +341,7 @@ func validID(value, prefix string) bool {
 	_, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
 	return err == nil
 }
+func validChargeID(value string) bool { return validID(value, "charge_") || validID(value, "chc_") }
 func (store *Store) id(prefix string) (string, error) {
 	value := make([]byte, 16)
 	if _, err := io.ReadFull(store.entropy, value); err != nil {

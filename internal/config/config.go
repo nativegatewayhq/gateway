@@ -87,6 +87,7 @@ type Config struct {
 	ChatTimeout                    time.Duration
 	ChatBodyBytes                  int64
 	OpenAIChatModels               []string
+	OpenAIChatModelLimits          map[string]ChatModelLimit
 	ImageEditsBodyBytes            int64
 	ImageEditSpoolLimit            int
 	BillingMode                    BillingMode
@@ -132,6 +133,7 @@ type Config struct {
 	JobManagementMode              JobManagementMode
 	JobManagementCursorSecrets     [][]byte
 }
+type ChatModelLimit struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 
 // Load reads configuration through lookup and validates every value before
 // the server starts. Errors name the setting but never echo its value.
@@ -146,6 +148,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ImagesBodyBytes:            defaultImagesBodyBytes,
 		ChatTimeout:                defaultImagesTimeout,
 		ChatBodyBytes:              defaultChatBodyBytes,
+		OpenAIChatModelLimits:      map[string]ChatModelLimit{},
 		ImageEditsBodyBytes:        defaultImageEditsBodyBytes,
 		ImageEditSpoolLimit:        8,
 		BillingMode:                BillingDisabled,
@@ -256,6 +259,23 @@ func Load(lookup LookupEnv) (Config, error) {
 			}
 			seen[model] = true
 			cfg.OpenAIChatModels = append(cfg.OpenAIChatModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_CHAT_MODEL_LIMITS"); ok {
+		for _, part := range strings.Split(value, ",") {
+			fields := strings.Split(strings.TrimSpace(part), ":")
+			if len(fields) != 3 {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODEL_LIMITS: expected model:maximum_input:maximum_output")
+			}
+			input, inputErr := strconv.ParseInt(fields[1], 10, 64)
+			output, outputErr := strconv.ParseInt(fields[2], 10, 64)
+			if fields[0] == "" || inputErr != nil || outputErr != nil || input < 1 || output < 1 || input > 10_000_000 || output > 1_000_000 {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODEL_LIMITS: invalid model limit")
+			}
+			if _, exists := cfg.OpenAIChatModelLimits[fields[0]]; exists {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODEL_LIMITS: duplicate model")
+			}
+			cfg.OpenAIChatModelLimits[fields[0]] = ChatModelLimit{input, output}
 		}
 	}
 	if value, ok := lookup("GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES"); ok {
@@ -401,7 +421,14 @@ func Load(lookup LookupEnv) (Config, error) {
 		return Config{}, fmt.Errorf("GATEWAY_JOB_MANAGEMENT_MODE: requires an asynchronous provider")
 	}
 	if cfg.BillingMode == BillingRequired && len(cfg.OpenAIChatModels) > 0 {
-		return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODELS: paid Chat requires the token settlement plan")
+		if len(cfg.OpenAIChatModelLimits) != len(cfg.OpenAIChatModels) {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODEL_LIMITS: every paid Chat model requires limits")
+		}
+		for _, model := range cfg.OpenAIChatModels {
+			if _, ok := cfg.OpenAIChatModelLimits[model]; !ok {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODEL_LIMITS: every paid Chat model requires limits")
+			}
+		}
 	}
 
 	return cfg, nil

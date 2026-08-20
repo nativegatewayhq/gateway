@@ -3,7 +3,7 @@ id: gateway-20260821-037
 title: Phase 4 OpenAI Chat Token Usage Billing and Settlement
 status: accepted
 created_at: 2026-08-21T01:38:12+09:00
-updated_at: 2026-08-21T01:38:12+09:00
+updated_at: 2026-08-21T04:20:00+09:00
 owners:
   - gateway
 initiative: phase-4-openai-chat-token-settlement
@@ -188,20 +188,24 @@ go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAISDKsUseOn
 
 ## 완료 조건
 
-- [ ] input/cached/output token 가격과 model limit이 immutable version으로 관리됨
-- [ ] 최대 비용 Reserve 전에는 Provider가 호출되지 않고 동시 요청에서도 Wallet이 음수가 되지 않음
-- [ ] actual usage Capture와 예약 차액 Release가 정수 rounding 규칙과 일치함
-- [ ] missing/invalid/excess usage와 timeout이 자동 Release되지 않고 reconciliation/manual review로 수렴함
-- [ ] Idempotency replay가 Provider 재호출과 Ledger 중복을 방지함
-- [ ] quota, spend cap, minimum margin과 model authorization이 dispatch 전에 적용됨
-- [ ] raw prompt, credential, token/금액 identity가 응답·로그·telemetry에 노출되지 않음
-- [ ] OpenAI Python/JavaScript SDK native 호환성이 유지됨
-- [ ] 전체 unit/race/integration/장애 테스트가 통과함
-- [ ] README와 Dashboard/Cloud/Conformance handoff 및 검증 증거가 갱신됨
+- [x] input/cached/output token 가격과 model limit이 immutable version으로 관리됨
+- [x] 최대 비용 Reserve 전에는 Provider가 호출되지 않고 동시 요청에서도 Wallet이 음수가 되지 않음
+- [x] actual usage Capture와 예약 차액 Release가 정수 rounding 규칙과 일치함
+- [x] missing/invalid/excess usage와 timeout이 자동 Release되지 않고 reconciliation/manual review로 수렴함
+- [x] Idempotency replay가 Provider 재호출과 Ledger 중복을 방지함
+- [x] quota, spend cap, minimum margin과 model authorization이 dispatch 전에 적용됨
+- [x] raw prompt, credential, token/금액 identity가 응답·로그·telemetry에 노출되지 않음
+- [x] OpenAI Python/JavaScript SDK native 호환성이 유지됨
+- [x] 전체 unit/race/integration/장애 테스트가 통과함
+- [x] README와 Dashboard/Cloud/Conformance handoff 및 검증 증거가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `make check`
+- `TEST_DATABASE_URL=... TEST_REDIS_URL=... make integration-test`
+- `go test -tags=sdkconformance ./protocols/openai -run TestOfficialOpenAISDKsUseOnlyBaseURLAndKey`
+- fresh PostgreSQL schema에서 migration 000001~000031 반복 적용
+- Chat Wallet reserve/usage capture/replay/unknown-outcome hold PostgreSQL 통합 테스트
 
 ## Rollback 계획
 
