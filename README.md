@@ -60,6 +60,9 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_CHAT_REQUEST_TIMEOUT` | `2m` | Non-streaming OpenAI Chat request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_STREAM_IDLE_TIMEOUT` | `30s` | Maximum idle interval between upstream streaming reads; maximum `10m` |
 | `GATEWAY_OPENAI_CHAT_MAX_BODY_BYTES` | `8388608` | Maximum Chat request and response body; maximum 32 MiB |
+| `GATEWAY_OPENAI_RESPONSES_MODELS` | unset | Comma-separated exact OpenAI Responses model IDs; BYOK-only |
+| `GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT` | `2m` | Non-streaming Responses request timeout; maximum `10m` |
+| `GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES` | `8388608` | Maximum Responses request and response body; maximum 32 MiB |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
 | `GATEWAY_REPLICATE_API_TOKEN` | unset | Optional Replicate upstream credential; enables the native Predictions route when models and a public base URL are configured |
 | `GATEWAY_REPLICATE_API_ENDPOINT` | `https://api.replicate.com` | Fixed Replicate API origin; loopback HTTP is accepted only for local testing |
@@ -172,6 +175,19 @@ Both BYOK and managed modes support native `stream: true` SSE. Managed requests 
 Streaming settlement captures validated terminal usage exactly once. A client disconnect, upstream reset or idle timeout, missing `[DONE]`, malformed/duplicate/missing usage, and downstream write failure retain the reservation for durable reconciliation; the Gateway never repeats the Provider request. Completed streaming idempotency keys are deliberately non-replayable because transcripts are not stored: reuse returns a conflict without another Provider call or Ledger mutation.
 
 Provider fallback and exact tokenizer-based preflight counting remain outside this phase.
+
+## OpenAI Responses
+
+Set `GATEWAY_OPENAI_RESPONSES_MODELS` to enable native non-streaming `POST /v1/responses`. The Gateway preserves typed input/output items, function tools, reasoning options, future fields, success bodies, and Provider error bodies without converting them to Chat Completions.
+
+```python
+from openai import OpenAI
+client = OpenAI(api_key="SERVICE_API_KEY", base_url="https://gateway.example/v1")
+response = client.responses.create(model="gpt-4.1", input="hello")
+print(response.output_text)
+```
+
+Responses is BYOK-only in this foundation. `GATEWAY_BILLING_MODE=required` with any Responses model fails configuration validation so an unsettled request cannot dispatch. Streaming, response retrieval/deletion/cancel, background mode, stored conversation lifecycle, and Responses usage settlement are deferred.
 
 ```python
 from openai import OpenAI

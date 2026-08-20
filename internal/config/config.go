@@ -89,6 +89,9 @@ type Config struct {
 	ChatBodyBytes                  int64
 	OpenAIChatModels               []string
 	OpenAIChatModelLimits          map[string]ChatModelLimit
+	OpenAIResponsesModels          []string
+	ResponsesTimeout               time.Duration
+	ResponsesBodyBytes             int64
 	ImageEditsBodyBytes            int64
 	ImageEditSpoolLimit            int
 	BillingMode                    BillingMode
@@ -151,6 +154,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		ChatStreamIdleTimeout:      30 * time.Second,
 		ChatBodyBytes:              defaultChatBodyBytes,
 		OpenAIChatModelLimits:      map[string]ChatModelLimit{},
+		ResponsesTimeout:           defaultImagesTimeout,
+		ResponsesBodyBytes:         defaultChatBodyBytes,
 		ImageEditsBodyBytes:        defaultImageEditsBodyBytes,
 		ImageEditSpoolLimit:        8,
 		BillingMode:                BillingDisabled,
@@ -269,6 +274,31 @@ func Load(lookup LookupEnv) (Config, error) {
 			seen[model] = true
 			cfg.OpenAIChatModels = append(cfg.OpenAIChatModels, model)
 		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_MODELS"); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || seen[model] {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MODELS: models must be unique non-empty values no longer than 200 bytes")
+			}
+			seen[model] = true
+			cfg.OpenAIResponsesModels = append(cfg.OpenAIResponsesModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.ResponsesTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES"); ok {
+		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || bodyBytes <= 0 || bodyBytes > 32*1024*1024 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES: must be an integer between 1 and 33554432")
+		}
+		cfg.ResponsesBodyBytes = bodyBytes
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_CHAT_MODEL_LIMITS"); ok {
 		for _, part := range strings.Split(value, ",") {
@@ -438,6 +468,9 @@ func Load(lookup LookupEnv) (Config, error) {
 				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODEL_LIMITS: every paid Chat model requires limits")
 			}
 		}
+	}
+	if cfg.BillingMode == BillingRequired && len(cfg.OpenAIResponsesModels) > 0 {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MODELS: managed Responses billing is not implemented")
 	}
 
 	return cfg, nil

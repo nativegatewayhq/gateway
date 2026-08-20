@@ -11,6 +11,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
+	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 )
 
 type ProviderAvailability interface {
@@ -25,6 +26,15 @@ type ModelsHandler struct {
 	common       *Handler
 	availability ProviderAvailability
 	chat         interface{ List() []chatoperation.Model }
+	responses    interface {
+		List() []responsesoperation.Model
+	}
+}
+
+func NewModelsHandlerWithChatAndResponses(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
+	List() []responsesoperation.Model
+}, availability ProviderAvailability) *ModelsHandler {
+	return &ModelsHandler{common: NewImagesHandler(logger, authenticator, models, nil, 1), chat: chat, responses: responses, availability: availability}
 }
 
 func NewModelsHandlerWithChat(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, availability ProviderAvailability) *ModelsHandler {
@@ -108,6 +118,23 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 	if handler.chat != nil {
 		for _, model := range handler.chat.List() {
 			if seen[model.ID] || !principal.AuthorizeModel("openai", chatoperation.Completions, model.ID) {
+				continue
+			}
+			available := false
+			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
+				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
+			} else {
+				available = configured[model.Provider]
+			}
+			if available {
+				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})
+				seen[model.ID] = true
+			}
+		}
+	}
+	if handler.responses != nil {
+		for _, model := range handler.responses.List() {
+			if seen[model.ID] || !principal.AuthorizeModel("openai", responsesoperation.Create, model.ID) {
 				continue
 			}
 			available := false
