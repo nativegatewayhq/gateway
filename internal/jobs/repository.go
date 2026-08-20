@@ -671,8 +671,11 @@ func updateJobStatus(ctx context.Context, tx pgx.Tx, current joboperation.Job, s
 		return joboperation.ErrInvalidState
 	}
 	var responseStatus, headers, body, digest, completed, category, settlement any
-	if status == joboperation.Succeeded || status == joboperation.Failed {
+	if observation.Snapshot.Status != 0 {
 		canonical := observation.Snapshot
+		if err := joboperation.ValidateSnapshot(canonical, 256*1024*1024); err != nil {
+			return err
+		}
 		canonical.SHA256 = sha256.Sum256(canonical.Body)
 		encoded, err := json.Marshal(canonical.Headers)
 		if err != nil {

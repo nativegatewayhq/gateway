@@ -21,6 +21,7 @@ type Routes struct {
 	OpenAIImages     http.Handler
 	OpenAIImageEdits http.Handler
 	OpenAIModels     http.Handler
+	Replicate        http.Handler
 }
 
 // NewHandler builds the Gateway-owned and accepted provider-native routes.
@@ -47,6 +48,10 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	}
 	if len(routeSets) > 0 && routeSets[0].OpenAIModels != nil {
 		mux.Handle("/v1/models", routeSets[0].OpenAIModels)
+	}
+	if len(routeSets) > 0 && routeSets[0].Replicate != nil {
+		mux.Handle("/v1/predictions", routeSets[0].Replicate)
+		mux.Handle("/v1/predictions/", routeSets[0].Replicate)
 	}
 	mux.HandleFunc("GET /health/live", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})

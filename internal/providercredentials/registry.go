@@ -14,9 +14,11 @@ import (
 const maxCredentialLength = 4096
 
 var environmentKeys = map[ProviderID]string{
-	Google: "GATEWAY_GOOGLE_API_KEY",
-	OpenAI: "GATEWAY_OPENAI_API_KEY",
-	XAI:    "GATEWAY_XAI_API_KEY",
+	Google:    "GATEWAY_GOOGLE_API_KEY",
+	OpenAI:    "GATEWAY_OPENAI_API_KEY",
+	XAI:       "GATEWAY_XAI_API_KEY",
+	Replicate: "GATEWAY_REPLICATE_API_TOKEN",
+	Fal:       "GATEWAY_FAL_API_KEY",
 }
 
 type LookupEnv func(string) (string, bool)
@@ -46,6 +48,8 @@ var legacyChannels = map[string]ProviderID{
 	"channel_00000000000000000000000000000001": OpenAI,
 	"channel_00000000000000000000000000000002": XAI,
 	"channel_00000000000000000000000000000003": Google,
+	"channel_00000000000000000000000000000004": Replicate,
+	"channel_00000000000000000000000000000005": Fal,
 }
 
 func LegacyChannel(provider ProviderID) (string, bool) {
@@ -59,7 +63,7 @@ func LegacyChannel(provider ProviderID) (string, bool) {
 
 func Load(lookup LookupEnv) (*Registry, error) {
 	registry := &Registry{credentials: make(map[ProviderID]Credential, len(environmentKeys))}
-	for _, provider := range []ProviderID{Google, OpenAI, XAI} {
+	for _, provider := range []ProviderID{Google, OpenAI, XAI, Replicate, Fal} {
 		environmentKey := environmentKeys[provider]
 		value, configured := lookup(environmentKey)
 		if !configured {
@@ -162,8 +166,10 @@ func (credential Credential) Apply(request *http.Request, provider ProviderID) e
 	switch provider {
 	case Google:
 		request.Header.Set("x-goog-api-key", string(credential.value))
-	case OpenAI, XAI:
+	case OpenAI, XAI, Replicate:
 		request.Header.Set("Authorization", "Bearer "+string(credential.value))
+	case Fal:
+		request.Header.Set("Authorization", "Key "+string(credential.value))
 	default:
 		return ErrUnknownProvider
 	}

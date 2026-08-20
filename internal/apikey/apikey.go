@@ -224,7 +224,8 @@ func validModelPermission(permission ModelPermission) bool {
 		return false
 	}
 	return (permission.Protocol == "openai" && (permission.Operation == "image.generate" || permission.Operation == "image.edit")) ||
-		(permission.Protocol == "gemini" && permission.Operation == "image.generate")
+		(permission.Protocol == "gemini" && permission.Operation == "image.generate") ||
+		(permission.Protocol == "replicate" && permission.Operation == "image.generate")
 }
 
 func (principal Principal) AuthorizeModel(protocol, operation, model string) bool {

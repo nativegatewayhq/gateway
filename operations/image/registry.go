@@ -2,6 +2,8 @@
 package image
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -75,9 +77,8 @@ type Registry struct{ routes map[string]ModelRoute }
 func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 	registry := &Registry{routes: make(map[string]ModelRoute, len(routes))}
 	candidateIDs := map[string]struct{}{}
-	channelIDs := map[string]struct{}{}
 	for _, route := range routes {
-		if !validProtocol(route.Protocol) || !validModelID(route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || len(route.Candidates) > MaxRouteCandidates || (route.Policy != Fixed && route.Policy != Priority && route.Policy != LowestCost && route.Policy != Weighted) {
+		if !validProtocol(route.Protocol) || !validProtocolModelID(route.Protocol, route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || len(route.Candidates) > MaxRouteCandidates || (route.Policy != Fixed && route.Policy != Priority && route.Policy != LowestCost && route.Policy != Weighted) {
 			return nil, ErrInvalidModel
 		}
 		key := route.Protocol + "\x00" + route.Model
@@ -97,7 +98,7 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 		fixedFound := false
 		var totalWeight uint64
 		for _, candidate := range route.Candidates {
-			if !validCandidateID(candidate.ID) || !validRouteProtocol(route.Protocol, candidate.Provider) || !validModelID(candidate.ProviderModel) || !validChannelID(candidate.ChannelID) || candidate.Priority < 0 || candidate.Weight > MaxCandidateWeight {
+			if !validCandidateID(candidate.ID) || !validRouteProtocol(route.Protocol, candidate.Provider) || !validProtocolModelID(route.Protocol, candidate.ProviderModel) || !validChannelID(candidate.ChannelID) || candidate.Priority < 0 || candidate.Weight > MaxCandidateWeight {
 				return nil, ErrInvalidModel
 			}
 			if route.Policy == Weighted {
@@ -113,11 +114,7 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 			if _, duplicate := candidateIDs[candidate.ID]; duplicate {
 				return nil, ErrInvalidModel
 			}
-			if _, duplicate := channelIDs[candidate.ChannelID]; duplicate {
-				return nil, ErrInvalidModel
-			}
 			candidateIDs[candidate.ID] = struct{}{}
-			channelIDs[candidate.ChannelID] = struct{}{}
 			fixedFound = fixedFound || candidate.ID == route.FixedCandidateID
 		}
 		if (route.Policy == Fixed && !fixedFound) || (route.Policy != Fixed && route.FixedCandidateID != "") || (route.Policy == Weighted && (totalWeight == 0 || totalWeight > MaxTotalWeight)) {
@@ -131,15 +128,33 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 }
 
 func DefaultRegistry() *Registry {
-	registry, err := NewRegistry(
-		ModelRoute{Protocol: "openai", Model: "gpt-image-1", Owner: "openai", Capabilities: []Capability{{Generate, JSON}, {Edit, Multipart}}, Policy: Fixed, FixedCandidateID: "candidate_openai_primary", Candidates: []ChannelCandidate{{ID: "candidate_openai_primary", Provider: providercredentials.OpenAI, ProviderModel: "gpt-image-1", ChannelID: "channel_00000000000000000000000000000001", Enabled: true}}},
-		ModelRoute{Protocol: "openai", Model: "grok-imagine-image-quality", Owner: "xai", Capabilities: []Capability{{Generate, JSON}, {Edit, JSON}}, Policy: Fixed, FixedCandidateID: "candidate_xai_primary", Candidates: []ChannelCandidate{{ID: "candidate_xai_primary", Provider: providercredentials.XAI, ProviderModel: "grok-imagine-image-quality", ChannelID: "channel_00000000000000000000000000000002", Enabled: true}}},
-		ModelRoute{Protocol: "gemini", Model: "gemini-image", Owner: "google", Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: "candidate_google_primary", Candidates: []ChannelCandidate{{ID: "candidate_google_primary", Provider: providercredentials.Google, ProviderModel: "gemini-image", ChannelID: "channel_00000000000000000000000000000003", Enabled: true}}},
-	)
+	registry, err := NewRegistry(defaultRoutes()...)
 	if err != nil {
 		panic("invalid built-in image model registry")
 	}
 	return registry
+}
+
+func DefaultRegistryWithReplicate(models []string) (*Registry, error) {
+	routes := defaultRoutes()
+	for _, model := range models {
+		digest := sha256.Sum256([]byte(model))
+		candidateID := "candidate_replicate_" + hex.EncodeToString(digest[:8])
+		owner := "replicate"
+		if before, _, ok := strings.Cut(model, "/"); ok && before != "" {
+			owner = before
+		}
+		routes = append(routes, ModelRoute{Protocol: "replicate", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Replicate, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000004", Enabled: true}}})
+	}
+	return NewRegistry(routes...)
+}
+
+func defaultRoutes() []ModelRoute {
+	return []ModelRoute{
+		ModelRoute{Protocol: "openai", Model: "gpt-image-1", Owner: "openai", Capabilities: []Capability{{Generate, JSON}, {Edit, Multipart}}, Policy: Fixed, FixedCandidateID: "candidate_openai_primary", Candidates: []ChannelCandidate{{ID: "candidate_openai_primary", Provider: providercredentials.OpenAI, ProviderModel: "gpt-image-1", ChannelID: "channel_00000000000000000000000000000001", Enabled: true}}},
+		ModelRoute{Protocol: "openai", Model: "grok-imagine-image-quality", Owner: "xai", Capabilities: []Capability{{Generate, JSON}, {Edit, JSON}}, Policy: Fixed, FixedCandidateID: "candidate_xai_primary", Candidates: []ChannelCandidate{{ID: "candidate_xai_primary", Provider: providercredentials.XAI, ProviderModel: "grok-imagine-image-quality", ChannelID: "channel_00000000000000000000000000000002", Enabled: true}}},
+		ModelRoute{Protocol: "gemini", Model: "gemini-image", Owner: "google", Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: "candidate_google_primary", Candidates: []ChannelCandidate{{ID: "candidate_google_primary", Provider: providercredentials.Google, ProviderModel: "gemini-image", ChannelID: "channel_00000000000000000000000000000003", Enabled: true}}},
+	}
 }
 
 func (registry *Registry) Resolve(model string, operation Operation, mediaType MediaType) (RoutingDecision, error) {
@@ -217,10 +232,12 @@ func (registry *Registry) ListProtocol(protocol string) []ModelRoute {
 	return models
 }
 
-func validProtocol(protocol string) bool { return protocol == "openai" || protocol == "gemini" }
+func validProtocol(protocol string) bool {
+	return protocol == "openai" || protocol == "gemini" || protocol == "replicate"
+}
 
 func validRouteProtocol(protocol string, provider providercredentials.ProviderID) bool {
-	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google)
+	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google) || (protocol == "replicate" && provider == providercredentials.Replicate)
 }
 
 func validCandidateID(value string) bool {
@@ -250,6 +267,18 @@ func validModelID(model string) bool {
 		return false
 	}
 	return true
+}
+
+func validProtocolModelID(protocol, model string) bool {
+	if protocol != "replicate" {
+		return validModelID(model)
+	}
+	ownerAndModel, version, ok := strings.Cut(model, ":")
+	if !ok || strings.Contains(version, ":") || !validModelID(version) {
+		return false
+	}
+	owner, name, ok := strings.Cut(ownerAndModel, "/")
+	return ok && !strings.Contains(name, "/") && validModelID(owner) && validModelID(name)
 }
 
 func validChannelID(channelID string) bool {
