@@ -74,7 +74,7 @@ func NewService(repository *Repository, providers map[string]Provider, config Se
 	}
 	webhooks := make(map[string]WebhookConfig, len(config.Webhooks))
 	for provider, webhook := range config.Webhooks {
-		if provider != "replicate" || webhook.BindingTTL <= 0 || webhook.BindingTTL > 30*24*time.Hour || strings.TrimSuffix(webhook.PublicBaseURL, "/") == "" || len(webhook.CallbackSecret) != 32 {
+		if !validWebhookProvider(provider) || webhook.BindingTTL <= 0 || webhook.BindingTTL > 30*24*time.Hour || strings.TrimSuffix(webhook.PublicBaseURL, "/") == "" || len(webhook.CallbackSecret) != 32 {
 			return nil, joboperation.ErrInvalid
 		}
 		webhook.PublicBaseURL = strings.TrimSuffix(webhook.PublicBaseURL, "/")

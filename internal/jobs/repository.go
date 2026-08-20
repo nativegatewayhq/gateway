@@ -83,7 +83,7 @@ func NewDefaultRepository(pool *pgxpool.Pool) (*Repository, error) {
 func (repository *Repository) Ready(ctx context.Context) error { return repository.pool.Ping(ctx) }
 
 func (repository *Repository) CreateWebhookBinding(ctx context.Context, jobID, provider, channelID string, callbackSecret []byte, ttl time.Duration) (WebhookBinding, error) {
-	if !joboperation.ValidID(jobID) || provider != "replicate" || channelID == "" || len(callbackSecret) != 32 || ttl <= 0 || ttl > 30*24*time.Hour {
+	if !joboperation.ValidID(jobID) || !validWebhookProvider(provider) || channelID == "" || len(callbackSecret) != 32 || ttl <= 0 || ttl > 30*24*time.Hour {
 		return WebhookBinding{}, joboperation.ErrInvalid
 	}
 	token, err := repository.id("whk_")
@@ -380,7 +380,7 @@ func (repository *Repository) ApplyObservation(ctx context.Context, lease Lease,
 // HTTP boundary; this method enforces the independent callback capability and
 // Provider identity binding before mutating the Job or settlement intent.
 func (repository *Repository) ApplyWebhook(ctx context.Context, request WebhookObservation) (joboperation.Job, bool, error) {
-	if !joboperation.ValidID(request.JobID) || request.Provider != "replicate" || request.DeliveryID == "" || len(request.DeliveryID) > 200 || request.Token == "" || len(request.CallbackSecret) != 32 || len(request.ProviderJobID) > 500 || !request.Observation.Status.Terminal() {
+	if !joboperation.ValidID(request.JobID) || !validWebhookProvider(request.Provider) || request.DeliveryID == "" || len(request.DeliveryID) > 200 || request.Token == "" || len(request.CallbackSecret) != 32 || len(request.ProviderJobID) > 500 || !request.Observation.Status.Terminal() {
 		return joboperation.Job{}, false, joboperation.ErrInvalid
 	}
 	if request.Observation.ProviderJobID != "" && request.Observation.ProviderJobID != request.ProviderJobID {
@@ -482,6 +482,8 @@ func webhookTokenDigest(secret []byte, token string) []byte {
 	_, _ = mac.Write([]byte(token))
 	return mac.Sum(nil)
 }
+
+func validWebhookProvider(provider string) bool { return provider == "replicate" || provider == "fal" }
 
 func (repository *Repository) Reschedule(ctx context.Context, lease Lease, next time.Time, category string) error {
 	if next.IsZero() || !validCategory(category) {

@@ -224,9 +224,11 @@ func run(stdout, stderr io.Writer) int {
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
+	var falWebhookHandler http.Handler
 	var asyncWorker *jobs.Worker
 	asyncProviders := map[string]jobs.Provider{}
 	var replicateAdapter *replicateProvider.Client
+	var falAdapter *falProvider.Client
 	if cfg.ReplicateEnabled {
 		var replicateErr error
 		replicateAdapter, replicateErr = replicateProvider.New(replicateProvider.Config{Endpoint: cfg.ReplicateEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.ReplicateTimeout, MaximumBodyBytes: cfg.ReplicateBodyBytes}, providerCredentialRegistry)
@@ -237,7 +239,8 @@ func run(stdout, stderr io.Writer) int {
 		asyncProviders["replicate"] = replicateAdapter
 	}
 	if cfg.FalEnabled {
-		falAdapter, falErr := falProvider.New(falProvider.Config{Endpoint: cfg.FalEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.FalTimeout, MaximumBodyBytes: cfg.FalBodyBytes}, providerCredentialRegistry)
+		var falErr error
+		falAdapter, falErr = falProvider.New(falProvider.Config{Endpoint: cfg.FalEndpoint, PublicBaseURL: cfg.PublicBaseURL, Timeout: cfg.FalTimeout, MaximumBodyBytes: cfg.FalBodyBytes}, providerCredentialRegistry)
 		if falErr != nil {
 			logger.Error("gateway fal provider initialization failed")
 			return 1
@@ -251,8 +254,12 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		serviceConfig := jobs.ServiceConfig{SubmitLease: cfg.ReconcileLease, PollDelay: cfg.ReconcileInterval}
+		serviceConfig.Webhooks = map[string]jobs.WebhookConfig{}
 		if cfg.ReplicateWebhookMode == config.ReplicateWebhookRequired {
-			serviceConfig.Webhooks = map[string]jobs.WebhookConfig{"replicate": {PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.ReplicateWebhookBindingTTL, CallbackSecret: cfg.ReplicateWebhookCallbackSecret}}
+			serviceConfig.Webhooks["replicate"] = jobs.WebhookConfig{PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.ReplicateWebhookBindingTTL, CallbackSecret: cfg.ReplicateWebhookCallbackSecret}
+		}
+		if cfg.FalWebhookMode == config.FalWebhookRequired {
+			serviceConfig.Webhooks["fal"] = jobs.WebhookConfig{PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.FalWebhookBindingTTL, CallbackSecret: cfg.FalWebhookCallbackSecret}
 		}
 		jobService, serviceErr := jobs.NewService(jobRepository, asyncProviders, serviceConfig, "gateway-submit")
 		if serviceErr != nil {
@@ -285,6 +292,20 @@ func run(stdout, stderr io.Writer) int {
 		}
 		if cfg.FalEnabled {
 			falHandler = falProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.FalBodyBytes, cfg.PublicBaseURL)
+			if cfg.FalWebhookMode == config.FalWebhookRequired {
+				verifier, verifierErr := falProtocol.NewFalJWKSVerifier(falProtocol.JWKSConfig{URL: cfg.FalJWKSURL, ExpectedURL: "https://rest.fal.ai/.well-known/jwks.json", Timeout: cfg.FalJWKSTimeout, CacheTTL: cfg.FalJWKSCacheTTL, RefreshCooldown: cfg.FalJWKSRefreshCooldown, MaximumBodyBytes: 64 * 1024})
+				if verifierErr != nil {
+					logger.Error("gateway fal webhook verifier initialization failed")
+					return 1
+				}
+				webhook, webhookErr := falProtocol.NewWebhookHandler(logger, verifier, jobService, falAdapter, cfg.FalBodyBytes)
+				if webhookErr != nil {
+					logger.Error("gateway fal webhook handler initialization failed")
+					return 1
+				}
+				webhook.SetTelemetry(telemetryRuntime.Recorder)
+				falWebhookHandler = webhook
+			}
 		}
 		readinessChecks = append(readinessChecks, jobRepository.Ready)
 	}
@@ -334,6 +355,7 @@ func run(stdout, stderr io.Writer) int {
 		Replicate:           replicateHandler,
 		ReplicateWebhook:    replicateWebhookHandler,
 		Fal:                 falHandler,
+		FalWebhook:          falWebhookHandler,
 		ClientIPResolver:    clientIPResolver,
 		Telemetry:           telemetryRuntime.Recorder,
 		TracePropagator:     telemetryRuntime.Propagator,

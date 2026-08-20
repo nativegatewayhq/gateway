@@ -228,6 +228,8 @@ func requestMetadata(request *http.Request) (string, string, string) {
 		return "replicate", "image.generate", "/v1/predictions/{id}"
 	case strings.HasPrefix(path, "/internal/webhooks/replicate/"):
 		return "replicate", "image.generate", "/internal/webhooks/replicate/{job}/{token}"
+	case strings.HasPrefix(path, "/internal/webhooks/fal/"):
+		return "fal", "image.generate", "/internal/webhooks/fal/{job}/{token}"
 	case strings.HasPrefix(path, "/v1beta/models/"):
 		return "gemini", "image.generate", "/v1beta/models/{model}:generateContent"
 	case path == "/health/live":
@@ -290,5 +292,5 @@ func boundedRejection(value string) string {
 }
 func boundedSource(value string) string { return allowed(value, "url", "base64", "inline") }
 func boundedRoute(value string) string {
-	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/models", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
+	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/models", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
 }
