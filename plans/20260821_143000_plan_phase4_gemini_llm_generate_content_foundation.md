@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-042
 title: Phase 4 Gemini Native LLM generateContent Foundation
-status: in_progress
+status: completed
 created_at: 2026-08-21T14:30:00+09:00
-updated_at: 2026-08-21T15:00:00+09:00
+updated_at: 2026-08-21T15:40:00+09:00
 owners:
   - gateway
 initiative: phase-4-gemini-llm-generate-content-foundation
@@ -171,20 +171,24 @@ go test -tags=sdkconformance ./protocols/gemini -run TestOfficialGeminiLLMGenera
 
 ## 완료 조건
 
-- [ ] 공식 Google Gen AI Python/JavaScript SDK가 key/base URL 변경만으로 non-streaming LLM 요청에 성공함
-- [ ] Gemini image와 LLM operation이 payload 추측 없이 registry에서 분리됨
-- [ ] request/response native JSON bytes와 function calling field가 보존됨
-- [ ] API key permission, rate limit, network policy와 telemetry가 `gemini + chat.completions`를 사용함
-- [ ] 관리형 LLM 요청이 token 과금 없이 Provider로 전달되지 않음
-- [ ] 기존 Gemini 이미지 과금·저장·idempotency 동작이 회귀하지 않음
-- [ ] credential, prompt, output과 tool payload가 로그·telemetry에 노출되지 않음
-- [ ] 전체 unit/race/integration/공식 SDK 테스트가 통과함
-- [ ] README와 멀티레포 handoff가 갱신됨
-- [ ] 재현 가능한 검증 증거가 기록됨
+- [x] 공식 Google Gen AI Python/JavaScript SDK가 key/base URL 변경만으로 non-streaming LLM 요청에 성공함
+- [x] Gemini image와 LLM operation이 payload 추측 없이 registry에서 분리됨
+- [x] request/response native JSON bytes와 function calling field가 보존됨
+- [x] API key permission, rate limit, network policy와 telemetry가 `gemini + chat.completions`를 사용함
+- [x] 관리형 LLM 요청이 token 과금 없이 Provider로 전달되지 않음
+- [x] 기존 Gemini 이미지 과금·저장·idempotency 동작이 회귀하지 않음
+- [x] credential, prompt, output과 tool payload가 로그·telemetry에 노출되지 않음
+- [x] 전체 unit/race/integration/공식 SDK 테스트가 통과함
+- [x] README와 멀티레포 handoff가 갱신됨
+- [x] 재현 가능한 검증 증거가 기록됨
 
 ## 검증 증거
 
-구현 PR에서 commit, CI run, 로컬 검증 명령과 결과를 기록한다.
+- 구현 commit `47ed251`
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check`: gofmt, vet, 전체 race unit test와 모든 Gateway binary build 통과
+- 전용 PostgreSQL `gateway_plan042`과 Redis에서 `make integration-test`: migration 000036, API key 권한, Gemini image와 전체 Gateway integration 통과
+- `go test -tags=sdkconformance ./protocols/gemini -run TestOfficialGeminiLLMGenerateContentSDKs -count=1`: `google-genai` Python 2.19.0과 `@google/genai` JavaScript 공식 SDK 통과
+- native request/response byte 보존, function declaration, operation-aware authorization과 managed pre-dispatch fail-closed 회귀 통과
 
 ## Rollback 계획
 
