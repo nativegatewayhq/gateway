@@ -111,6 +111,7 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		readinessChecks = append(readinessChecks, objects.Ready)
+		imageResults.SetTelemetry(telemetryRuntime.Recorder)
 	}
 	var redisLimiter *ratelimit.RedisLimiter
 	if cfg.RateLimitMode == config.RateLimitRequired {
@@ -201,6 +202,12 @@ func run(stdout, stderr io.Writer) int {
 		openAIImagesHandler.SetResultManager(imageResults)
 		openAIImageEditsHandler.SetResultManager(imageResults)
 	}
+	if reconciliationWorker != nil {
+		reconciliationWorker.SetTelemetry(telemetryRuntime.Recorder)
+	}
+	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
+	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
+	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIModelsHandler := openaiProtocol.NewModelsHandler(logger, apiKeyAuthenticator, imageModels, providerCredentialRegistry)
 	clientIPResolver, resolverErr := clientip.New(cfg.TrustedProxyPrefixes)
 	if resolverErr != nil {

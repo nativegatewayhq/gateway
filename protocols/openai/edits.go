@@ -18,6 +18,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
 )
@@ -60,6 +61,10 @@ func NewBillableEditHandlerWithAvailabilityAndHealth(logger *slog.Logger, authen
 
 func (handler *EditHandler) SetResultManager(manager ResultManager) {
 	handler.common.SetResultManager(manager)
+}
+
+func (handler *EditHandler) SetTelemetry(recorder *telemetry.Recorder) {
+	handler.common.SetTelemetry(recorder)
 }
 
 func (handler *EditHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -317,7 +322,10 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	dispatched = true
-	response, err := executor.Generate(request.Context(), openaiimages.Request{Operation: openaiimages.Edit, ChannelID: route.ChannelID, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
+	if handler.common.telemetry != nil {
+		handler.common.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "openai", Operation: string(imageoperation.Edit), Policy: string(route.Policy), Outcome: "success"})
+	}
+	response, err := handler.common.executeProvider(request.Context(), executor, route, imageoperation.Edit, openaiimages.Request{Operation: openaiimages.Edit, ChannelID: route.ChannelID, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
 	handler.common.observeHealth(request, route, healthPermit, response, err)
 	if err != nil {
 		if charge != nil {

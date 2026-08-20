@@ -29,6 +29,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/providers/google"
 )
@@ -77,9 +78,11 @@ type Handler struct {
 	weighted      imageoperation.WeightedSampler
 	health        providerhealth.Gate
 	results       ResultManager
+	telemetry     *telemetry.Recorder
 }
 
-func (handler *Handler) SetResultManager(manager ResultManager) { handler.results = manager }
+func (handler *Handler) SetResultManager(manager ResultManager)    { handler.results = manager }
+func (handler *Handler) SetTelemetry(recorder *telemetry.Recorder) { handler.telemetry = recorder }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, executor Executor, maxBodyBytes int64) *Handler {
 	return NewHandlerWithHealth(logger, authenticator, executor, maxBodyBytes, providerhealth.NoopGate{})
@@ -117,7 +120,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	started := time.Now()
 	model, _ := modelFromRequest(request)
 	providerModel := model
-	candidateID, channelID, routingPolicy := "", "", ""
+	candidateID, channelID, routingPolicy := "", "", "fixed"
 	if legacyChannel, ok := providercredentials.LegacyChannel(providercredentials.Google); ok {
 		channelID = legacyChannel
 	}
@@ -250,6 +253,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		if found {
+			if handler.telemetry != nil {
+				handler.telemetry.Billing(request.Context(), telemetry.BillingRecord{Protocol: "gemini", Operation: string(imageoperation.Generate), Transition: "replay", Outcome: "replay"})
+			}
 			handler.writeSnapshot(tracked, replayed.Response, true)
 			return
 		}
@@ -268,7 +274,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	dispatched = true
-	response, err := handler.executor.GenerateContent(request.Context(), google.GenerateContentRequest{
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "gemini", Operation: string(imageoperation.Generate), Policy: routingPolicy, Outcome: "success"})
+	}
+	response, err := handler.executeProvider(request.Context(), google.GenerateContentRequest{
 		Model:       providerModel,
 		ChannelID:   channelID,
 		Query:       request.URL.Query(),
@@ -350,6 +359,41 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
+func (handler *Handler) executeProvider(ctx context.Context, providerRequest google.GenerateContentRequest) (response *http.Response, err error) {
+	if handler.telemetry == nil {
+		return handler.executor.GenerateContent(ctx, providerRequest)
+	}
+	providerCtx, span, started := handler.telemetry.StartProvider(ctx, "google", "gemini", string(imageoperation.Generate))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: string(imageoperation.Generate), Outcome: "failure"})
+			panic(recovered)
+		}
+	}()
+	response, err = handler.executor.GenerateContent(providerCtx, providerRequest)
+	handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: string(imageoperation.Generate), Outcome: geminiProviderTelemetryOutcome(response, err)})
+	return response, err
+}
+
+func geminiProviderTelemetryOutcome(response *http.Response, err error) string {
+	switch {
+	case errors.Is(err, google.ErrTimeout):
+		return "timeout"
+	case errors.Is(err, google.ErrCanceled):
+		return "canceled"
+	case err != nil || response == nil:
+		return "connection"
+	case response.StatusCode >= 200 && response.StatusCode <= 299:
+		return "success"
+	case response.StatusCode == http.StatusTooManyRequests:
+		return "rate_limited"
+	case response.StatusCode >= 500:
+		return "server_error"
+	default:
+		return "neutral"
+	}
+}
+
 func (handler *Handler) storageErrorSnapshot() billing.ResponseSnapshot {
 	body := []byte(`{"error":{"code":502,"message":"managed image result unavailable","status":"UNAVAILABLE"}}`)
 	return billing.ResponseSnapshot{Status: http.StatusBadGateway, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
@@ -357,7 +401,13 @@ func (handler *Handler) storageErrorSnapshot() billing.ResponseSnapshot {
 
 func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http.Request, principal apikey.Principal, model string) bool {
 	if principal.AuthorizeModel("gemini", string(imageoperation.Generate), model) {
+		if handler.telemetry != nil {
+			handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "model_authorization", Outcome: "success"})
+		}
 		return true
+	}
+	if handler.telemetry != nil {
+		handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "model_authorization", Outcome: "failure"})
 	}
 	handler.logger.Info("API key model authorization denied", "request_id", requestid.FromContext(request.Context()), "api_key_id", principal.APIKeyID, "project_id", principal.ProjectID, "protocol", "gemini", "operation", string(imageoperation.Generate), "model", model, "category", "denied")
 	writeError(writer, http.StatusForbidden, "PERMISSION_DENIED", "API key is not permitted to use this model")
@@ -382,7 +432,10 @@ func geminiProviderConfigured(ctx context.Context, availability ProviderAvailabi
 }
 
 func (handler *Handler) logCandidateSkip(request *http.Request, decision imageoperation.RoutingDecision, category string) {
-	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
+	handler.logger.InfoContext(request.Context(), "gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", category)
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "gemini", Operation: string(imageoperation.Generate), Policy: string(decision.Policy), Outcome: "failure", Rejection: category})
+	}
 }
 
 func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageoperation.RoutingDecision, err error) {
@@ -392,10 +445,16 @@ func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageope
 		attributes = append(attributes, "period", limitErr.Period, "reset_at", limitErr.ResetAt)
 	}
 	handler.logger.Info("gemini routing candidate skipped", attributes...)
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "gemini", Operation: string(imageoperation.Generate), Policy: string(decision.Policy), Outcome: "failure", Rejection: "spend_cap_exhausted"})
+	}
 }
 
 func (handler *Handler) logCredentialSkip(request *http.Request, decision imageoperation.RoutingDecision) {
 	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", "credential_unavailable")
+	if handler.telemetry != nil {
+		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "gemini", Operation: string(imageoperation.Generate), Policy: string(decision.Policy), Outcome: "failure", Rejection: "credential_unavailable"})
+	}
 }
 
 func (handler *Handler) healthyCandidates(request *http.Request, candidates []imageoperation.RoutingDecision) ([]imageoperation.RoutingDecision, error) {
@@ -559,7 +618,7 @@ func (handler *Handler) selectNewBillableCandidate(writer http.ResponseWriter, r
 					return geminiBillableSelection{}, false
 				}
 			}
-			started, beginErr := handler.billing.Begin(request.Context(), attempt)
+			started, beginErr := handler.beginBilling(request.Context(), attempt)
 			if beginErr != nil {
 				handler.releaseHealthPermit(request, permit)
 				if lowestCost && errors.Is(beginErr, billing.ErrPriceSnapshotChanged) {
@@ -641,7 +700,7 @@ func (handler *Handler) selectWeightedCandidate(writer http.ResponseWriter, requ
 			handler.releaseHealthPermit(request, permit)
 			return geminiBillableSelection{}, false
 		}
-		started, err := handler.billing.Begin(request.Context(), attempt)
+		started, err := handler.beginBilling(request.Context(), attempt)
 		if err != nil {
 			handler.releaseHealthPermit(request, permit)
 			if errors.Is(err, spendcap.ErrExceeded) {
@@ -720,7 +779,16 @@ func (handler *Handler) prepareBillableAttempts(request *http.Request, candidate
 	return attempts, nil
 }
 
-func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {
+func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (principal apikey.Principal, allowed bool) {
+	defer func() {
+		if handler.telemetry != nil {
+			outcome := "failure"
+			if allowed {
+				outcome = "success"
+			}
+			handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "authenticate", Outcome: outcome})
+		}
+	}()
 	if handler.authenticator == nil {
 		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "authentication service unavailable")
 		return apikey.Principal{}, false
@@ -734,10 +802,13 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
 		return apikey.Principal{}, false
 	}
-	principal, err := handler.authenticator.Authenticate(request.Context(), raw)
+	principal, err = handler.authenticator.Authenticate(request.Context(), raw)
 	if err != nil {
 		var denied *networkauth.DeniedError
 		if errors.As(err, &denied) {
+			if handler.telemetry != nil {
+				handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "network", Outcome: "failure"})
+			}
 			attributes := []any{"request_id", requestid.FromContext(request.Context()), "api_key_id", denied.APIKeyID, "project_id", denied.ProjectID, "category", "network_not_allowed"}
 			if denied.ClientIP.IsValid() {
 				attributes = append(attributes, "client_ip", denied.ClientIP.String())
@@ -748,6 +819,9 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 		}
 		var limited *ratelimit.LimitError
 		if errors.As(err, &limited) {
+			if handler.telemetry != nil {
+				handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "rate_limit", Outcome: "rate_limited"})
+			}
 			handler.logger.Info("API key request rate limited", "request_id", requestid.FromContext(request.Context()), "api_key_id", limited.APIKeyID, "project_id", limited.ProjectID, "outcome", "limited", "retry_after_ms", limited.Decision.RetryAfter.Milliseconds())
 			writeGeminiRateLimitHeaders(writer, limited.Decision)
 			writeError(writer, http.StatusTooManyRequests, "RESOURCE_EXHAUSTED", "rate limit exceeded")
@@ -766,6 +840,9 @@ func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.R
 		return apikey.Principal{}, false
 	}
 	if principal.RateLimitState != nil {
+		if handler.telemetry != nil {
+			handler.telemetry.Authentication(request.Context(), telemetry.AuthenticationRecord{Protocol: "gemini", Stage: "rate_limit", Outcome: "success"})
+		}
 		writer.Header().Set("X-RateLimit-Limit", strconv.FormatInt(principal.RateLimitState.Limit, 10))
 		writer.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(principal.RateLimitState.Remaining, 10))
 		writer.Header().Set("X-RateLimit-Reset", strconv.FormatInt(principal.RateLimitState.ResetAt.Unix(), 10))
@@ -788,13 +865,41 @@ func writeGeminiRateLimitHeaders(writer http.ResponseWriter, decision ratelimit.
 func (handler *Handler) complete(ctx context.Context, chargeID string, success bool, snapshot billing.ResponseSnapshot) (billing.Charge, error) {
 	settlementContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	return handler.billing.Complete(settlementContext, chargeID, success, snapshot)
+	charge, err := handler.billing.Complete(settlementContext, chargeID, success, snapshot)
+	if handler.telemetry != nil {
+		protocol, operation := telemetry.ProtocolOperation(ctx)
+		transition, outcome := "release", "success"
+		if success {
+			transition = "capture"
+		}
+		if err != nil {
+			outcome = "failure"
+		}
+		handler.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: protocol, Operation: operation, Transition: transition, Outcome: outcome})
+	}
+	return charge, err
+}
+
+func (handler *Handler) beginBilling(ctx context.Context, request billing.BeginRequest) (billing.Charge, error) {
+	charge, err := handler.billing.Begin(ctx, request)
+	if handler.telemetry != nil {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		handler.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: request.Protocol, Operation: request.Operation, Transition: "begin", Outcome: outcome})
+	}
+	return charge, err
 }
 
 func (handler *Handler) reconciliationError(writer http.ResponseWriter, ctx context.Context, chargeID string, observation billing.Observation) {
 	markContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_ = handler.billing.MarkReconciling(markContext, chargeID, observation)
+	if handler.telemetry != nil {
+		protocol, operation := telemetry.ProtocolOperation(ctx)
+		handler.telemetry.Billing(ctx, telemetry.BillingRecord{Protocol: protocol, Operation: operation, Transition: "reconciling", Outcome: "success"})
+	}
 	writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "billing settlement is pending")
 }
 

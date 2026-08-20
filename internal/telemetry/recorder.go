@@ -26,6 +26,7 @@ type Recorder struct {
 	billing          metric.Int64Counter
 	storage          metric.Int64Counter
 	reconciliation   metric.Int64Counter
+	authentication   metric.Int64Counter
 }
 
 func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Recorder, error) {
@@ -69,7 +70,11 @@ func NewRecorder(traces trace.TracerProvider, metrics metric.MeterProvider) (*Re
 	if err != nil {
 		return nil, err
 	}
-	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation}, nil
+	authentication, err := meter.Int64Counter("gateway.authentication.decisions", metric.WithUnit("{decision}"))
+	if err != nil {
+		return nil, err
+	}
+	return &Recorder{tracer: traces.Tracer("github.com/nativegatewayhq/gateway"), httpRequests: httpRequests, httpDuration: httpDuration, httpActive: httpActive, providerRequests: providerRequests, providerDuration: providerDuration, routes: routes, billing: billing, storage: storage, reconciliation: reconciliation, authentication: authentication}, nil
 }
 
 type HTTPRecord struct {
@@ -83,12 +88,21 @@ type ProviderRecord struct {
 	Duration                               time.Duration
 }
 
-type RouteRecord struct{ Protocol, Operation, Policy, Outcome string }
+type RouteRecord struct{ Protocol, Operation, Policy, Outcome, Rejection string }
+type AuthenticationRecord struct{ Protocol, Stage, Outcome string }
 type BillingRecord struct{ Protocol, Operation, Transition, Outcome string }
 type StorageRecord struct{ Protocol, Stage, Source, Outcome string }
 type ReconciliationRecord struct {
 	Outcome string
 	Count   int64
+}
+
+type contextMetadataKey struct{}
+type contextMetadata struct{ protocol, operation string }
+
+func ProtocolOperation(ctx context.Context) (string, string) {
+	metadata, _ := ctx.Value(contextMetadataKey{}).(contextMetadata)
+	return boundedProtocol(metadata.protocol), boundedOperation(metadata.operation)
 }
 
 func (recorder *Recorder) RecordHTTP(ctx context.Context, record HTTPRecord) {
@@ -116,7 +130,10 @@ func (recorder *Recorder) EndProvider(ctx context.Context, span trace.Span, star
 }
 
 func (recorder *Recorder) Route(ctx context.Context, record RouteRecord) {
-	recorder.routes.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.operation", boundedOperation(record.Operation)), attribute.String("gateway.route.policy", boundedPolicy(record.Policy)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
+	recorder.routes.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.operation", boundedOperation(record.Operation)), attribute.String("gateway.route.policy", boundedPolicy(record.Policy)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome)), attribute.String("gateway.route.rejection", boundedRejection(record.Rejection))))
+}
+func (recorder *Recorder) Authentication(ctx context.Context, record AuthenticationRecord) {
+	recorder.authentication.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.auth.stage", boundedAuthStage(record.Stage)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
 }
 func (recorder *Recorder) Billing(ctx context.Context, record BillingRecord) {
 	recorder.billing.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", boundedProtocol(record.Protocol)), attribute.String("gateway.operation", boundedOperation(record.Operation)), attribute.String("gateway.billing.transition", boundedTransition(record.Transition)), attribute.String("gateway.outcome", boundedOutcome(record.Outcome))))
@@ -138,6 +155,7 @@ func (recorder *Recorder) Middleware(propagator propagation.TextMapPropagator, n
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		ctx := propagator.Extract(request.Context(), propagation.HeaderCarrier(request.Header))
 		protocol, operation, route := requestMetadata(request)
+		ctx = context.WithValue(ctx, contextMetadataKey{}, contextMetadata{protocol: protocol, operation: operation})
 		ctx, span := recorder.tracer.Start(ctx, request.Method+" "+route, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attribute.String("http.request.method", request.Method), attribute.String("http.route", route), attribute.String("gateway.protocol", protocol), attribute.String("gateway.operation", operation)))
 		started := time.Now()
 		recorder.httpActive.Add(ctx, 1, metric.WithAttributes(attribute.String("gateway.protocol", protocol), attribute.String("gateway.operation", operation)))
@@ -175,6 +193,15 @@ func (writer *telemetryResponseWriter) Write(body []byte) (int, error) {
 		writer.WriteHeader(http.StatusOK)
 	}
 	return writer.ResponseWriter.Write(body)
+}
+func (writer *telemetryResponseWriter) Unwrap() http.ResponseWriter { return writer.ResponseWriter }
+func (writer *telemetryResponseWriter) Flush() {
+	if writer.status == 0 {
+		writer.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func requestMetadata(request *http.Request) (string, string, string) {
@@ -225,7 +252,13 @@ func boundedOutcome(value string) string {
 func boundedTransition(value string) string {
 	return allowed(value, "begin", "capture", "release", "reconciling", "replay")
 }
-func boundedStage(value string) string  { return allowed(value, "fetch", "upload", "transform") }
+func boundedStage(value string) string { return allowed(value, "fetch", "upload", "transform") }
+func boundedAuthStage(value string) string {
+	return allowed(value, "authenticate", "network", "rate_limit", "model_authorization")
+}
+func boundedRejection(value string) string {
+	return allowed(value, "none", "circuit_open", "circuit_unavailable", "price_unavailable", "price_race_unavailable", "margin", "spend_cap_exhausted", "credential_unavailable", "provider_unavailable", "executor_unavailable")
+}
 func boundedSource(value string) string { return allowed(value, "url", "base64", "inline") }
 func boundedRoute(value string) string {
 	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/models", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")

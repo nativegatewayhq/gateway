@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
+	"github.com/nativegatewayhq/gateway/internal/telemetry"
 )
 
 var ErrInvalidConfig = errors.New("invalid reconciliation configuration")
@@ -47,7 +48,10 @@ type Worker struct {
 	owner     string
 	now       func() time.Time
 	results   ResultManager
+	telemetry *telemetry.Recorder
 }
+
+func (worker *Worker) SetTelemetry(recorder *telemetry.Recorder) { worker.telemetry = recorder }
 
 type ResultManager interface {
 	Transform(context.Context, imagestorage.TransformInput) ([]byte, error)
@@ -103,6 +107,21 @@ func (worker *Worker) Run(ctx context.Context, onError func(error)) {
 }
 
 func (worker *Worker) RunOnce(ctx context.Context) (RunResult, error) {
+	result, err := worker.runOnce(ctx)
+	if worker.telemetry != nil {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		worker.telemetry.Reconciliation(ctx, telemetry.ReconciliationRecord{Outcome: outcome, Count: 1})
+		worker.telemetry.Reconciliation(ctx, telemetry.ReconciliationRecord{Outcome: "resolved", Count: int64(result.Resolved)})
+		worker.telemetry.Reconciliation(ctx, telemetry.ReconciliationRecord{Outcome: "retried", Count: int64(result.Retried)})
+		worker.telemetry.Reconciliation(ctx, telemetry.ReconciliationRecord{Outcome: "manual", Count: int64(result.Manual)})
+	}
+	return result, err
+}
+
+func (worker *Worker) runOnce(ctx context.Context) (RunResult, error) {
 	tasks, err := worker.claim(ctx, worker.now().UTC())
 	if err != nil {
 		return RunResult{}, err

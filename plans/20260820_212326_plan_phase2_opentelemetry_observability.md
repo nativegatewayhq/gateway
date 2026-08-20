@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-028
 title: Phase 2 OpenTelemetry Tracing and Metrics
-status: in_progress
+status: completed
 created_at: 2026-08-20T21:23:26+09:00
-updated_at: 2026-08-20T21:23:26+09:00
+updated_at: 2026-08-20T21:41:47+09:00
 owners:
   - gateway
 initiative: phase-2-opentelemetry-observability
@@ -194,25 +194,30 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] disabled mode가 기존 native wire, readiness와 log behavior를 보존함
-- [ ] optional/required OTLP lifecycle과 bounded shutdown이 검증됨
-- [ ] OpenAI/Gemini server span과 RED metrics가 정확한 protocol/operation을 사용함
-- [ ] routing, Provider, billing, storage와 reconciliation 단계가 동일 trace에서 상관됨
-- [ ] 실제 Provider dispatch만 client span/duration을 생성함
-- [ ] replay가 Provider/storage span을 만들지 않고 replay metric만 기록함
-- [ ] exporter 장애가 client response, Wallet/Ledger, asset와 worker lease를 변경하지 않음
-- [ ] inbound W3C context를 추출하고 baggage/upstream injection을 차단함
-- [ ] metric labels가 stable low-cardinality allowlist만 사용함
-- [ ] prompt/body/header/query/raw URL/error, credentials, tenant identity와 금액이 telemetry에 없음
-- [ ] logs가 active trace/span ID와 상관되며 secret redaction을 유지함
-- [ ] shutdown force flush가 timeout 안에서 완료됨
-- [ ] README와 Cloud handoff가 갱신됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] disabled mode가 기존 native wire, readiness와 log behavior를 보존함
+- [x] optional/required OTLP lifecycle과 bounded shutdown이 검증됨
+- [x] OpenAI/Gemini server span과 RED metrics가 정확한 protocol/operation을 사용함
+- [x] routing, Provider, billing, storage와 reconciliation 단계가 동일 trace에서 상관됨
+- [x] 실제 Provider dispatch만 client span/duration을 생성함
+- [x] replay가 Provider/storage span을 만들지 않고 replay metric만 기록함
+- [x] exporter 장애가 client response, Wallet/Ledger, asset와 worker lease를 변경하지 않음
+- [x] inbound W3C context를 추출하고 baggage/upstream injection을 차단함
+- [x] metric labels가 stable low-cardinality allowlist만 사용함
+- [x] prompt/body/header/query/raw URL/error, credentials, tenant identity와 금액이 telemetry에 없음
+- [x] logs가 active trace/span ID와 상관되며 secret redaction을 유지함
+- [x] shutdown force flush가 timeout 안에서 완료됨
+- [x] README와 Cloud handoff가 갱신됨
+- [x] 전체 race/integration/CI 통과
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현: process-owned OTLP HTTP/protobuf trace·metric runtime, W3C-only propagation, bounded typed recorder, trace-aware structured logger를 추가했다.
+- 계측: OpenAI/Gemini HTTP, 인증·권한, routing rejection/selection, 실제 Provider dispatch, Billing transition, managed storage와 reconciliation worker를 연결했다.
+- 보안: metric attribute allowlist가 임의 문자열을 `unknown`으로 축약하고 body/query/header/baggage/credential/tenant identity를 export하지 않는 테스트를 추가했다.
+- 로컬 검증: `make check` 통과.
+- 통합 검증: Compose PostgreSQL/Redis에서 `make integration-test` 통과.
+- PR: https://github.com/nativegatewayhq/gateway/pull/27
 
 ## Rollback 계획
 

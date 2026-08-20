@@ -167,6 +167,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-025` | completed | [Phase 2 Weighted Provider Routing](./20260820_195929_plan_phase2_weighted_provider_routing.md) | `phase-2-weighted-routing` |
 | `gateway-20260820-026` | completed | [Phase 2 Provider Health Score and Circuit Breaker](./20260820_201810_plan_phase2_provider_health_circuit_breaker.md) | `phase-2-provider-health` |
 | `gateway-20260820-027` | completed | [Phase 2 Managed Image Storage and CDN Delivery](./20260820_205023_plan_phase2_managed_image_storage.md) | `phase-2-managed-image-storage` |
-| `gateway-20260820-028` | in_progress | [Phase 2 OpenTelemetry Tracing and Metrics](./20260820_212326_plan_phase2_opentelemetry_observability.md) | `phase-2-opentelemetry-observability` |
+| `gateway-20260820-028` | completed | [Phase 2 OpenTelemetry Tracing and Metrics](./20260820_212326_plan_phase2_opentelemetry_observability.md) | `phase-2-opentelemetry-observability` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
