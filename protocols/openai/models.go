@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,10 @@ import (
 
 type ProviderAvailability interface {
 	ConfiguredProviders() []providercredentials.ProviderID
+}
+
+type ChannelProviderAvailability interface {
+	ConfiguredChannel(context.Context, string, providercredentials.ProviderID) bool
 }
 
 type ModelsHandler struct {
@@ -70,7 +75,13 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 					continue
 				}
 				for _, candidate := range candidates {
-					if configured[candidate.Provider] {
+					channelConfigured := false
+					if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
+						channelConfigured = channelAvailability.ConfiguredChannel(request.Context(), candidate.ChannelID, candidate.Provider)
+					} else {
+						channelConfigured = configured[candidate.Provider]
+					}
+					if channelConfigured {
 						available = true
 						break
 					}

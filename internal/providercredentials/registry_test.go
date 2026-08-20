@@ -1,6 +1,7 @@
 package providercredentials
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,4 +86,27 @@ func TestCredentialFormattingAndJSONDoNotExposePlaintext(t *testing.T) {
 	if strings.Contains(combined, secret) {
 		t.Fatalf("formatting leaked credential: %s", combined)
 	}
+}
+
+func TestLegacyChannelAvailabilityDoesNotDestroyRegistryCredential(t *testing.T) {
+	registry, err := Load(func(key string) (string, bool) {
+		if key == "GATEWAY_OPENAI_API_KEY" {
+			return "persistent-legacy-secret", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel, _ := LegacyChannel(OpenAI)
+	for index := 0; index < 2; index++ {
+		if !registry.ConfiguredChannel(context.Background(), channel, OpenAI) {
+			t.Fatalf("availability call %d failed", index)
+		}
+	}
+	credential, err := registry.Resolve(context.Background(), channel, OpenAI)
+	if err != nil || string(credential.value) != "persistent-legacy-secret" {
+		t.Fatalf("credential=%v err=%v", credential, err)
+	}
+	credential.Destroy()
 }

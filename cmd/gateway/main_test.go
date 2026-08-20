@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
@@ -66,9 +67,34 @@ func TestRunRejectsMalformedProviderCredentialBeforeDatabaseConnection(t *testin
 	}
 }
 
+func TestRunRejectsMalformedCredentialKeyringWithoutEchoingSecret(t *testing.T) {
+	t.Setenv("GATEWAY_HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("GATEWAY_LOG_LEVEL", "info")
+	t.Setenv("GATEWAY_SHUTDOWN_TIMEOUT", "1s")
+	t.Setenv("GATEWAY_DATABASE_URL", "postgres://gateway:database-secret@127.0.0.1:1/gateway")
+	t.Setenv("GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID", "current")
+	t.Setenv("GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS", "current")
+	t.Setenv("GATEWAY_PROVIDER_CREDENTIAL_KEY_0", "malformed-master-secret")
+
+	var stdout, stderr bytes.Buffer
+	if code := run(&stdout, &stderr); code != 1 {
+		t.Fatalf("run() code = %d, want 1", code)
+	}
+	combined := stdout.String() + stderr.String()
+	for _, secret := range []string{"malformed-master-secret", "database-secret"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("key configuration failure leaked secret: %s", combined)
+		}
+	}
+	if !strings.Contains(combined, "provider credential key configuration error") {
+		t.Fatalf("safe category missing: %s", combined)
+	}
+}
+
 func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 	executable := buildGateway(t)
 	address := availableAddress(t)
+	masterKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{11}, 32))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -79,6 +105,9 @@ func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 		"GATEWAY_GOOGLE_API_KEY=google-process-secret",
 		"GATEWAY_OPENAI_API_KEY=openai-process-secret",
 		"GATEWAY_XAI_API_KEY=xai-process-secret",
+		"GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID=process",
+		"GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS=process",
+		"GATEWAY_PROVIDER_CREDENTIAL_KEY_0="+masterKey,
 		"GATEWAY_RATE_LIMIT_MODE=required",
 		"GATEWAY_REDIS_URL="+os.Getenv("TEST_REDIS_URL"),
 	)
@@ -103,7 +132,7 @@ func TestGatewayProcessStartsServesHealthAndStops(t *testing.T) {
 			t.Errorf("logs missing %q: %s", message, logs)
 		}
 	}
-	for _, secret := range []string{"google-process-secret", "openai-process-secret", "xai-process-secret"} {
+	for _, secret := range []string{"google-process-secret", "openai-process-secret", "xai-process-secret", masterKey} {
 		if strings.Contains(logs, secret) {
 			t.Fatalf("process logs leaked provider credential %q: %s", secret, logs)
 		}

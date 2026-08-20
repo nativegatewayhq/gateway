@@ -46,6 +46,11 @@ func run(stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "provider credential configuration error: %v\n", err)
 		return 1
 	}
+	providerCredentialKeyring, err := providercredentials.LoadMasterKeyring(os.LookupEnv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "provider credential key configuration error")
+		return 1
+	}
 
 	logger := observability.NewLogger(stdout, cfg.LogLevel)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -59,6 +64,13 @@ func run(stdout, stderr io.Writer) int {
 	if err := database.Migrate(ctx, pool); err != nil {
 		logger.Error("gateway database migration failed")
 		return 1
+	}
+	if providerCredentialKeyring != nil {
+		providerCredentialRegistry, err = providercredentials.NewControlPlane(providerCredentialRegistry, providercredentials.NewStore(pool, providerCredentialKeyring))
+		if err != nil {
+			logger.Error("provider credential control plane initialization failed")
+			return 1
+		}
 	}
 	var apiKeyAuthenticator gemini.Authenticator = apikey.NewService(apikey.NewPostgresStore(pool))
 	networkGuard, err := networkauth.NewGuardedAuthenticator(apiKeyAuthenticator)

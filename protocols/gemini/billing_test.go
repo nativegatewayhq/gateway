@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -134,6 +135,44 @@ func TestBillableGeminiFallsBackToNextExactPricedCandidate(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != 200 || executor.request.Model != "second-model" || len(fake.beginChannels) != 1 || fake.beginChannels[0] != "channel_00000000000000000000000000000004" {
 		t.Fatalf("response=%d model=%s begin=%v", response.Code, executor.request.Model, fake.beginChannels)
+	}
+}
+
+type geminiChannelAvailability map[string]bool
+
+func (geminiChannelAvailability) ConfiguredProviders() []providercredentials.ProviderID { return nil }
+func (value geminiChannelAvailability) ConfiguredChannel(_ context.Context, channelID string, _ providercredentials.ProviderID) bool {
+	return value[channelID]
+}
+
+func TestBillableGeminiFallsBackBeforeReserveWhenChannelCredentialIsUnavailable(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "gemini", Model: "gemini-logical", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Priority, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_first", Provider: providercredentials.Google, ProviderModel: "first-model", ChannelID: "channel_00000000000000000000000000000003", Enabled: true, Priority: 1},
+		{ID: "candidate_second", Provider: providercredentials.Google, ProviderModel: "second-model", ChannelID: "channel_00000000000000000000000000000004", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &geminiBillingFake{beginCharge: chargebilling.Charge{ID: "charge_test"}}
+	executor := &stubExecutor{response: &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}}
+	var logs bytes.Buffer
+	handler := NewBillableHandlerWithAvailability(slog.New(slog.NewTextHandler(&logs, nil)), &stubAuthenticator{principal: apikey.Principal{OrganizationID: "org_test", ProjectID: "project_test"}}, registry, executor, 4096, fake, geminiChannelAvailability{"channel_00000000000000000000000000000004": true})
+	request := geminiRequest(strings.NewReader(`{"contents":[]}`))
+	request.URL.Path = "/v1beta/models/gemini-logical:generateContent"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || executor.request.Model != "second-model" || executor.request.ChannelID != "channel_00000000000000000000000000000004" || len(fake.beginChannels) != 1 {
+		t.Fatalf("response=%d request=%+v begins=%v", response.Code, executor.request, fake.beginChannels)
+	}
+	credentialLog := ""
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "category=credential_unavailable") {
+			credentialLog = line
+			break
+		}
+	}
+	if credentialLog == "" || strings.Contains(credentialLog, "gemini-logical") || strings.Contains(credentialLog, "candidate_first") {
+		t.Fatalf("missing or unsafe credential skip log: %s", credentialLog)
 	}
 }
 

@@ -26,6 +26,7 @@ var (
 
 type GenerateContentRequest struct {
 	Model       string
+	ChannelID   string
 	Query       url.Values
 	ContentType string
 	Accept      string
@@ -104,13 +105,18 @@ func (executor *Executor) GenerateContent(ctx context.Context, input GenerateCon
 	if input.APIClient != "" {
 		request.Header.Set("x-goog-api-client", input.APIClient)
 	}
-	request, err = providercredentials.PrepareOutbound(request, providercredentials.Google, executor.credentials)
+	if input.ChannelID == "" {
+		request, err = providercredentials.PrepareOutbound(request, providercredentials.Google, executor.credentials)
+	} else {
+		request, err = providercredentials.PrepareOutboundChannel(request, input.ChannelID, providercredentials.Google, executor.credentials)
+	}
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 
 	response, err := executor.client.Do(request)
+	providercredentials.ClearApplied(request)
 	if err != nil {
 		contextError := requestContext.Err()
 		cancel()
