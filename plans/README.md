@@ -169,6 +169,7 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-027` | completed | [Phase 2 Managed Image Storage and CDN Delivery](./20260820_205023_plan_phase2_managed_image_storage.md) | `phase-2-managed-image-storage` |
 | `gateway-20260820-028` | completed | [Phase 2 OpenTelemetry Tracing and Metrics](./20260820_212326_plan_phase2_opentelemetry_observability.md) | `phase-2-opentelemetry-observability` |
 | `gateway-20260820-029` | completed | [Phase 3 Durable Asynchronous Job Foundation](./20260820_214540_plan_phase3_async_job_foundation.md) | `phase-3-async-job-foundation` |
-| `gateway-20260820-030` | in_progress | [Phase 3 Replicate Native Predictions](./20260820_221427_plan_phase3_replicate_native_predictions.md) | `phase-3-replicate-native-predictions` |
+| `gateway-20260820-030` | completed | [Phase 3 Replicate Native Predictions](./20260820_221427_plan_phase3_replicate_native_predictions.md) | `phase-3-replicate-native-predictions` |
+| `gateway-20260820-031` | completed | [Phase 3 fal Native Queue](./20260820_223933_plan_phase3_fal_native_queue.md) | `phase-3-fal-native-queue` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

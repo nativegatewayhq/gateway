@@ -10,6 +10,7 @@ import (
 func TestExtractCredentialLocations(t *testing.T) {
 	tests := []struct{ name, target, header, value string }{
 		{"bearer", "/", "Authorization", "Bearer ngw_sk_value"},
+		{"fal key", "/", "Authorization", "Key ngw_sk_value"},
 		{"api key", "/", "x-api-key", "ngw_sk_value"},
 		{"google", "/", "x-goog-api-key", "ngw_sk_value"},
 		{"query", "/?key=ngw_sk_value", "", ""},

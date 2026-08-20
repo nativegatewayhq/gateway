@@ -147,10 +147,13 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		writeDetail(writer, http.StatusBadRequest, "Invalid Cancel-After header")
 		return
 	}
-	fingerprint := sha256.Sum256(body)
+	var fingerprint [32]byte
+	if key != "" {
+		fingerprint = sha256.Sum256(body)
+	}
 	chargeID := ""
 	if handler.billing != nil {
-		charge, err := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "replicate", Operation: "image.generate", Model: version, ChannelID: route.ChannelID, Quantity: 1, IdempotencyKey: key, RequestFingerprint: fingerprint})
+		charge, err := handler.billing.Begin(request.Context(), billing.BeginRequest{RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Protocol: "replicate", Operation: "image.generate", Model: version, ChannelID: route.ChannelID, Quantity: 1, Size: "default", Quality: "default", IdempotencyKey: key, RequestFingerprint: fingerprint})
 		if err != nil {
 			handler.billingError(writer, err)
 			return

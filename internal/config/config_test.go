@@ -352,3 +352,35 @@ func TestLoadRequiresDatabaseURLWithoutLeakingIt(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 }
+
+func TestLoadFalQueueConfiguration(t *testing.T) {
+	cfg, err := Load(func(key string) (string, bool) {
+		values := map[string]string{
+			"GATEWAY_DATABASE_URL":       "postgres://gateway:test@localhost/gateway",
+			"GATEWAY_FAL_API_KEY":        "fal-secret",
+			"GATEWAY_FAL_QUEUE_ENDPOINT": "http://127.0.0.1:9090",
+			"GATEWAY_FAL_MODELS":         "fal-ai/flux/dev,fal-ai/veo3",
+			"GATEWAY_PUBLIC_BASE_URL":    "https://gateway.example",
+		}
+		value, ok := values[key]
+		return value, ok
+	})
+	if err != nil || !cfg.FalEnabled || len(cfg.FalModels) != 2 || cfg.FalEndpoint != "http://127.0.0.1:9090" {
+		t.Fatalf("config=%+v err=%v", cfg, err)
+	}
+}
+
+func TestLoadFalRequiresModelsAndPublicOrigin(t *testing.T) {
+	_, err := Load(func(key string) (string, bool) {
+		if key == "GATEWAY_DATABASE_URL" {
+			return "postgres://gateway:test@localhost/gateway", true
+		}
+		if key == "GATEWAY_FAL_API_KEY" {
+			return "fal-secret", true
+		}
+		return "", false
+	})
+	if err == nil || !strings.Contains(err.Error(), "GATEWAY_PUBLIC_BASE_URL") {
+		t.Fatalf("error=%v", err)
+	}
+}

@@ -106,6 +106,18 @@ func TestReplicatePredictionRoutesAreMounted(t *testing.T) {
 	}
 }
 
+func TestFalWildcardRouteIsMountedBelowOwnedRoutes(t *testing.T) {
+	t.Parallel()
+	fal := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusAccepted) })
+	handler := NewHandler(discardLogger(), nil, Routes{Fal: fal})
+	if response := serveRequest(t, handler, http.MethodPost, "/fal-ai/flux/dev", ""); response.Code != http.StatusAccepted {
+		t.Fatalf("fal status = %d", response.Code)
+	}
+	if response := serveRequest(t, handler, http.MethodGet, "/health/live", ""); response.Code != http.StatusOK {
+		t.Fatalf("health status = %d", response.Code)
+	}
+}
+
 func TestReadinessFailure(t *testing.T) {
 	t.Parallel()
 

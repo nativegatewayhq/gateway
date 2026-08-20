@@ -416,7 +416,7 @@ func validDimension(protocol, operation, model string) bool {
 	if protocol == "" && operation == "" && model == "" {
 		return true
 	}
-	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit")) || (protocol == "gemini" && operation == "image.generate") || (protocol == "replicate" && operation == "image.generate")) && validText(model, 200)
+	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit")) || ((protocol == "gemini" || protocol == "replicate" || protocol == "fal") && operation == "image.generate")) && validText(model, 200)
 }
 
 func bounds(value time.Time, period Period) (time.Time, time.Time) {

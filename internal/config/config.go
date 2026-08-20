@@ -36,6 +36,8 @@ const (
 	defaultRateLimitTimeout    = 100 * time.Millisecond
 	defaultReplicateTimeout    = 2 * time.Minute
 	defaultReplicateBodyBytes  = int64(1024 * 1024)
+	defaultFalTimeout          = 2 * time.Minute
+	defaultFalBodyBytes        = int64(1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -89,6 +91,11 @@ type Config struct {
 	ReplicateModels      []string
 	ReplicateTimeout     time.Duration
 	ReplicateBodyBytes   int64
+	FalEnabled           bool
+	FalEndpoint          string
+	FalModels            []string
+	FalTimeout           time.Duration
+	FalBodyBytes         int64
 	PublicBaseURL        string
 }
 
@@ -122,6 +129,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		ReplicateEndpoint:    "https://api.replicate.com",
 		ReplicateTimeout:     defaultReplicateTimeout,
 		ReplicateBodyBytes:   defaultReplicateBodyBytes,
+		FalEndpoint:          "https://queue.fal.run",
+		FalTimeout:           defaultFalTimeout,
+		FalBodyBytes:         defaultFalBodyBytes,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -245,6 +255,9 @@ func Load(lookup LookupEnv) (Config, error) {
 	if err := loadReplicate(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
+	if err := loadFal(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
 	if value, ok := lookup("GATEWAY_TRUSTED_PROXY_CIDRS"); ok {
 		parts := strings.Split(value, ",")
 		if len(parts) > 128 {
@@ -344,6 +357,67 @@ func loadReplicate(cfg *Config, lookup LookupEnv) error {
 	}
 	if cfg.ReplicateEnabled && len(cfg.ReplicateModels) == 0 {
 		return fmt.Errorf("GATEWAY_REPLICATE_MODELS: must not be empty when Replicate is enabled")
+	}
+	return nil
+}
+
+func loadFal(cfg *Config, lookup LookupEnv) error {
+	_, cfg.FalEnabled = lookup("GATEWAY_FAL_API_KEY")
+	if value, ok := lookup("GATEWAY_FAL_QUEUE_ENDPOINT"); ok {
+		cfg.FalEndpoint = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("GATEWAY_FAL_MODELS"); ok {
+		seen := map[string]struct{}{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			segments := strings.Split(model, "/")
+			if model == "" || len(model) > 200 || len(segments) < 2 {
+				return fmt.Errorf("GATEWAY_FAL_MODELS: must contain bounded comma-separated model IDs")
+			}
+			for _, segment := range segments {
+				if segment == "" || segment == "." || segment == ".." {
+					return fmt.Errorf("GATEWAY_FAL_MODELS: contains an invalid model ID")
+				}
+			}
+			if _, exists := seen[model]; exists {
+				continue
+			}
+			seen[model] = struct{}{}
+			cfg.FalModels = append(cfg.FalModels, model)
+		}
+		if len(cfg.FalModels) > 64 {
+			return fmt.Errorf("GATEWAY_FAL_MODELS: must contain no more than 64 models")
+		}
+	}
+	if value, ok := lookup("GATEWAY_FAL_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return fmt.Errorf("GATEWAY_FAL_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.FalTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_FAL_MAX_BODY_BYTES"); ok {
+		limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || limit < 1 || limit > 256*1024*1024 {
+			return fmt.Errorf("GATEWAY_FAL_MAX_BODY_BYTES: must be between 1 and 268435456")
+		}
+		cfg.FalBodyBytes = limit
+	}
+	for key, value := range map[string]string{"GATEWAY_FAL_QUEUE_ENDPOINT": cfg.FalEndpoint, "GATEWAY_PUBLIC_BASE_URL": cfg.PublicBaseURL} {
+		if value == "" {
+			if cfg.FalEnabled {
+				return fmt.Errorf("%s: must not be empty when fal is enabled", key)
+			}
+			continue
+		}
+		parsed, err := url.Parse(value)
+		loopback := err == nil && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1")
+		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback)) {
+			return fmt.Errorf("%s: must be an HTTPS or loopback HTTP origin", key)
+		}
+	}
+	if cfg.FalEnabled && len(cfg.FalModels) == 0 {
+		return fmt.Errorf("GATEWAY_FAL_MODELS: must not be empty when fal is enabled")
 	}
 	return nil
 }

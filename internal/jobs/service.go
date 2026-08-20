@@ -107,7 +107,7 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 	}
 	if !status.Terminal() {
 		if result.Observation.Snapshot.Status != 0 {
-			confirmed, err = service.repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1, Provider: created.Provider, ChannelID: created.ChannelID, ProviderJobID: result.ProviderJobID, State: "SUBMITTED"}}, result.Observation, "submit", time.Now().Add(pollAfter))
+			confirmed, err = service.repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, Model: created.Model, AttemptNo: 1, Provider: created.Provider, ChannelID: created.ChannelID, ProviderJobID: result.ProviderJobID, State: "SUBMITTED"}}, result.Observation, "submit", time.Now().Add(pollAfter))
 			if err != nil {
 				return joboperation.Job{}, err
 			}
@@ -115,7 +115,7 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 		service.record(ctx, created.Protocol, "submit", status, "success")
 		return confirmed, nil
 	}
-	terminal, err := service.repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1, Provider: created.Provider, ChannelID: created.ChannelID, ProviderJobID: result.ProviderJobID, State: "SUBMITTED"}}, result.Observation, "submit", time.Time{})
+	terminal, err := service.repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, Model: created.Model, AttemptNo: 1, Provider: created.Provider, ChannelID: created.ChannelID, ProviderJobID: result.ProviderJobID, State: "SUBMITTED"}}, result.Observation, "submit", time.Time{})
 	if err == nil {
 		service.record(ctx, created.Protocol, "submit", terminal.Status, "success")
 	}

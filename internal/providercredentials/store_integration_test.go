@@ -137,6 +137,34 @@ func TestCredentialLifecycleEncryptionRotationAndAudit(t *testing.T) {
 	}
 }
 
+func TestFalCredentialLifecycleUsesScopedChannel(t *testing.T) {
+	pool := credentialPool(t)
+	store := NewStore(pool, testKeyring(t))
+	ctx := context.Background()
+	channel := "channel_00000000000000000000000000000005"
+	staged, err := store.Stage(ctx, StageRequest{ChannelID: channel, Provider: Fal, Plaintext: []byte("fal-control-plane-secret"), Actor: "integration", Reason: "fal queue", OperationKey: "fal-stage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(ctx, LifecycleRequest{CredentialID: staged.ID, Actor: "integration", Reason: "fal queue", OperationKey: "fal-activate"}); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.Resolve(ctx, channel, Fal)
+	if err != nil || !bytes.Equal(credential.value, []byte("fal-control-plane-secret")) {
+		t.Fatalf("credential=%v err=%v", credential, err)
+	}
+	credential.Destroy()
+	registry, err := NewControlPlane(nil, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodPost, "https://queue.fal.run/fal-ai/flux/dev", nil)
+	outbound, err := PrepareOutboundChannel(request, channel, Fal, registry)
+	if err != nil || outbound.Header.Get("Authorization") != "Key fal-control-plane-secret" {
+		t.Fatalf("authorization=%q err=%v", outbound.Header.Get("Authorization"), err)
+	}
+}
+
 func TestCredentialScopeLegacyFallbackAndMasterKeyRotation(t *testing.T) {
 	pool := credentialPool(t)
 	oldRing, err := NewMasterKeyring("old", map[string][]byte{"old": bytes.Repeat([]byte{3}, 32)})
