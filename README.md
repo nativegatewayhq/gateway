@@ -4,7 +4,7 @@ An open-source multimodal AI API gateway that preserves official provider SDKs a
 
 ## Status
 
-Phase 0 native protocol validation. The process exposes health endpoints, PostgreSQL-backed service API key authentication, and the non-streaming Gemini `generateContent` facade. Billing, routing, and other provider APIs are intentionally not implemented yet.
+Phase 0 native protocol validation. The process exposes health endpoints, PostgreSQL-backed service API key authentication, non-streaming Gemini `generateContent`, and OpenAI-compatible image generation for OpenAI and xAI. Billing and dynamic routing are intentionally not implemented yet.
 
 ## Development workflow
 
@@ -57,6 +57,8 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
 | `GATEWAY_GOOGLE_REQUEST_TIMEOUT` | `2m` | Google request timeout; maximum `10m` |
 | `GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES` | `33554432` | Positive Gemini body limit up to 32 MiB |
+| `GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT` | `2m` | OpenAI/xAI image request timeout; maximum `10m` |
+| `GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES` | `1048576` | Positive OpenAI Images JSON body limit up to 1 MiB |
 
 Invalid configuration fails before binding a listener. Logs are structured JSON and intentionally omit headers, cookies, query strings, and request/response bodies.
 
@@ -108,6 +110,55 @@ response = client.models.generate_content(
 The Gateway authenticates the service key, removes it from the outbound request, and applies only `GATEWAY_GOOGLE_API_KEY` to the fixed Google origin. Google success and error JSON bodies are passed through without schema conversion. Redirects and automatic retries are disabled.
 
 Streaming, model listing, file upload, billing, managed image storage, and cross-provider conversion are not included in this phase. Official Python and JavaScript SDK version compatibility will be maintained in the separate conformance repository.
+
+## OpenAI Images native API
+
+The Gateway supports the OpenAI-compatible image generation route:
+
+```text
+POST /v1/images/generations
+```
+
+The request's exact `model` value selects a provider. Phase 0 does not guess by prefix or fall back to another provider.
+
+| Model | Provider | Upstream credential |
+|---|---|---|
+| `gpt-image-1` | OpenAI | `GATEWAY_OPENAI_API_KEY` |
+| `grok-imagine-image-quality` | xAI | `GATEWAY_XAI_API_KEY` |
+
+Python:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="SERVICE_API_KEY",
+    base_url="http://127.0.0.1:8080/v1",
+)
+
+response = client.images.generate(
+    model="gpt-image-1",
+    prompt="Draw a cat astronaut",
+)
+```
+
+JavaScript:
+
+```javascript
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: "SERVICE_API_KEY",
+  baseURL: "http://127.0.0.1:8080/v1",
+});
+
+const response = await client.images.generate({
+  model: "grok-imagine-image-quality",
+  prompt: "Draw a cat astronaut",
+});
+```
+
+The Gateway preserves the JSON body and native success/error response bytes, including URL, `b64_json`, usage, and provider extension fields. Provider credentials are applied only to their fixed origins. Redirects, retries, fallback, image edits, storage, and billing are excluded from this phase.
 
 ## Create a service API key
 

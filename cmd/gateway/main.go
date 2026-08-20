@@ -14,8 +14,12 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/observability"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
+	openaiProtocol "github.com/nativegatewayhq/gateway/protocols/openai"
 	"github.com/nativegatewayhq/gateway/providers/google"
+	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
+	"github.com/nativegatewayhq/gateway/providers/xai"
 )
 
 func main() {
@@ -50,11 +54,19 @@ func run(stdout, stderr io.Writer) int {
 	apiKeyAuthenticator := apikey.NewService(apikey.NewPostgresStore(pool))
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout)
 	geminiHandler := gemini.NewHandler(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes)
+	imageModels := imageoperation.DefaultRegistry()
+	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
+	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
+	openAIImagesHandler := openaiProtocol.NewImagesHandler(logger, apiKeyAuthenticator, imageModels, map[providercredentials.ProviderID]openaiProtocol.Executor{
+		providercredentials.OpenAI: openAIExecutor,
+		providercredentials.XAI:    xAIExecutor,
+	}, cfg.ImagesBodyBytes)
 
 	if err := app.Run(ctx, cfg, logger, app.Dependencies{
 		Ready:               pool.Ping,
 		ProviderCredentials: providerCredentialRegistry,
 		Gemini:              geminiHandler,
+		OpenAIImages:        openAIImagesHandler,
 	}); err != nil {
 		logger.Error("gateway stopped with error", "error", err.Error())
 		return 1

@@ -17,6 +17,9 @@ const (
 	defaultGoogleTimeout   = 2 * time.Minute
 	maxGoogleTimeout       = 10 * time.Minute
 	defaultGeminiBodyBytes = int64(32 * 1024 * 1024)
+	defaultImagesTimeout   = 2 * time.Minute
+	maxImagesTimeout       = 10 * time.Minute
+	defaultImagesBodyBytes = int64(1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -31,6 +34,8 @@ type Config struct {
 	DatabaseURL     string
 	GoogleTimeout   time.Duration
 	GeminiBodyBytes int64
+	ImagesTimeout   time.Duration
+	ImagesBodyBytes int64
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -42,6 +47,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		ShutdownTimeout: defaultShutdownTimeout,
 		GoogleTimeout:   defaultGoogleTimeout,
 		GeminiBodyBytes: defaultGeminiBodyBytes,
+		ImagesTimeout:   defaultImagesTimeout,
+		ImagesBodyBytes: defaultImagesBodyBytes,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -77,6 +84,20 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES: must be an integer between 1 and 33554432")
 		}
 		cfg.GeminiBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > maxImagesTimeout {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.ImagesTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES"); ok {
+		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || bodyBytes <= 0 || bodyBytes > defaultImagesBodyBytes {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES: must be an integer between 1 and 1048576")
+		}
+		cfg.ImagesBodyBytes = bodyBytes
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {

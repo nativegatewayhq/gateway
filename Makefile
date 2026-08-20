@@ -6,17 +6,17 @@ build:
 	go build -o bin/gateway-key ./cmd/gateway-key
 
 fmt:
-	gofmt -w $$(find cmd internal protocols providers -name '*.go' -type f)
+	gofmt -w $$(find cmd internal operations protocols providers -name '*.go' -type f)
 
 fmt-check:
-	test -z "$$(gofmt -l cmd internal protocols providers)"
+	test -z "$$(gofmt -l cmd internal operations protocols providers)"
 
 test:
 	go test -race ./...
 
 integration-test:
 	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi
-	TEST_DATABASE_URL="$$TEST_DATABASE_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./protocols/gemini ./providers/google ./cmd/gateway-key ./cmd/gateway
+	TEST_DATABASE_URL="$$TEST_DATABASE_URL" go test -race -count=1 -tags=integration ./internal/database ./internal/apikey ./protocols/gemini ./protocols/openai ./providers/google ./providers/openai ./providers/xai ./cmd/gateway-key ./cmd/gateway
 
 vet:
 	go vet ./...

@@ -34,18 +34,23 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.GeminiBodyBytes != 32*1024*1024 {
 		t.Errorf("GeminiBodyBytes = %d", cfg.GeminiBodyBytes)
 	}
+	if cfg.ImagesTimeout != 2*time.Minute || cfg.ImagesBodyBytes != 1024*1024 {
+		t.Errorf("Images config = %v, %d", cfg.ImagesTimeout, cfg.ImagesBodyBytes)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]string{
-		"GATEWAY_HTTP_ADDR":                     "127.0.0.1:9090",
-		"GATEWAY_LOG_LEVEL":                     "debug",
-		"GATEWAY_SHUTDOWN_TIMEOUT":              "3s",
-		"GATEWAY_DATABASE_URL":                  "postgres://gateway:test@localhost/gateway",
-		"GATEWAY_GOOGLE_REQUEST_TIMEOUT":        "90s",
-		"GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES": "1048576",
+		"GATEWAY_HTTP_ADDR":                            "127.0.0.1:9090",
+		"GATEWAY_LOG_LEVEL":                            "debug",
+		"GATEWAY_SHUTDOWN_TIMEOUT":                     "3s",
+		"GATEWAY_DATABASE_URL":                         "postgres://gateway:test@localhost/gateway",
+		"GATEWAY_GOOGLE_REQUEST_TIMEOUT":               "90s",
+		"GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES":        "1048576",
+		"GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT":        "80s",
+		"GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES": "524288",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -65,6 +70,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.GoogleTimeout != 90*time.Second || cfg.GeminiBodyBytes != 1048576 {
 		t.Errorf("Gemini config = %v, %d", cfg.GoogleTimeout, cfg.GeminiBodyBytes)
+	}
+	if cfg.ImagesTimeout != 80*time.Second || cfg.ImagesBodyBytes != 524288 {
+		t.Errorf("Images config = %v, %d", cfg.ImagesTimeout, cfg.ImagesBodyBytes)
 	}
 }
 
@@ -87,6 +95,10 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "excessive google timeout", key: "GATEWAY_GOOGLE_REQUEST_TIMEOUT", value: "11m", marker: ""},
 		{name: "invalid gemini body limit", key: "GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES", value: "secret-size", marker: "secret-size"},
 		{name: "excessive gemini body limit", key: "GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES", value: "33554433", marker: ""},
+		{name: "invalid images timeout", key: "GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT", value: "secret-timeout", marker: "secret-timeout"},
+		{name: "excessive images timeout", key: "GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT", value: "11m", marker: ""},
+		{name: "invalid images body limit", key: "GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES", value: "secret-size", marker: "secret-size"},
+		{name: "excessive images body limit", key: "GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES", value: "1048577", marker: ""},
 	}
 
 	for _, tt := range tests {

@@ -53,6 +53,22 @@ func TestGeminiRouteIsMountedWithoutProtectingHealth(t *testing.T) {
 	}
 }
 
+func TestOpenAIImagesRouteIsMountedWithoutProtectingHealth(t *testing.T) {
+	t.Parallel()
+	images := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+	})
+	handler := NewHandler(discardLogger(), nil, Routes{OpenAIImages: images})
+	response := serveRequest(t, handler, http.MethodPost, "/v1/images/generations", "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("OpenAI Images status = %d", response.Code)
+	}
+	health := serveRequest(t, handler, http.MethodGet, "/health/live", "")
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d", health.Code)
+	}
+}
+
 func TestReadinessFailure(t *testing.T) {
 	t.Parallel()
 
