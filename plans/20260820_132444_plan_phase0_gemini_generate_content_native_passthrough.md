@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-004
 title: Phase 0 Gemini generateContent Native Pass-through
-status: in_progress
+status: completed
 created_at: 2026-08-20T13:24:44+09:00
-updated_at: 2026-08-20T13:29:51+09:00
+updated_at: 2026-08-20T13:51:33+09:00
 owners:
   - gateway
 initiative: phase-0-gemini-sdk-e2e
@@ -333,10 +333,10 @@ make integration-test
 - [x] 서비스 Key, Google credential, prompt와 image data가 로그에 없음
 - [x] health endpoint와 기존 API Key 기능이 회귀 없이 동작함
 - [x] 단위·통합·race 테스트가 통과함
-- [ ] formatter, vet, build와 integration test가 CI에서 통과함
+- [x] formatter, vet, build와 integration test가 CI에서 통과함
 - [x] README에 Gemini SDK Base URL 설정 예제와 지원 범위가 기록됨
 - [x] Conformance 저장소에 필요한 공개 계약과 후속 initiative가 기록됨
-- [ ] 검증 증거가 이 계획에 기록됨
+- [x] 검증 증거가 이 계획에 기록됨
 
 ## 검증 증거
 
@@ -354,7 +354,11 @@ make integration-test
   - trusted origin `https://generativelanguage.googleapis.com` 고정
   - service Key query/header 제거 및 Google `x-goog-api-key`만 적용
   - service Key, Google credential, prompt와 inline image가 로그 및 Gateway 오류에 없음
-- commit, pull request와 CI: 아직 게시 전
+- 구현 commit: [`35fd90a`](https://github.com/nativegatewayhq/gateway/commit/35fd90a)
+- pull request: [#4](https://github.com/nativegatewayhq/gateway/pull/4)
+- CI:
+  - [`check`](https://github.com/nativegatewayhq/gateway/actions/runs/32333317842/job/96317968351): 통과
+  - [`validate`](https://github.com/nativegatewayhq/gateway/actions/runs/32333317825/job/96317969553): 통과
 
 ## Rollback 계획
 
