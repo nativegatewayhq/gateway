@@ -159,11 +159,13 @@ func ValidateObservation(current Status, observation Observation, maximumBodyByt
 }
 
 func ValidEstimatedUsage(value Usage) bool {
-	return value.Dimension == "output" && value.Unit == "image" && value.Quantity > 0 && value.Quantity <= 10 && validUsageText(value.ExtractorVersion, 80) && validUsageText(value.ResultExtractorVersion, 80) && value.Provenance == "request"
+	validQuantity := (value.Dimension == "output" && value.Unit == "image" && value.Quantity > 0 && value.Quantity <= 10) || (value.Dimension == "provider_credit" && value.Unit == "microcredit" && value.Quantity > 0 && value.Quantity <= 1_000_000_000_000_000)
+	return validQuantity && validUsageText(value.ExtractorVersion, 80) && validUsageText(value.ResultExtractorVersion, 80) && value.Provenance == "request"
 }
 
 func ValidActualUsage(value Usage) bool {
-	return value.Dimension == "output" && value.Unit == "image" && value.Quantity >= 0 && value.Quantity <= MaximumObservedUsage && validUsageText(value.ExtractorVersion, 80) && (value.Provenance == "poll" || value.Provenance == "webhook" || value.Provenance == "submit" || value.Provenance == "cancel")
+	validQuantity := (value.Dimension == "output" && value.Unit == "image" && value.Quantity >= 0 && value.Quantity <= MaximumObservedUsage) || (value.Dimension == "provider_credit" && value.Unit == "microcredit" && value.Quantity >= 0 && value.Quantity <= 1_000_000_000_000_000)
+	return validQuantity && validUsageText(value.ExtractorVersion, 80) && (value.Provenance == "poll" || value.Provenance == "webhook" || value.Provenance == "submit" || value.Provenance == "cancel")
 }
 
 func validUsageText(value string, maximum int) bool {

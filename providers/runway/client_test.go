@@ -78,3 +78,18 @@ func TestStatusMapping(t *testing.T) {
 		t.Fatal("unknown status accepted")
 	}
 }
+
+func TestRunwayCostUsesBoundedFixedPointMicrocredits(t *testing.T) {
+	tests := map[string]int64{`{"credits":0}`: 0, `{"credits":12}`: 12_000_000, `{"credits":1.25}`: 1_250_000, `{"credits":0.000001}`: 1}
+	for raw, want := range tests {
+		got, ok := parseCostMicros([]byte(raw))
+		if !ok || got != want {
+			t.Fatalf("%s => %d/%v", raw, got, ok)
+		}
+	}
+	for _, raw := range []string{`{"credits":-1}`, `{"credits":1.0000001}`, `{"credits":1e2}`, `{}`, `{"credits":"1"}`} {
+		if _, ok := parseCostMicros([]byte(raw)); ok {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+}

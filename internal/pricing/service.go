@@ -21,8 +21,11 @@ import (
 )
 
 const (
-	DefaultDimension = "default"
-	MaxQuantity      = int64(10)
+	DefaultDimension        = "default"
+	MaxQuantity             = int64(10)
+	ProviderCreditScale     = int64(1_000_000)
+	MaxVideoDuration        = int64(60)
+	MaxProviderCreditMicros = int64(1_000_000_000_000_000)
 )
 
 var (
@@ -77,6 +80,15 @@ type Estimate struct {
 	EvaluatedAt   time.Time
 }
 
+// VideoPrice augments the common immutable price identity with Runway credit
+// rules. Credit values use fixed-point microcredits (1 credit = 1e6).
+type VideoPrice struct {
+	Price
+	CreditsPerSecondMicros int64
+	FixedCreditsMicros     int64
+	MinimumCreditsMicros   int64
+}
+
 type Service struct {
 	pool             *pgxpool.Pool
 	minimumMarginBPS int64
@@ -124,7 +136,7 @@ func (service *Service) SetChannelStatus(ctx context.Context, channelID, status 
 
 func (service *Service) Publish(ctx context.Context, price Price, publicationKey string) (Price, error) {
 	price = canonicalPrice(price)
-	if !validPrice(price) || !validText(publicationKey, 200) {
+	if !validPrice(price) || price.Protocol == "runway" || !validText(publicationKey, 200) {
 		return Price{}, ErrInvalidPrice
 	}
 	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -167,6 +179,56 @@ func (service *Service) Publish(ctx context.Context, price Price, publicationKey
 	return price, nil
 }
 
+func (service *Service) PublishVideo(ctx context.Context, value VideoPrice, publicationKey string) (VideoPrice, error) {
+	value.Price = canonicalPrice(value.Price)
+	if !validPrice(value.Price) || value.Protocol != "runway" || value.Operation != "video.generate" || value.CreditsPerSecondMicros < 0 || value.CreditsPerSecondMicros > MaxProviderCreditMicros || value.FixedCreditsMicros < 0 || value.FixedCreditsMicros > MaxProviderCreditMicros || value.MinimumCreditsMicros < 0 || value.MinimumCreditsMicros > MaxProviderCreditMicros || (value.CreditsPerSecondMicros == 0 && value.FixedCreditsMicros == 0) || !validText(publicationKey, 200) {
+		return VideoPrice{}, ErrInvalidPrice
+	}
+	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return VideoPrice{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "video-price-publication:"+publicationKey); err != nil {
+		return VideoPrice{}, err
+	}
+	var existing VideoPrice
+	err = tx.QueryRow(ctx, `SELECT p.id,p.channel_id,p.protocol,p.operation,p.model,p.size,p.quality,p.currency,p.unit_cost,p.unit_sale,p.effective_from,p.effective_until,v.credits_per_second_micros,v.fixed_credits_micros,v.minimum_credits_micros FROM video_credit_price_publications pub JOIN provider_prices p ON p.id=pub.price_id JOIN video_credit_prices v ON v.price_id=p.id WHERE pub.publication_key=$1`, publicationKey).Scan(&existing.ID, &existing.ChannelID, &existing.Protocol, &existing.Operation, &existing.Model, &existing.Size, &existing.Quality, &existing.Currency, &existing.UnitCost, &existing.UnitSale, &existing.EffectiveFrom, &existing.EffectiveUntil, &existing.CreditsPerSecondMicros, &existing.FixedCreditsMicros, &existing.MinimumCreditsMicros)
+	if err == nil {
+		if !sameVideoPrice(existing, value) {
+			return VideoPrice{}, ErrPublicationConflict
+		}
+		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return VideoPrice{}, err
+	}
+	value.ID, err = service.id("price_")
+	if err != nil {
+		return VideoPrice{}, err
+	}
+	publicationID, err := service.id("publication_")
+	if err != nil {
+		return VideoPrice{}, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO provider_prices(id,channel_id,protocol,operation,model,size,quality,currency,unit_cost,unit_sale,effective_from,effective_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, value.ID, value.ChannelID, value.Protocol, value.Operation, value.Model, value.Size, value.Quality, value.Currency, value.UnitCost, value.UnitSale, value.EffectiveFrom, value.EffectiveUntil)
+	if err != nil {
+		return VideoPrice{}, classifyDatabaseError(err)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO video_credit_prices(price_id,credits_per_second_micros,fixed_credits_micros,minimum_credits_micros) VALUES($1,$2,$3,$4)`, value.ID, value.CreditsPerSecondMicros, value.FixedCreditsMicros, value.MinimumCreditsMicros)
+	if err != nil {
+		return VideoPrice{}, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO video_credit_price_publications(id,publication_key,price_id) VALUES($1,$2,$3)`, publicationID, publicationKey, value.ID)
+	if err != nil {
+		return VideoPrice{}, classifyDatabaseError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return VideoPrice{}, err
+	}
+	return value, nil
+}
+
 func (service *Service) Estimate(ctx context.Context, request Request) (Estimate, error) {
 	return service.estimate(ctx, service.pool, request)
 }
@@ -192,6 +254,9 @@ func (service *Service) estimate(ctx context.Context, query rowQuerier, request 
 	if request.At.IsZero() {
 		request.At = service.now().UTC()
 	}
+	if request.Protocol == "runway" {
+		return service.estimateVideo(ctx, query, request)
+	}
 	var price Price
 	err := query.QueryRow(ctx, `SELECT p.id,p.channel_id,p.protocol,p.operation,p.model,p.size,p.quality,p.currency,p.unit_cost,p.unit_sale,p.effective_from,p.effective_until
 		FROM provider_prices p JOIN provider_channels c ON c.id=p.channel_id
@@ -216,6 +281,40 @@ func (service *Service) estimate(ctx context.Context, query rowQuerier, request 
 		return Estimate{}, ErrInvalidRequest
 	}
 	return Estimate{PriceID: price.ID, ChannelID: price.ChannelID, Currency: price.Currency, Quantity: request.Quantity, EstimatedCost: cost, MaximumSale: sale, EvaluatedAt: request.At}, nil
+}
+
+func (service *Service) estimateVideo(ctx context.Context, query rowQuerier, request Request) (Estimate, error) {
+	var price VideoPrice
+	err := query.QueryRow(ctx, `SELECT p.id,p.channel_id,p.protocol,p.operation,p.model,p.size,p.quality,p.currency,p.unit_cost,p.unit_sale,p.effective_from,p.effective_until,v.credits_per_second_micros,v.fixed_credits_micros,v.minimum_credits_micros FROM provider_prices p JOIN video_credit_prices v ON v.price_id=p.id JOIN provider_channels c ON c.id=p.channel_id WHERE p.channel_id=$1 AND p.protocol=$2 AND p.operation=$3 AND p.model=$4 AND p.size=$5 AND p.quality=$6 AND c.status='active' AND p.effective_from<=$7 AND (p.effective_until IS NULL OR p.effective_until>$7)`, request.ChannelID, request.Protocol, request.Operation, request.Model, request.Size, request.Quality, request.At).Scan(&price.ID, &price.ChannelID, &price.Protocol, &price.Operation, &price.Model, &price.Size, &price.Quality, &price.Currency, &price.UnitCost, &price.UnitSale, &price.EffectiveFrom, &price.EffectiveUntil, &price.CreditsPerSecondMicros, &price.FixedCreditsMicros, &price.MinimumCreditsMicros)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Estimate{}, ErrPriceUnavailable
+	}
+	if err != nil {
+		return Estimate{}, err
+	}
+	if !marginAllowed(price.UnitCost, price.UnitSale, service.minimumMarginBPS) {
+		return Estimate{}, ErrMarginViolation
+	}
+	credits, ok := multiply(price.CreditsPerSecondMicros, request.Quantity)
+	if !ok || credits > MaxProviderCreditMicros-price.FixedCreditsMicros {
+		return Estimate{}, ErrInvalidRequest
+	}
+	credits += price.FixedCreditsMicros
+	if credits < price.MinimumCreditsMicros {
+		credits = price.MinimumCreditsMicros
+	}
+	if credits <= 0 || credits > MaxProviderCreditMicros {
+		return Estimate{}, ErrInvalidRequest
+	}
+	cost, ok := scaledCeil(credits, price.UnitCost)
+	if !ok {
+		return Estimate{}, ErrInvalidRequest
+	}
+	sale, ok := scaledCeil(credits, price.UnitSale)
+	if !ok || sale <= 0 {
+		return Estimate{}, ErrInvalidRequest
+	}
+	return Estimate{PriceID: price.ID, ChannelID: price.ChannelID, Currency: price.Currency, Quantity: credits, EstimatedCost: cost, MaximumSale: sale, EvaluatedAt: request.At}, nil
 }
 
 func canonicalPrice(price Price) Price {
@@ -255,22 +354,50 @@ func validPrice(price Price) bool {
 }
 
 func validRequest(request Request) bool {
-	return validID(request.ChannelID, "channel_") && validProtocol(request.Protocol) && validOperation(request.Operation) && validText(request.Model, 200) && validText(request.Size, 80) && validText(request.Quality, 80) && request.Quantity >= 1 && request.Quantity <= MaxQuantity
+	maximum := MaxQuantity
+	if request.Protocol == "runway" {
+		maximum = MaxVideoDuration
+	}
+	return validID(request.ChannelID, "channel_") && validProtocol(request.Protocol) && validOperation(request.Operation) && validText(request.Model, 200) && validText(request.Size, 80) && validText(request.Quality, 80) && request.Quantity >= 1 && request.Quantity <= maximum
 }
 
 func validProtocol(value string) bool {
-	return value == "openai" || value == "gemini" || value == "anthropic" || value == "replicate" || value == "fal"
+	return value == "openai" || value == "gemini" || value == "anthropic" || value == "replicate" || value == "fal" || value == "runway"
 }
 
-func validOperation(value string) bool { return value == "image.generate" || value == "image.edit" }
+func validOperation(value string) bool {
+	return value == "image.generate" || value == "image.edit" || value == "video.generate"
+}
 
 func validProvider(provider providercredentials.ProviderID) bool {
 	switch provider {
 	case providercredentials.Google, providercredentials.OpenAI, providercredentials.XAI:
 		return true
 	default:
-		return provider == "replicate" || provider == "fal" || provider == "stability"
+		return provider == "replicate" || provider == "fal" || provider == "stability" || provider == providercredentials.Runway
 	}
+}
+
+func scaledCeil(quantity, unit int64) (int64, bool) {
+	if quantity < 0 || unit < 0 {
+		return 0, false
+	}
+	product := new(big.Int).Mul(big.NewInt(quantity), big.NewInt(unit))
+	product.Add(product, big.NewInt(ProviderCreditScale-1))
+	product.Div(product, big.NewInt(ProviderCreditScale))
+	if !product.IsInt64() {
+		return 0, false
+	}
+	return product.Int64(), true
+}
+func sameVideoPrice(left, right VideoPrice) bool {
+	return left.ChannelID == right.ChannelID && left.Protocol == right.Protocol && left.Operation == right.Operation && left.Model == right.Model && left.Size == right.Size && left.Quality == right.Quality && left.Currency == right.Currency && left.UnitCost == right.UnitCost && left.UnitSale == right.UnitSale && left.EffectiveFrom.Equal(right.EffectiveFrom) && equalTimePointers(left.EffectiveUntil, right.EffectiveUntil) && left.CreditsPerSecondMicros == right.CreditsPerSecondMicros && left.FixedCreditsMicros == right.FixedCreditsMicros && left.MinimumCreditsMicros == right.MinimumCreditsMicros
+}
+func equalTimePointers(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 func validText(value string, maximum int) bool {

@@ -3,7 +3,7 @@ id: gateway-20260822-051
 title: Phase 5 Runway Video Credit Billing and Settlement
 status: accepted
 created_at: 2026-08-22T14:30:00+09:00
-updated_at: 2026-08-22T14:30:00+09:00
+updated_at: 2026-08-22T16:20:00+09:00
 owners:
   - gateway
 initiative: phase-5-runway-video-billing-settlement
@@ -209,19 +209,24 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/r
 
 ## 완료 조건
 
-- [ ] 관리형 Runway task가 Provider dispatch 전에 최대 판매가를 정확히 예약함
-- [ ] 동시성과 idempotency 충돌에서도 단일 charge, Job과 Provider task만 생성됨
-- [ ] terminal actual `cost.credits`로 성공·유료 실패·취소를 정확히 Capture/Release함
-- [ ] 비용 누락·초과·불명확 timeout은 자동 환불/추가 인출 없이 reconciliation됨
-- [ ] 가격 유효기간, 최소 마진과 channel spend cap이 pre-dispatch 적용됨
-- [ ] BYOK와 공식 Runway SDK native wire 호환성이 유지됨
-- [ ] prompt, input/output URL, Provider task ID와 credential이 billing/telemetry에 노출되지 않음
-- [ ] 전체 unit/race/integration/SDK 회귀가 통과함
-- [ ] README, migration, 운영 runbook과 멀티레포 handoff가 갱신됨
+- [x] 관리형 Runway task가 Provider dispatch 전에 최대 판매가를 정확히 예약함
+- [x] 동시성과 idempotency 충돌에서도 단일 charge, Job과 Provider task만 생성됨
+- [x] terminal actual `cost.credits`로 성공·유료 실패·취소를 정확히 Capture/Release함
+- [x] 비용 누락·초과·불명확 timeout은 자동 환불/추가 인출 없이 reconciliation됨
+- [x] 가격 유효기간, 최소 마진과 channel spend cap이 pre-dispatch 적용됨
+- [x] BYOK와 공식 Runway SDK native wire 호환성이 유지됨
+- [x] prompt, input/output URL, Provider task ID와 credential이 billing/telemetry에 노출되지 않음
+- [x] 전체 unit/race/integration/SDK 회귀가 통과함
+- [x] README, migration, 운영 runbook과 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/gateway-go-cache make check`
+- `GOCACHE=/private/tmp/gateway-go-cache GOFLAGS=-p=1 TEST_DATABASE_URL='postgres://gateway:***@127.0.0.1:55433/gateway_plan051c?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/14' make integration-test`
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/runway -count=1`
+- 새 DB에서 migration 000001–000045의 적용 및 반복 실행을 검증했다.
+- terminal Runway `cost.credits`를 최대 6자리 fixed-point microcredit으로 검증하며, 초과·누락 evidence는 자동 정산하지 않는다.
+- `gateway-video-price --validate-only`와 immutable publication/최소 margin/기간 선택 통합 테스트를 추가했다.
 
 ## Rollback 계획
 

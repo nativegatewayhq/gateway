@@ -345,7 +345,24 @@ export GATEWAY_RUNWAY_MODELS='gateway-video'
 export GATEWAY_RUNWAY_MODEL_CAPABILITIES_JSON='{"gateway-video":{"provider_model":"gen4_turbo","text_to_video":true,"image_to_video":true}}'
 ```
 
-Runway output URLs are returned in provider mode and normally expire after roughly 24–48 hours; callers must download results they need to retain. Managed video storage, upload proxying, and video credit billing are deferred. When billing is required, video submit fails before Job creation or Provider dispatch.
+Runway output URLs are returned in provider mode and normally expire after roughly 24–48 hours; callers must download results they need to retain. Managed video storage and upload proxying remain deferred.
+
+In billing-required mode, publish an exact immutable price for each logical model, task kind, ratio, and audio combination before enabling traffic. Provider credits use fixed-point microcredits (one credit is 1,000,000 microcredits), while cost and sale rates use `USD_TICKS` per Provider credit:
+
+```sh
+gateway-video-price \
+  -channel-id channel_00000000000000000000000000000007 \
+  -model gateway-video \
+  -task-kind text_to_video \
+  -quality 'ratio=1280:720;audio=false' \
+  -credits-per-second-micros 5000000 \
+  -credit-cost 10000 \
+  -credit-sale 12500 \
+  -effective-from 2026-08-22T00:00:00Z \
+  -publication-key runway-gen4-turbo-v1
+```
+
+The Gateway reserves the maximum sale before creating the durable Job. Terminal `cost.credits` evidence settles succeeded, failed, and canceled tasks; explicit zero releases the reservation. Missing, malformed, or over-estimate cost remains reserved for manual reconciliation. BYOK mode creates no charge.
 
 The protocol-neutral Job core persists tenant ownership, immutable routing/charge identity, a separate internal Provider Job identifier, state transitions, append-only events, polling leases, cancellation intent, and terminal result snapshots in PostgreSQL. This release intentionally exposes no new HTTP route; the subsequent Replicate and fal native facades consume this application contract.
 
