@@ -85,6 +85,32 @@ func billingFixture(t *testing.T, balance int64) (*Service, *pgxpool.Pool) {
 	return service, pool
 }
 
+type sequenceEstimator struct {
+	estimates []pricing.Estimate
+	next      int
+}
+
+func (estimator *sequenceEstimator) EstimateInTx(_ context.Context, _ pgx.Tx, request pricing.Request) (pricing.Estimate, error) {
+	if estimator.next >= len(estimator.estimates) {
+		return pricing.Estimate{}, pricing.ErrPriceUnavailable
+	}
+	estimate := estimator.estimates[estimator.next]
+	estimator.next++
+	estimate.ChannelID = request.ChannelID
+	estimate.Quantity = request.Quantity
+	estimate.EvaluatedAt = request.At
+	return estimate, nil
+}
+
+func serviceWithEstimator(t *testing.T, pool *pgxpool.Pool, estimator Estimator) *Service {
+	t.Helper()
+	service, err := NewServiceWithControls(pool, estimator, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool), 32*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
 func TestProviderSpendCapReserveCaptureAndRollback(t *testing.T) {
 	service, pool := billingFixture(t, 10_000)
 	store := spendcap.NewStore(pool)
@@ -505,6 +531,59 @@ func TestQuoteHasNoWalletLedgerOrChargeEffects(t *testing.T) {
 	estimate, err := service.Quote(context.Background(), billableRequest("request-quote"))
 	if err != nil || estimate.ChannelID != openAIChannel || estimate.MaximumSale != 200 {
 		t.Fatalf("estimate=%+v error=%v", estimate, err)
+	}
+	assertWalletAndCharge(t, pool, 1_000, 0, 0, "")
+}
+
+func TestLowestCostBoundQuotePersistsRoutingEvidence(t *testing.T) {
+	_, pool := billingFixture(t, 1_000)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	var priceID string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM provider_prices LIMIT 1`).Scan(&priceID); err != nil {
+		t.Fatal(err)
+	}
+	estimate := pricing.Estimate{PriceID: priceID, Currency: ledger.Currency, EstimatedCost: 60, MaximumSale: 100}
+	service := serviceWithEstimator(t, pool, &sequenceEstimator{estimates: []pricing.Estimate{estimate, estimate}})
+	request := billableRequest("lowest-cost-evidence")
+	request.RoutingPolicy = "lowest_cost"
+	request.CostRank = 1
+	request.EvaluationAt = at
+	quoted, err := service.Quote(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ExpectedQuote = &BoundQuote{PriceID: quoted.PriceID, ChannelID: quoted.ChannelID, Currency: quoted.Currency, EstimatedCost: quoted.EstimatedCost, MaximumSale: quoted.MaximumSale, EvaluatedAt: quoted.EvaluatedAt}
+	charge, err := service.Begin(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if charge.RoutingPolicy != "lowest_cost" || charge.CostRank == nil || *charge.CostRank != 1 || charge.PriceEvaluatedAt == nil || !charge.PriceEvaluatedAt.Equal(at) || charge.PriceID != estimate.PriceID || charge.EstimatedCost != 60 || charge.ReservedSale != 100 {
+		t.Fatalf("charge=%+v", charge)
+	}
+	var policy string
+	var rank int
+	var evaluatedAt time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT routing_policy,cost_rank,price_evaluated_at FROM image_request_charges WHERE id=$1`, charge.ID).Scan(&policy, &rank, &evaluatedAt); err != nil || policy != "lowest_cost" || rank != 1 || !evaluatedAt.Equal(at) {
+		t.Fatalf("policy=%s rank=%d at=%s err=%v", policy, rank, evaluatedAt, err)
+	}
+}
+
+func TestLowestCostSnapshotChangeHasNoFinancialEffects(t *testing.T) {
+	_, pool := billingFixture(t, 1_000)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	first := pricing.Estimate{PriceID: "price_00000000000000000000000000000092", Currency: ledger.Currency, EstimatedCost: 60, MaximumSale: 100}
+	changed := pricing.Estimate{PriceID: "price_00000000000000000000000000000093", Currency: ledger.Currency, EstimatedCost: 55, MaximumSale: 90}
+	service := serviceWithEstimator(t, pool, &sequenceEstimator{estimates: []pricing.Estimate{first, changed}})
+	request := billableRequest("lowest-cost-race")
+	request.RoutingPolicy = "lowest_cost"
+	request.EvaluationAt = at
+	quoted, err := service.Quote(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ExpectedQuote = &BoundQuote{PriceID: quoted.PriceID, ChannelID: quoted.ChannelID, Currency: quoted.Currency, EstimatedCost: quoted.EstimatedCost, MaximumSale: quoted.MaximumSale, EvaluatedAt: quoted.EvaluatedAt}
+	if _, err := service.Begin(context.Background(), request); !errors.Is(err, ErrPriceSnapshotChanged) {
+		t.Fatalf("error=%v", err)
 	}
 	assertWalletAndCharge(t, pool, 1_000, 0, 0, "")
 }

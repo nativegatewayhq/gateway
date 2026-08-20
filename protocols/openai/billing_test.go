@@ -42,18 +42,26 @@ type billingFake struct {
 	replayFound   bool
 	replayErr     error
 	replayCalls   int
+	quotes        map[string]pricing.Estimate
+	quoteRequests []chargebilling.BeginRequest
+	beginSequence []error
+	beginCalls    int
 }
 
 func (fake *billingFake) Begin(_ context.Context, request chargebilling.BeginRequest) (chargebilling.Charge, error) {
 	fake.beginRequest = request
 	fake.beginChannels = append(fake.beginChannels, request.ChannelID)
 	fake.events = append(fake.events, "begin")
+	fake.beginCalls++
 	charge := fake.beginCharge
 	if charge.ID == "" {
 		charge.ID = "charge_00000000000000000000000000000001"
 	}
 	if err := fake.beginErrors[request.ChannelID]; err != nil {
 		return charge, err
+	}
+	if fake.beginCalls <= len(fake.beginSequence) && fake.beginSequence[fake.beginCalls-1] != nil {
+		return charge, fake.beginSequence[fake.beginCalls-1]
 	}
 	return charge, fake.beginErr
 }
@@ -62,7 +70,15 @@ func (fake *billingFake) Replay(context.Context, chargebilling.BeginRequest) (ch
 	return fake.replayCharge, fake.replayFound, fake.replayErr
 }
 func (fake *billingFake) Quote(_ context.Context, request chargebilling.BeginRequest) (pricing.Estimate, error) {
-	return pricing.Estimate{}, fake.quoteErrors[request.ChannelID]
+	fake.quoteRequests = append(fake.quoteRequests, request)
+	estimate := fake.quotes[request.ChannelID]
+	if estimate.ChannelID == "" {
+		estimate.ChannelID = request.ChannelID
+	}
+	if !request.EvaluationAt.IsZero() {
+		estimate.EvaluatedAt = request.EvaluationAt
+	}
+	return estimate, fake.quoteErrors[request.ChannelID]
 }
 func (fake *billingFake) Capture(context.Context, string) (chargebilling.Charge, error) {
 	fake.events = append(fake.events, "capture")
@@ -146,6 +162,136 @@ func TestBillableImagesUsesPriorityCandidateChannelAndProviderModel(t *testing.T
 	response := billableImageRequest(handler, `{"model":"logical-image","prompt":"secret"}`)
 	if response.Code != 200 || openAICalls != 0 || xAICalls != 1 || fake.beginRequest.Model != "logical-image" || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000002" {
 		t.Fatalf("response=%d calls=%d/%d begin=%+v", response.Code, openAICalls, xAICalls, fake.beginRequest)
+	}
+}
+
+func TestBillableImagesUsesLowestUpstreamCostAndBoundQuote(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.LowestCost, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{quotes: map[string]pricing.Estimate{
+		"channel_00000000000000000000000000000001": {PriceID: "price_00000000000000000000000000000001", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 30, MaximumSale: 31},
+		"channel_00000000000000000000000000000002": {PriceID: "price_00000000000000000000000000000002", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 10, MaximumSale: 50},
+	}}
+	openAICalls, xAICalls := 0, 0
+	handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			openAICalls++
+			return nil, errors.New("unexpected call")
+		}),
+		providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+			xAICalls++
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}),
+	}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+	response := billableImageRequest(handler, `{"model":"logical-image"}`)
+	if response.Code != 200 || openAICalls != 0 || xAICalls != 1 || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000002" || fake.beginRequest.RoutingPolicy != "lowest_cost" || fake.beginRequest.CostRank != 0 || fake.beginRequest.ExpectedQuote == nil || fake.beginRequest.ExpectedQuote.PriceID != "price_00000000000000000000000000000002" {
+		t.Fatalf("response=%d calls=%d/%d begin=%+v", response.Code, openAICalls, xAICalls, fake.beginRequest)
+	}
+	if len(fake.quoteRequests) != 2 || fake.quoteRequests[0].EvaluationAt.IsZero() || !fake.quoteRequests[0].EvaluationAt.Equal(fake.quoteRequests[1].EvaluationAt) {
+		t.Fatalf("quote requests=%+v", fake.quoteRequests)
+	}
+}
+
+func TestBillableImagesLowestCostFallsBackOnCapAndReevaluatesPriceRaceOnce(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-image", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.LowestCost, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "openai-provider-model", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "xai-provider-model", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotes := map[string]pricing.Estimate{
+		"channel_00000000000000000000000000000001": {PriceID: "price_00000000000000000000000000000001", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 20, MaximumSale: 30},
+		"channel_00000000000000000000000000000002": {PriceID: "price_00000000000000000000000000000002", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 10, MaximumSale: 30},
+	}
+	t.Run("spend cap", func(t *testing.T) {
+		fake := &billingFake{quotes: quotes, beginErrors: map[string]error{"channel_00000000000000000000000000000002": spendcap.ErrExceeded}}
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			}),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("capped candidate dispatched")
+				return nil, nil
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		response := billableImageRequest(handler, `{"model":"logical-image"}`)
+		if response.Code != 200 || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000001" || fake.beginRequest.CostRank != 1 || len(fake.beginChannels) != 2 {
+			t.Fatalf("response=%d begin=%+v channels=%v", response.Code, fake.beginRequest, fake.beginChannels)
+		}
+	})
+	t.Run("price race", func(t *testing.T) {
+		fake := &billingFake{quotes: quotes, beginSequence: []error{chargebilling.ErrPriceSnapshotChanged}}
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				return nil, errors.New("unexpected call")
+			}),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		response := billableImageRequest(handler, `{"model":"logical-image"}`)
+		if response.Code != 200 || fake.beginCalls != 2 || len(fake.quoteRequests) != 4 {
+			t.Fatalf("response=%d begins=%d quotes=%d", response.Code, fake.beginCalls, len(fake.quoteRequests))
+		}
+	})
+	t.Run("repeated price race stops", func(t *testing.T) {
+		fake := &billingFake{quotes: quotes, beginSequence: []error{chargebilling.ErrPriceSnapshotChanged, chargebilling.ErrPriceSnapshotChanged}}
+		handler := NewBillableImagesHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+			providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("provider dispatched")
+				return nil, nil
+			}),
+			providercredentials.XAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+				t.Fatal("provider dispatched")
+				return nil, nil
+			}),
+		}, 1024, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+		response := billableImageRequest(handler, `{"model":"logical-image"}`)
+		if response.Code != http.StatusServiceUnavailable || fake.beginCalls != 2 || len(fake.quoteRequests) != 4 {
+			t.Fatalf("response=%d begins=%d quotes=%d", response.Code, fake.beginCalls, len(fake.quoteRequests))
+		}
+	})
+}
+
+func TestBillableJSONEditUsesLowestCostRoute(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "logical-edit", Owner: "gateway", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Edit, MediaType: imageoperation.JSON}}, Policy: imageoperation.LowestCost, Candidates: []imageoperation.ChannelCandidate{
+		{ID: "candidate_openai", Provider: providercredentials.OpenAI, ProviderModel: "expensive-edit", ChannelID: "channel_00000000000000000000000000000001", Enabled: true, Priority: 1},
+		{ID: "candidate_xai", Provider: providercredentials.XAI, ProviderModel: "cheap-edit", ChannelID: "channel_00000000000000000000000000000002", Enabled: true, Priority: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &billingFake{quotes: map[string]pricing.Estimate{
+		"channel_00000000000000000000000000000001": {PriceID: "price_00000000000000000000000000000001", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 40, MaximumSale: 50},
+		"channel_00000000000000000000000000000002": {PriceID: "price_00000000000000000000000000000002", Currency: ledger.Currency, Quantity: 1, EstimatedCost: 10, MaximumSale: 30},
+	}}
+	handler := NewBillableEditHandlerWithAvailability(slog.Default(), billingAuth(), registry, map[providercredentials.ProviderID]Executor{
+		providercredentials.OpenAI: executorFunc(func(context.Context, openaiimages.Request) (*http.Response, error) {
+			t.Fatal("expensive candidate dispatched")
+			return nil, nil
+		}),
+		providercredentials.XAI: executorFunc(func(_ context.Context, request openaiimages.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(request.Body)
+			if !strings.Contains(string(body), `"model":"cheap-edit"`) {
+				t.Fatalf("body=%s", body)
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
+		}),
+	}, 2048, 1, fake, availability{providercredentials.OpenAI, providercredentials.XAI})
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{"model":"logical-edit","image":{"url":"https://example.invalid/image"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer service-secret")
+	request.Header.Set(requestid.HeaderName, "lowest-edit-request")
+	response := httptest.NewRecorder()
+	requestid.Middleware(handler).ServeHTTP(response, request)
+	if response.Code != 200 || fake.beginRequest.ChannelID != "channel_00000000000000000000000000000002" || fake.beginRequest.CostRank != 0 || fake.beginRequest.ExpectedQuote == nil {
+		t.Fatalf("response=%d begin=%+v", response.Code, fake.beginRequest)
 	}
 }
 

@@ -15,12 +15,13 @@ type MediaType string
 type Policy string
 
 const (
-	Generate  Operation = "image.generate"
-	Edit      Operation = "image.edit"
-	JSON      MediaType = "application/json"
-	Multipart MediaType = "multipart/form-data"
-	Fixed     Policy    = "fixed"
-	Priority  Policy    = "priority"
+	Generate   Operation = "image.generate"
+	Edit       Operation = "image.edit"
+	JSON       MediaType = "application/json"
+	Multipart  MediaType = "multipart/form-data"
+	Fixed      Policy    = "fixed"
+	Priority   Policy    = "priority"
+	LowestCost Policy    = "lowest_cost"
 )
 
 var (
@@ -60,6 +61,7 @@ type RoutingDecision struct {
 	ProviderModel string
 	ChannelID     string
 	Policy        Policy
+	Priority      int
 }
 type Registry struct{ routes map[string]ModelRoute }
 
@@ -68,7 +70,7 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 	candidateIDs := map[string]struct{}{}
 	channelIDs := map[string]struct{}{}
 	for _, route := range routes {
-		if !validProtocol(route.Protocol) || !validModelID(route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || (route.Policy != Fixed && route.Policy != Priority) {
+		if !validProtocol(route.Protocol) || !validModelID(route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || (route.Policy != Fixed && route.Policy != Priority && route.Policy != LowestCost) {
 			return nil, ErrInvalidModel
 		}
 		key := route.Protocol + "\x00" + route.Model
@@ -100,7 +102,7 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 			channelIDs[candidate.ChannelID] = struct{}{}
 			fixedFound = fixedFound || candidate.ID == route.FixedCandidateID
 		}
-		if (route.Policy == Fixed && !fixedFound) || (route.Policy == Priority && route.FixedCandidateID != "") {
+		if (route.Policy == Fixed && !fixedFound) || (route.Policy != Fixed && route.FixedCandidateID != "") {
 			return nil, ErrInvalidModel
 		}
 		route.Capabilities = append([]Capability(nil), route.Capabilities...)
@@ -168,7 +170,7 @@ func (registry *Registry) Candidates(protocol, model string, operation Operation
 		if !candidate.Enabled || (route.Policy == Fixed && candidate.ID != route.FixedCandidateID) {
 			continue
 		}
-		decisions = append(decisions, RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy})
+		decisions = append(decisions, RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy, Priority: candidate.Priority})
 	}
 	if len(decisions) == 0 {
 		return nil, ErrUnsupported
