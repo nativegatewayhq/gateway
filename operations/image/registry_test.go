@@ -118,3 +118,46 @@ func TestFixedRoutingDoesNotSelectAnAlternateCandidate(t *testing.T) {
 		t.Fatalf("fixed candidates selected alternate: %v", err)
 	}
 }
+
+func TestWeightedRegistryValidatesAndPreservesWeights(t *testing.T) {
+	route := ModelRoute{Protocol: "openai", Model: "weighted-image", Owner: "gateway", Capabilities: []Capability{{Generate, JSON}}, Policy: Weighted, Candidates: []ChannelCandidate{
+		{ID: "candidate_b", Provider: providercredentials.XAI, ProviderModel: "model-b", ChannelID: "channel_00000000000000000000000000000010", Enabled: true, Weight: 9},
+		{ID: "candidate_a", Provider: providercredentials.OpenAI, ProviderModel: "model-a", ChannelID: "channel_00000000000000000000000000000011", Enabled: true, Weight: 1},
+		{ID: "candidate_disabled", Provider: providercredentials.OpenAI, ProviderModel: "model-c", ChannelID: "channel_00000000000000000000000000000012", Enabled: false},
+	}}
+	registry, err := NewRegistry(route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := registry.Candidates("openai", route.Model, Generate, JSON)
+	if err != nil || len(candidates) != 2 || candidates[0].CandidateID != "candidate_a" || candidates[0].Weight != 1 || candidates[1].Weight != 9 {
+		t.Fatalf("candidates=%+v err=%v", candidates, err)
+	}
+
+	zero := route
+	zero.Model = "zero-weight"
+	zero.Candidates = append([]ChannelCandidate(nil), route.Candidates...)
+	zero.Candidates[0].Weight = 0
+	if _, err := NewRegistry(zero); !errors.Is(err, ErrInvalidModel) {
+		t.Fatalf("zero weight err=%v", err)
+	}
+	overflow := route
+	overflow.Model = "overflow-weight"
+	overflow.Candidates = append([]ChannelCandidate(nil), route.Candidates...)
+	overflow.Candidates[0].Weight = MaxCandidateWeight
+	overflow.Candidates[1].Weight = MaxCandidateWeight
+	overflow.Candidates = append(overflow.Candidates,
+		ChannelCandidate{ID: "candidate_c", Provider: providercredentials.OpenAI, ProviderModel: "model-c", ChannelID: "channel_00000000000000000000000000000013", Enabled: true, Weight: MaxCandidateWeight},
+		ChannelCandidate{ID: "candidate_d", Provider: providercredentials.OpenAI, ProviderModel: "model-d", ChannelID: "channel_00000000000000000000000000000014", Enabled: true, Weight: MaxCandidateWeight},
+		ChannelCandidate{ID: "candidate_e", Provider: providercredentials.OpenAI, ProviderModel: "model-e", ChannelID: "channel_00000000000000000000000000000015", Enabled: true, Weight: 1},
+	)
+	if _, err := NewRegistry(overflow); !errors.Is(err, ErrInvalidModel) {
+		t.Fatalf("overflow err=%v", err)
+	}
+	nonWeighted := route
+	nonWeighted.Model = "priority-with-weight"
+	nonWeighted.Policy = Priority
+	if _, err := NewRegistry(nonWeighted); !errors.Is(err, ErrInvalidModel) {
+		t.Fatalf("non-weighted weight err=%v", err)
+	}
+}

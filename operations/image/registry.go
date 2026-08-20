@@ -22,6 +22,11 @@ const (
 	Fixed      Policy    = "fixed"
 	Priority   Policy    = "priority"
 	LowestCost Policy    = "lowest_cost"
+	Weighted   Policy    = "weighted"
+
+	MaxRouteCandidates = 128
+	MaxCandidateWeight = uint32(1_000_000_000)
+	MaxTotalWeight     = uint64(4_000_000_000)
 )
 
 var (
@@ -42,6 +47,7 @@ type ChannelCandidate struct {
 	ChannelID     string
 	Enabled       bool
 	Priority      int
+	Weight        uint32
 }
 type ModelRoute struct {
 	Protocol         string
@@ -62,6 +68,7 @@ type RoutingDecision struct {
 	ChannelID     string
 	Policy        Policy
 	Priority      int
+	Weight        uint32
 }
 type Registry struct{ routes map[string]ModelRoute }
 
@@ -70,7 +77,7 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 	candidateIDs := map[string]struct{}{}
 	channelIDs := map[string]struct{}{}
 	for _, route := range routes {
-		if !validProtocol(route.Protocol) || !validModelID(route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || (route.Policy != Fixed && route.Policy != Priority && route.Policy != LowestCost) {
+		if !validProtocol(route.Protocol) || !validModelID(route.Model) || strings.TrimSpace(route.Owner) == "" || route.Created < 0 || len(route.Capabilities) == 0 || len(route.Candidates) == 0 || len(route.Candidates) > MaxRouteCandidates || (route.Policy != Fixed && route.Policy != Priority && route.Policy != LowestCost && route.Policy != Weighted) {
 			return nil, ErrInvalidModel
 		}
 		key := route.Protocol + "\x00" + route.Model
@@ -88,8 +95,19 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 			seen[capability] = struct{}{}
 		}
 		fixedFound := false
+		var totalWeight uint64
 		for _, candidate := range route.Candidates {
-			if !validCandidateID(candidate.ID) || !validRouteProtocol(route.Protocol, candidate.Provider) || !validModelID(candidate.ProviderModel) || !validChannelID(candidate.ChannelID) || candidate.Priority < 0 {
+			if !validCandidateID(candidate.ID) || !validRouteProtocol(route.Protocol, candidate.Provider) || !validModelID(candidate.ProviderModel) || !validChannelID(candidate.ChannelID) || candidate.Priority < 0 || candidate.Weight > MaxCandidateWeight {
+				return nil, ErrInvalidModel
+			}
+			if route.Policy == Weighted {
+				if candidate.Enabled && candidate.Weight == 0 {
+					return nil, ErrInvalidModel
+				}
+				if candidate.Enabled {
+					totalWeight += uint64(candidate.Weight)
+				}
+			} else if candidate.Weight != 0 {
 				return nil, ErrInvalidModel
 			}
 			if _, duplicate := candidateIDs[candidate.ID]; duplicate {
@@ -102,7 +120,7 @@ func NewRegistry(routes ...ModelRoute) (*Registry, error) {
 			channelIDs[candidate.ChannelID] = struct{}{}
 			fixedFound = fixedFound || candidate.ID == route.FixedCandidateID
 		}
-		if (route.Policy == Fixed && !fixedFound) || (route.Policy != Fixed && route.FixedCandidateID != "") {
+		if (route.Policy == Fixed && !fixedFound) || (route.Policy != Fixed && route.FixedCandidateID != "") || (route.Policy == Weighted && (totalWeight == 0 || totalWeight > MaxTotalWeight)) {
 			return nil, ErrInvalidModel
 		}
 		route.Capabilities = append([]Capability(nil), route.Capabilities...)
@@ -170,7 +188,7 @@ func (registry *Registry) Candidates(protocol, model string, operation Operation
 		if !candidate.Enabled || (route.Policy == Fixed && candidate.ID != route.FixedCandidateID) {
 			continue
 		}
-		decisions = append(decisions, RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy, Priority: candidate.Priority})
+		decisions = append(decisions, RoutingDecision{Protocol: route.Protocol, Model: route.Model, CandidateID: candidate.ID, Provider: candidate.Provider, ProviderModel: candidate.ProviderModel, ChannelID: candidate.ChannelID, Policy: route.Policy, Priority: candidate.Priority, Weight: candidate.Weight})
 	}
 	if len(decisions) == 0 {
 		return nil, ErrUnsupported

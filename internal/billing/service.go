@@ -244,12 +244,14 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 		return Charge{}, err
 	}
 	charge := Charge{ID: id, RequestID: request.RequestID, OrganizationID: request.OrganizationID, ProjectID: request.ProjectID, Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, ChannelID: estimate.ChannelID, PriceID: estimate.PriceID, Quantity: request.Quantity, Size: request.Size, Quality: request.Quality, Currency: estimate.Currency, EstimatedCost: estimate.EstimatedCost, ReservedSale: estimate.MaximumSale, ReservationID: reservation.Reservation.ID, State: "RESERVED", IdempotencyKey: request.IdempotencyKey, RequestFingerprint: request.RequestFingerprint}
-	if request.RoutingPolicy == "lowest_cost" {
+	if request.RoutingPolicy != "" {
 		rank := request.CostRank
-		evaluatedAt := request.EvaluationAt
 		charge.RoutingPolicy = request.RoutingPolicy
 		charge.CostRank = &rank
-		charge.PriceEvaluatedAt = &evaluatedAt
+		if request.RoutingPolicy == "lowest_cost" {
+			evaluatedAt := request.EvaluationAt
+			charge.PriceEvaluatedAt = &evaluatedAt
+		}
 	}
 	var storedKey, storedFingerprint any
 	if request.IdempotencyKey != "" {
@@ -620,6 +622,8 @@ func validBeginRequest(request BeginRequest) bool {
 	validRouting := request.RoutingPolicy == "" && request.ExpectedQuote == nil && request.EvaluationAt.IsZero()
 	if request.RoutingPolicy == "lowest_cost" {
 		validRouting = request.CostRank >= 0 && !request.EvaluationAt.IsZero() && (request.ExpectedQuote == nil || validBoundQuote(*request.ExpectedQuote, request))
+	} else if request.RoutingPolicy == "weighted" {
+		validRouting = request.CostRank >= 0 && request.ExpectedQuote == nil && request.EvaluationAt.IsZero()
 	}
 	return validIdempotency && validRouting && validPrefixed(request.OrganizationID, "org_", 200) && validPrefixed(request.ProjectID, "project_", 200) && validText(request.RequestID, 128) && validProtocolOperation && validText(request.Model, 200) && validID(request.ChannelID, "channel_") && request.Quantity >= 1 && request.Quantity <= 10 && validText(request.Size, 80) && validText(request.Quality, 80)
 }
