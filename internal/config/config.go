@@ -14,6 +14,9 @@ const (
 	defaultHTTPAddr        = ":8080"
 	defaultLogLevel        = "info"
 	defaultShutdownTimeout = 10 * time.Second
+	defaultGoogleTimeout   = 2 * time.Minute
+	maxGoogleTimeout       = 10 * time.Minute
+	defaultGeminiBodyBytes = int64(32 * 1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -26,6 +29,8 @@ type Config struct {
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
 	DatabaseURL     string
+	GoogleTimeout   time.Duration
+	GeminiBodyBytes int64
 }
 
 // Load reads configuration through lookup and validates every value before
@@ -35,6 +40,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		HTTPAddr:        defaultHTTPAddr,
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: defaultShutdownTimeout,
+		GoogleTimeout:   defaultGoogleTimeout,
+		GeminiBodyBytes: defaultGeminiBodyBytes,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -56,6 +63,20 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 	if value, ok := lookup("GATEWAY_DATABASE_URL"); ok {
 		cfg.DatabaseURL = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("GATEWAY_GOOGLE_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > maxGoogleTimeout {
+			return Config{}, fmt.Errorf("GATEWAY_GOOGLE_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.GoogleTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES"); ok {
+		bodyBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || bodyBytes <= 0 || bodyBytes > defaultGeminiBodyBytes {
+			return Config{}, fmt.Errorf("GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES: must be an integer between 1 and 33554432")
+		}
+		cfg.GeminiBodyBytes = bodyBytes
 	}
 
 	if err := validateHTTPAddr(cfg.HTTPAddr); err != nil {

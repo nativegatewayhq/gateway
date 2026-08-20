@@ -28,16 +28,24 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ShutdownTimeout != 10*time.Second {
 		t.Errorf("ShutdownTimeout = %v, want 10s", cfg.ShutdownTimeout)
 	}
+	if cfg.GoogleTimeout != 2*time.Minute {
+		t.Errorf("GoogleTimeout = %v, want 2m", cfg.GoogleTimeout)
+	}
+	if cfg.GeminiBodyBytes != 32*1024*1024 {
+		t.Errorf("GeminiBodyBytes = %d", cfg.GeminiBodyBytes)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]string{
-		"GATEWAY_HTTP_ADDR":        "127.0.0.1:9090",
-		"GATEWAY_LOG_LEVEL":        "debug",
-		"GATEWAY_SHUTDOWN_TIMEOUT": "3s",
-		"GATEWAY_DATABASE_URL":     "postgres://gateway:test@localhost/gateway",
+		"GATEWAY_HTTP_ADDR":                     "127.0.0.1:9090",
+		"GATEWAY_LOG_LEVEL":                     "debug",
+		"GATEWAY_SHUTDOWN_TIMEOUT":              "3s",
+		"GATEWAY_DATABASE_URL":                  "postgres://gateway:test@localhost/gateway",
+		"GATEWAY_GOOGLE_REQUEST_TIMEOUT":        "90s",
+		"GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES": "1048576",
 	}
 	cfg, err := Load(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -54,6 +62,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ShutdownTimeout != 3*time.Second {
 		t.Errorf("ShutdownTimeout = %v", cfg.ShutdownTimeout)
+	}
+	if cfg.GoogleTimeout != 90*time.Second || cfg.GeminiBodyBytes != 1048576 {
+		t.Errorf("Gemini config = %v, %d", cfg.GoogleTimeout, cfg.GeminiBodyBytes)
 	}
 }
 
@@ -72,6 +83,10 @@ func TestLoadRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 		{name: "invalid log level", key: "GATEWAY_LOG_LEVEL", value: "secret-level", marker: "secret-level"},
 		{name: "invalid duration", key: "GATEWAY_SHUTDOWN_TIMEOUT", value: "secret-duration", marker: "secret-duration"},
 		{name: "zero duration", key: "GATEWAY_SHUTDOWN_TIMEOUT", value: "0s", marker: ""},
+		{name: "invalid google timeout", key: "GATEWAY_GOOGLE_REQUEST_TIMEOUT", value: "secret-timeout", marker: "secret-timeout"},
+		{name: "excessive google timeout", key: "GATEWAY_GOOGLE_REQUEST_TIMEOUT", value: "11m", marker: ""},
+		{name: "invalid gemini body limit", key: "GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES", value: "secret-size", marker: "secret-size"},
+		{name: "excessive gemini body limit", key: "GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES", value: "33554433", marker: ""},
 	}
 
 	for _, tt := range tests {

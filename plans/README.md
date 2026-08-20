@@ -143,5 +143,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-001` | completed | [Phase 0 Gateway Bootstrap](./20260820_113825_plan_phase0_gateway_bootstrap.md) | `phase-0-native-sdk-validation` |
 | `gateway-20260820-002` | completed | [Phase 0 Service API Key Authentication](./20260820_124731_plan_phase0_service_api_key_authentication.md) | `phase-0-service-api-key-auth` |
 | `gateway-20260820-003` | completed | [Phase 0 Provider Credential Security Boundary](./20260820_130704_plan_phase0_provider_credential_security_boundary.md) | `phase-0-provider-credential-boundary` |
+| `gateway-20260820-004` | completed | [Phase 0 Gemini generateContent Native Pass-through](./20260820_132444_plan_phase0_gemini_generate_content_native_passthrough.md) | `phase-0-gemini-sdk-e2e` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
