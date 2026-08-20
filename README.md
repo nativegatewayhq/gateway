@@ -56,6 +56,9 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_GOOGLE_API_KEY` | unset | Optional Google upstream credential |
 | `GATEWAY_OPENAI_API_KEY` | unset | Optional OpenAI upstream credential |
 | `GATEWAY_XAI_API_KEY` | unset | Optional xAI upstream credential |
+| `GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID` | unset | Current envelope-encryption write key ID; enables the database credential control plane with the keyring settings below |
+| `GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS` | unset | Ordered comma-separated key IDs; index corresponds to `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` |
+| `GATEWAY_PROVIDER_CREDENTIAL_KEY_N` | unset | Base64-encoded 32-byte master key injected by the deployment secret manager; keep previous keys while their ciphertext exists |
 | `GATEWAY_GOOGLE_REQUEST_TIMEOUT` | `2m` | Google request timeout; maximum `10m` |
 | `GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES` | `33554432` | Positive Gemini body limit up to 32 MiB |
 | `GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT` | `2m` | OpenAI/xAI image request timeout; maximum `10m` |
@@ -166,6 +169,39 @@ export GATEWAY_XAI_API_KEY='...'
 ```
 
 Provider credentials are held in an opaque, provider-scoped registry. They are not placed in the general process configuration and are never returned through an API. Outbound request preparation clones the request, removes inbound `Authorization`, API-key headers, cookies, and sensitive query parameters, then applies only the credential scoped to the selected provider. Missing credentials and provider-scope mismatches fail before any network request.
+
+For managed channel credentials, configure an envelope-encryption keyring. The current key encrypts new versions while every listed previous key remains available for decrypting existing versions and replaying lifecycle operations. Key IDs are metadata; each corresponding base64 key is a secret. Do not place either Provider credentials or master keys in manifests, Terraform state, CI output, or shell history.
+
+```bash
+export GATEWAY_PROVIDER_CREDENTIAL_CURRENT_KEY_ID='2026-08'
+export GATEWAY_PROVIDER_CREDENTIAL_KEY_IDS='2026-07,2026-08'
+export GATEWAY_PROVIDER_CREDENTIAL_KEY_0='base64-encoded-32-byte-previous-key'
+export GATEWAY_PROVIDER_CREDENTIAL_KEY_1='base64-encoded-32-byte-current-key'
+```
+
+Stage a credential from a protected file or secret-manager stream, then activate it atomically:
+
+```bash
+gateway-provider-credential \
+  -action stage \
+  -channel-id channel_00000000000000000000000000000001 \
+  -provider openai \
+  -actor operator@example.com \
+  -reason 'scheduled rotation' \
+  -operation-key rotation-2026-08-stage \
+  < /run/secrets/openai-provider-key
+
+gateway-provider-credential \
+  -action activate \
+  -credential-id pcred_... \
+  -actor operator@example.com \
+  -reason 'scheduled rotation' \
+  -operation-key rotation-2026-08-activate
+```
+
+`stage`, `activate`, `retire`, and `list` output only credential metadata. Plaintext, ciphertext, nonce, wrapped data key, master key ID, hashes, prefixes, and lengths are never returned. Activation retires the previous active version in the same transaction. Database credentials override environment credentials; the three built-in legacy channels fall back to their Provider environment variable only when no active database version exists. Other channels never receive environment fallback. A missing or undecryptable active credential is treated as unavailable before dispatch and is not silently replaced with a stale credential.
+
+Treat `actor`, `reason`, and `operation-key` as non-secret audit metadata; never place a Provider key, master key, request content, or customer identifier in those fields. Retired encrypted rows and lifecycle events are retained for audit and must not be deleted manually.
 
 ## Gemini native API
 

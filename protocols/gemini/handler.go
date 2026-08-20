@@ -90,6 +90,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	model, _ := modelFromRequest(request)
 	providerModel := model
 	candidateID, channelID, routingPolicy := "", "", ""
+	if legacyChannel, ok := providercredentials.LegacyChannel(providercredentials.Google); ok {
+		channelID = legacyChannel
+	}
 	fallbackDepth := 0
 	var charge *billing.Charge
 	defer func() {
@@ -209,8 +212,12 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		var route imageoperation.RoutingDecision
 		selected := false
 		for index, candidate := range candidates {
-			if candidate.Provider != providercredentials.Google || handler.executor == nil || !geminiProviderConfigured(handler.availability, candidate.Provider) {
+			if candidate.Provider != providercredentials.Google || handler.executor == nil {
 				handler.logCandidateSkip(request, candidate, "provider_unavailable")
+				continue
+			}
+			if !geminiProviderConfigured(request.Context(), handler.availability, candidate) {
+				handler.logCredentialSkip(request, candidate)
 				continue
 			}
 			attempt := base
@@ -254,6 +261,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 
 	response, err := handler.executor.GenerateContent(request.Context(), google.GenerateContentRequest{
 		Model:       providerModel,
+		ChannelID:   channelID,
 		Query:       request.URL.Query(),
 		ContentType: request.Header.Get("Content-Type"),
 		Accept:      request.Header.Get("Accept"),
@@ -319,12 +327,17 @@ func (handler *Handler) authorizeModel(writer http.ResponseWriter, request *http
 	return false
 }
 
-func geminiProviderConfigured(availability ProviderAvailability, provider providercredentials.ProviderID) bool {
+func geminiProviderConfigured(ctx context.Context, availability ProviderAvailability, decision imageoperation.RoutingDecision) bool {
 	if availability == nil {
 		return true
 	}
+	if channelAvailability, ok := availability.(interface {
+		ConfiguredChannel(context.Context, string, providercredentials.ProviderID) bool
+	}); ok {
+		return channelAvailability.ConfiguredChannel(ctx, decision.ChannelID, decision.Provider)
+	}
 	for _, configured := range availability.ConfiguredProviders() {
-		if configured == provider {
+		if configured == decision.Provider {
 			return true
 		}
 	}
@@ -342,6 +355,10 @@ func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageope
 		attributes = append(attributes, "period", limitErr.Period, "reset_at", limitErr.ResetAt)
 	}
 	handler.logger.Info("gemini routing candidate skipped", attributes...)
+}
+
+func (handler *Handler) logCredentialSkip(request *http.Request, decision imageoperation.RoutingDecision) {
+	handler.logger.Info("gemini routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", "credential_unavailable")
 }
 
 func (handler *Handler) authenticate(writer http.ResponseWriter, request *http.Request) (apikey.Principal, bool) {

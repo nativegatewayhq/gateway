@@ -132,3 +132,13 @@ func TestRegistryConcurrentPreparation(t *testing.T) {
 	}
 	wait.Wait()
 }
+
+func TestClearAppliedRemovesUpstreamCredentialHeaders(t *testing.T) {
+	request, _ := http.NewRequest(http.MethodGet, "https://upstream.invalid", nil)
+	request.Header.Set("Authorization", "Bearer upstream-secret")
+	request.Header.Set("x-goog-api-key", "upstream-secret")
+	ClearApplied(request)
+	if request.Header.Get("Authorization") != "" || request.Header.Get("x-goog-api-key") != "" {
+		t.Fatalf("credential headers remain: %v", request.Header)
+	}
+}

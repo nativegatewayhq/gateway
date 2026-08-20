@@ -271,7 +271,7 @@ func (handler *EditHandler) execute(writer http.ResponseWriter, request *http.Re
 		writeError(writer, 503, "server_error", "provider_unavailable", "provider unavailable")
 		return
 	}
-	response, err := executor.Generate(request.Context(), openaiimages.Request{Operation: openaiimages.Edit, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
+	response, err := executor.Generate(request.Context(), openaiimages.Request{Operation: openaiimages.Edit, ChannelID: route.ChannelID, ContentType: contentType, ContentLength: length, Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), Body: body})
 	if err != nil {
 		if charge != nil {
 			snapshot := handler.common.executorErrorSnapshot(err)

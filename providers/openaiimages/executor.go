@@ -24,6 +24,7 @@ var (
 
 type Request struct {
 	Operation     Operation
+	ChannelID     string
 	ContentType   string
 	ContentLength int64
 	Accept        string
@@ -134,13 +135,18 @@ func (executor *Executor) Generate(ctx context.Context, input Request) (*http.Re
 	if input.UserAgent != "" {
 		request.Header.Set("User-Agent", input.UserAgent)
 	}
-	request, err = providercredentials.PrepareOutbound(request, executor.provider, executor.credentials)
+	if input.ChannelID == "" {
+		request, err = providercredentials.PrepareOutbound(request, executor.provider, executor.credentials)
+	} else {
+		request, err = providercredentials.PrepareOutboundChannel(request, input.ChannelID, executor.provider, executor.credentials)
+	}
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 
 	response, err := executor.client.Do(request)
+	providercredentials.ClearApplied(request)
 	if err != nil {
 		contextError := requestContext.Err()
 		cancel()

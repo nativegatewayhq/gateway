@@ -20,6 +20,13 @@ func (value availability) ConfiguredProviders() []providercredentials.ProviderID
 	return append([]providercredentials.ProviderID(nil), value...)
 }
 
+type channelAvailability map[string]bool
+
+func (channelAvailability) ConfiguredProviders() []providercredentials.ProviderID { return nil }
+func (value channelAvailability) ConfiguredChannel(_ context.Context, channelID string, _ providercredentials.ProviderID) bool {
+	return value[channelID]
+}
+
 func TestModelsHandlerFiltersConfiguredProvidersAndUsesStableSchema(t *testing.T) {
 	t.Parallel()
 	handler := NewModelsHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), testRegistry(t), availability{providercredentials.XAI, providercredentials.OpenAI})
@@ -41,6 +48,21 @@ func TestModelsHandlerFiltersConfiguredProvidersAndUsesStableSchema(t *testing.T
 		if model.Object != "model" || model.OwnedBy == "" {
 			t.Fatalf("model = %+v", model)
 		}
+	}
+}
+
+func TestModelsHandlerUsesChannelCredentialAvailability(t *testing.T) {
+	handler := NewModelsHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), testRegistry(t), channelAvailability{"channel_00000000000000000000000000000002": true})
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer service-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "grok-imagine-image-quality" {
+		t.Fatalf("response=%d list=%+v", response.Code, list)
 	}
 }
 

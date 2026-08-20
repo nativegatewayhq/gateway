@@ -1,7 +1,10 @@
 package providercredentials
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -21,13 +24,37 @@ type LookupEnv func(string) (string, bool)
 // Credential is an opaque, provider-scoped handle. It deliberately exposes no
 // plaintext getter or serialization methods.
 type Credential struct {
-	provider ProviderID
-	value    []byte
+	provider  ProviderID
+	channelID string
+	value     []byte
 }
 
 // Registry is immutable after construction.
 type Registry struct {
 	credentials map[ProviderID]Credential
+	store       *Store
+}
+
+func (Credential) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, "<provider-credential>")
+}
+func (*Registry) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, "<provider-credential-registry>")
+}
+
+var legacyChannels = map[string]ProviderID{
+	"channel_00000000000000000000000000000001": OpenAI,
+	"channel_00000000000000000000000000000002": XAI,
+	"channel_00000000000000000000000000000003": Google,
+}
+
+func LegacyChannel(provider ProviderID) (string, bool) {
+	for channelID, scopedProvider := range legacyChannels {
+		if scopedProvider == provider {
+			return channelID, true
+		}
+	}
+	return "", false
 }
 
 func Load(lookup LookupEnv) (*Registry, error) {
@@ -44,6 +71,16 @@ func Load(lookup LookupEnv) (*Registry, error) {
 		registry.credentials[provider] = Credential{provider: provider, value: []byte(value)}
 	}
 	return registry, nil
+}
+
+func NewControlPlane(legacy *Registry, store *Store) (*Registry, error) {
+	if legacy == nil {
+		legacy = &Registry{credentials: map[ProviderID]Credential{}}
+	}
+	if store == nil {
+		return nil, ErrCredentialUnavailable
+	}
+	return &Registry{credentials: legacy.credentials, store: store}, nil
 }
 
 func validateCredential(value string) error {
@@ -66,7 +103,41 @@ func (registry *Registry) Credential(provider ProviderID) (Credential, error) {
 	if !exists {
 		return Credential{}, ErrCredentialUnavailable
 	}
+	credential.value = append([]byte(nil), credential.value...)
 	return credential, nil
+}
+
+func (registry *Registry) Resolve(ctx context.Context, channelID string, provider ProviderID) (Credential, error) {
+	if registry == nil || !validChannelID(channelID) || provider.validateExact() != nil {
+		return Credential{}, ErrCredentialUnavailable
+	}
+	if registry.store != nil {
+		credential, err := registry.store.Resolve(ctx, channelID, provider)
+		if err == nil {
+			return credential, nil
+		}
+		if !errors.Is(err, ErrCredentialUnavailable) {
+			return Credential{}, err
+		}
+	}
+	if legacyChannels[channelID] != provider {
+		return Credential{}, ErrCredentialUnavailable
+	}
+	credential, err := registry.Credential(provider)
+	if err != nil {
+		return Credential{}, err
+	}
+	credential.channelID = channelID
+	return credential, nil
+}
+
+func (registry *Registry) ConfiguredChannel(ctx context.Context, channelID string, provider ProviderID) bool {
+	credential, err := registry.Resolve(ctx, channelID, provider)
+	if err != nil {
+		return false
+	}
+	credential.Destroy()
+	return true
 }
 
 func (registry *Registry) ConfiguredProviders() []ProviderID {

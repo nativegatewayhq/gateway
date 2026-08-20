@@ -212,8 +212,8 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 				handler.logCandidateSkip(request, candidate, "executor_unavailable")
 				continue
 			}
-			if !providerConfigured(handler.availability, candidate.Provider) {
-				handler.logCandidateSkip(request, candidate, "credential_unavailable")
+			if !providerConfigured(request.Context(), handler.availability, candidate) {
+				handler.logCredentialSkip(request, candidate)
 				continue
 			}
 			attempt := base
@@ -264,6 +264,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	response, err := executor.Generate(request.Context(), openaiimages.Request{
+		ChannelID:   route.ChannelID,
 		ContentType: request.Header.Get("Content-Type"),
 		Accept:      request.Header.Get("Accept"),
 		UserAgent:   request.UserAgent(),
@@ -318,12 +319,15 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
-func providerConfigured(availability ProviderAvailability, provider providercredentials.ProviderID) bool {
+func providerConfigured(ctx context.Context, availability ProviderAvailability, decision imageoperation.RoutingDecision) bool {
 	if availability == nil {
 		return true
 	}
+	if channelAvailability, ok := availability.(ChannelProviderAvailability); ok {
+		return channelAvailability.ConfiguredChannel(ctx, decision.ChannelID, decision.Provider)
+	}
 	for _, configured := range availability.ConfiguredProviders() {
-		if configured == provider {
+		if configured == decision.Provider {
 			return true
 		}
 	}
@@ -343,6 +347,10 @@ func (handler *Handler) logSpendCapSkip(request *http.Request, decision imageope
 	handler.logger.Info("image routing candidate skipped", attributes...)
 }
 
+func (handler *Handler) logCredentialSkip(request *http.Request, decision imageoperation.RoutingDecision) {
+	handler.logger.Info("image routing candidate skipped", "request_id", requestid.FromContext(request.Context()), "channel_id", decision.ChannelID, "provider", string(decision.Provider), "category", "credential_unavailable")
+}
+
 func (handler *Handler) selectBillableCandidate(writer http.ResponseWriter, request *http.Request, candidates []imageoperation.RoutingDecision, base billing.BeginRequest) (imageoperation.RoutingDecision, *billing.Charge, int, bool) {
 	replayed, found, replayErr := handler.billing.Replay(request.Context(), base)
 	if replayErr != nil {
@@ -358,8 +366,8 @@ func (handler *Handler) selectBillableCandidate(writer http.ResponseWriter, requ
 			handler.logCandidateSkip(request, candidate, "executor_unavailable")
 			continue
 		}
-		if !providerConfigured(handler.availability, candidate.Provider) {
-			handler.logCandidateSkip(request, candidate, "credential_unavailable")
+		if !providerConfigured(request.Context(), handler.availability, candidate) {
+			handler.logCredentialSkip(request, candidate)
 			continue
 		}
 		attempt := base
