@@ -106,6 +106,12 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 		return joboperation.Job{}, err
 	}
 	if !status.Terminal() {
+		if result.Observation.Snapshot.Status != 0 {
+			confirmed, err = service.repository.ApplyObservation(ctx, Lease{ProviderAttempt: ProviderAttempt{JobID: created.ID, AttemptNo: 1, Provider: created.Provider, ChannelID: created.ChannelID, ProviderJobID: result.ProviderJobID, State: "SUBMITTED"}}, result.Observation, "submit", time.Now().Add(pollAfter))
+			if err != nil {
+				return joboperation.Job{}, err
+			}
+		}
 		service.record(ctx, created.Protocol, "submit", status, "success")
 		return confirmed, nil
 	}

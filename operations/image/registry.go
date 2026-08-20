@@ -217,10 +217,12 @@ func (registry *Registry) ListProtocol(protocol string) []ModelRoute {
 	return models
 }
 
-func validProtocol(protocol string) bool { return protocol == "openai" || protocol == "gemini" }
+func validProtocol(protocol string) bool {
+	return protocol == "openai" || protocol == "gemini" || protocol == "replicate"
+}
 
 func validRouteProtocol(protocol string, provider providercredentials.ProviderID) bool {
-	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google)
+	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google) || (protocol == "replicate" && provider == providercredentials.Replicate)
 }
 
 func validCandidateID(value string) bool {
