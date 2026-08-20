@@ -17,6 +17,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/billing"
+	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
@@ -190,14 +191,14 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			}
 		}
 		base := billing.BeginRequest{
-			RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID,
+			RequestID: requestid.FromContext(request.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID,
 			Protocol: "gemini", Operation: string(imageoperation.Generate), Model: model, ChannelID: candidates[0].ChannelID,
 			Quantity: selector.Quantity, Size: selector.Size, Quality: selector.Quality,
 			IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, LegacyFingerprints: legacyFingerprints,
 		}
 		replayed, found, billingErr := handler.billing.Replay(request.Context(), base)
 		if billingErr != nil {
-			handler.writeBillingError(tracked, billingErr)
+			handler.writeBillingError(tracked, request, billingErr)
 			return
 		}
 		if found {
@@ -218,7 +219,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 					handler.logCandidateSkip(request, candidate, "price_unavailable")
 					continue
 				}
-				handler.writeBillingError(tracked, quoteErr)
+				handler.writeBillingError(tracked, request, quoteErr)
 				return
 			}
 			startedCharge, beginErr := handler.billing.Begin(request.Context(), attempt)
@@ -227,7 +228,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 					handler.logCandidateSkip(request, candidate, "price_race_unavailable")
 					continue
 				}
-				handler.writeBillingError(tracked, beginErr)
+				handler.writeBillingError(tracked, request, beginErr)
 				return
 			}
 			charge = &startedCharge
@@ -436,8 +437,15 @@ func (handler *Handler) executorErrorSnapshot(err error) billing.ResponseSnapsho
 	return billing.ResponseSnapshot{Status: status, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body}
 }
 
-func (handler *Handler) writeBillingError(writer http.ResponseWriter, err error) {
+func (handler *Handler) writeBillingError(writer http.ResponseWriter, request *http.Request, err error) {
 	switch {
+	case errors.Is(err, costquota.ErrExceeded):
+		var limited *costquota.LimitError
+		if errors.As(err, &limited) {
+			handler.logger.Info("cost quota exceeded", "request_id", requestid.FromContext(request.Context()), "api_key_id", limited.APIKeyID, "project_id", limited.ProjectID, "scope_type", limited.ScopeType, "period", limited.Period, "period_reset", limited.ResetAt, "category", "quota_exceeded")
+		}
+		writeGeminiQuotaHeaders(writer, err)
+		writeError(writer, http.StatusTooManyRequests, "RESOURCE_EXHAUSTED", "cost quota exceeded")
 	case errors.Is(err, ledger.ErrInsufficientFunds):
 		writeError(writer, http.StatusPaymentRequired, "RESOURCE_EXHAUSTED", "insufficient credits")
 	case errors.Is(err, billing.ErrRequestConflict):
@@ -453,6 +461,19 @@ func (handler *Handler) writeBillingError(writer http.ResponseWriter, err error)
 	default:
 		writeError(writer, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
 	}
+}
+
+func writeGeminiQuotaHeaders(writer http.ResponseWriter, err error) {
+	var limited *costquota.LimitError
+	if !errors.As(err, &limited) {
+		return
+	}
+	seconds := int64(time.Until(limited.ResetAt).Seconds())
+	if seconds < 1 {
+		seconds = 1
+	}
+	writer.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	writer.Header().Set("X-Quota-Reset", strconv.FormatInt(limited.ResetAt.Unix(), 10))
 }
 
 func (handler *Handler) writeSnapshot(writer http.ResponseWriter, snapshot billing.ResponseSnapshot, replay bool) {

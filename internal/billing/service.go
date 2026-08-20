@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nativegatewayhq/gateway/internal/costquota"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
@@ -35,6 +36,7 @@ type BeginRequest struct {
 	RequestID          string
 	OrganizationID     string
 	ProjectID          string
+	APIKeyID           string
 	Protocol           string
 	Operation          string
 	Model              string
@@ -112,10 +114,17 @@ type Wallet interface {
 	ReleaseInTx(context.Context, pgx.Tx, string, string) (ledger.Result, error)
 }
 
+type Quota interface {
+	ReserveInTx(context.Context, pgx.Tx, costquota.ReservationRequest) ([]costquota.Allocation, error)
+	CaptureInTx(context.Context, pgx.Tx, string, int64) error
+	ReleaseInTx(context.Context, pgx.Tx, string) error
+}
+
 type Service struct {
 	pool             *pgxpool.Pool
 	estimator        Estimator
 	wallet           Wallet
+	quota            Quota
 	entropy          io.Reader
 	maxResponseBytes int64
 }
@@ -125,10 +134,14 @@ func NewService(pool *pgxpool.Pool, estimator Estimator, wallet Wallet) (*Servic
 }
 
 func NewServiceWithLimit(pool *pgxpool.Pool, estimator Estimator, wallet Wallet, maxResponseBytes int64) (*Service, error) {
+	return NewServiceWithQuota(pool, estimator, wallet, nil, maxResponseBytes)
+}
+
+func NewServiceWithQuota(pool *pgxpool.Pool, estimator Estimator, wallet Wallet, quota Quota, maxResponseBytes int64) (*Service, error) {
 	if pool == nil || estimator == nil || wallet == nil || maxResponseBytes < 1 || maxResponseBytes > 256*1024*1024 {
 		return nil, ErrInvalidRequest
 	}
-	return &Service{pool: pool, estimator: estimator, wallet: wallet, entropy: rand.Reader, maxResponseBytes: maxResponseBytes}, nil
+	return &Service{pool: pool, estimator: estimator, wallet: wallet, quota: quota, entropy: rand.Reader, maxResponseBytes: maxResponseBytes}, nil
 }
 
 func (service *Service) MaximumResponseBytes() int64 { return service.maxResponseBytes }
@@ -180,11 +193,11 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 		digest := sha256.Sum256([]byte(request.IdempotencyKey))
 		operationIdentity = "idem_" + hex.EncodeToString(digest[:])
 	}
-	reservation, err := service.wallet.ReserveInTx(ctx, tx, request.OrganizationID, request.ProjectID, "image:"+operationIdentity, estimate.MaximumSale, "image-reserve:"+operationIdentity)
+	id, err := service.id("charge_")
 	if err != nil {
 		return Charge{}, err
 	}
-	id, err := service.id("charge_")
+	reservation, err := service.wallet.ReserveInTx(ctx, tx, request.OrganizationID, request.ProjectID, "image:"+operationIdentity, estimate.MaximumSale, "image-reserve:"+operationIdentity)
 	if err != nil {
 		return Charge{}, err
 	}
@@ -198,6 +211,12 @@ func (service *Service) Begin(ctx context.Context, request BeginRequest) (Charge
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, charge.ID, charge.RequestID, charge.OrganizationID, charge.ProjectID, charge.Protocol, charge.Operation, charge.Model, charge.ChannelID, charge.PriceID, charge.Quantity, charge.Size, charge.Quality, charge.Currency, charge.EstimatedCost, charge.ReservedSale, charge.ReservationID, charge.State, storedKey, storedFingerprint)
 	if err != nil {
 		return Charge{}, err
+	}
+	if service.quota != nil {
+		_, err = service.quota.ReserveInTx(ctx, tx, costquota.ReservationRequest{ChargeID: charge.ID, OrganizationID: request.OrganizationID, ProjectID: request.ProjectID, APIKeyID: request.APIKeyID, Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, Currency: estimate.Currency, Amount: estimate.MaximumSale})
+		if err != nil {
+			return Charge{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Charge{}, err
@@ -259,6 +278,19 @@ func (service *Service) Release(ctx context.Context, chargeID string) (Charge, e
 }
 
 func (service *Service) Complete(ctx context.Context, chargeID string, success bool, snapshot ResponseSnapshot) (Charge, error) {
+	return service.complete(ctx, chargeID, success, nil, snapshot)
+}
+
+// CompleteWithSale settles a successful request at an observed sale amount no
+// greater than the reservation and releases the difference atomically.
+func (service *Service) CompleteWithSale(ctx context.Context, chargeID string, actualSale int64, snapshot ResponseSnapshot) (Charge, error) {
+	if actualSale <= 0 {
+		return Charge{}, ErrInvalidRequest
+	}
+	return service.complete(ctx, chargeID, true, &actualSale, snapshot)
+}
+
+func (service *Service) complete(ctx context.Context, chargeID string, success bool, actualSale *int64, snapshot ResponseSnapshot) (Charge, error) {
 	if !validID(chargeID, "charge_") {
 		return Charge{}, ErrInvalidRequest
 	}
@@ -283,6 +315,9 @@ func (service *Service) Complete(ctx context.Context, chargeID string, success b
 		return Charge{}, ErrInvalidState
 	}
 	if charge.State == target {
+		if target == "CAPTURED" && actualSale != nil && charge.CapturedSale != *actualSale {
+			return Charge{}, ErrRequestConflict
+		}
 		if charge.SnapshotVersion == 1 && sameSnapshot(charge.Response, canonical) {
 			return charge, nil
 		}
@@ -292,18 +327,35 @@ func (service *Service) Complete(ctx context.Context, chargeID string, success b
 		return Charge{}, ErrInvalidState
 	}
 	if target == "CAPTURED" {
-		if _, err := service.wallet.CaptureInTx(ctx, tx, charge.ReservationID, charge.ReservedSale, "image-capture:"+charge.ID); err != nil {
+		captureAmount := charge.ReservedSale
+		if actualSale != nil {
+			captureAmount = *actualSale
+		}
+		if captureAmount <= 0 || captureAmount > charge.ReservedSale {
+			return Charge{}, ErrInvalidRequest
+		}
+		if _, err := service.wallet.CaptureInTx(ctx, tx, charge.ReservationID, captureAmount, "image-capture:"+charge.ID); err != nil {
 			return Charge{}, err
 		}
 		actualCost := charge.EstimatedCost
 		charge.ActualCost = &actualCost
-		charge.CapturedSale = charge.ReservedSale
+		charge.CapturedSale = captureAmount
+		if service.quota != nil {
+			if err := service.quota.CaptureInTx(ctx, tx, charge.ID, charge.CapturedSale); err != nil {
+				return Charge{}, err
+			}
+		}
 	} else {
 		if _, err := service.wallet.ReleaseInTx(ctx, tx, charge.ReservationID, "image-release:"+charge.ID); err != nil {
 			return Charge{}, err
 		}
 		charge.ActualCost = nil
 		charge.CapturedSale = 0
+		if service.quota != nil {
+			if err := service.quota.ReleaseInTx(ctx, tx, charge.ID); err != nil {
+				return Charge{}, err
+			}
+		}
 	}
 	charge.State = target
 	charge.SnapshotVersion = 1
