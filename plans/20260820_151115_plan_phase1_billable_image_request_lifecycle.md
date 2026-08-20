@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-011
 title: Phase 1 Billable Image Request Lifecycle
-status: in_progress
+status: completed
 created_at: 2026-08-20T15:11:15+09:00
-updated_at: 2026-08-20T15:11:15+09:00
+updated_at: 2026-08-20T15:30:11+09:00
 owners:
   - gateway
 initiative: phase-1-billable-image-lifecycle
@@ -200,25 +200,34 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] request charge schema와 상태 제약이 존재함
-- [ ] Principal organization/project가 모든 charge에 귀속됨
-- [ ] active exact price 견적 후에만 Wallet Reserve가 commit됨
-- [ ] Reserve 이전에는 Provider가 호출되지 않음
-- [ ] Provider 2xx는 Capture, non-2xx와 executor error는 Release됨
-- [ ] charge와 Wallet settlement가 transaction 단위로 일치함
-- [ ] 성공 응답은 Capture 확정 이후에만 전달됨
-- [ ] 정산 불명확 요청은 RECONCILING과 fail-closed로 처리됨
-- [ ] 동일 request/transition retry가 이중 과금되지 않음
-- [ ] 가격·잔액·tenant 실패에서 upstream 미호출이 검증됨
-- [ ] billing disabled mode의 기존 native 호환성이 유지됨
-- [ ] billing required mode가 bootstrap/config에 연결됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Cloud/Conformance 계약이 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] request charge schema와 상태 제약이 존재함
+- [x] Principal organization/project가 모든 charge에 귀속됨
+- [x] active exact price 견적 후에만 Wallet Reserve가 commit됨
+- [x] Reserve 이전에는 Provider가 호출되지 않음
+- [x] Provider 2xx는 Capture, non-2xx와 executor error는 Release됨
+- [x] charge와 Wallet settlement가 transaction 단위로 일치함
+- [x] 성공 응답은 Capture 확정 이후에만 전달됨
+- [x] 정산 불명확 요청은 RECONCILING과 fail-closed로 처리됨
+- [x] 동일 request/transition retry가 이중 과금되지 않음
+- [x] 가격·잔액·tenant 실패에서 upstream 미호출이 검증됨
+- [x] billing disabled mode의 기존 native 호환성이 유지됨
+- [x] billing required mode가 bootstrap/config에 연결됨
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Cloud/Conformance 계약이 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 계획 commit: `ad31df7fb832b0fb23205931853dff96515d4638`
+- 구현 commit: `734e68880203a2c9a6902f42a706390b68e24e97`
+- Pull Request: `https://github.com/nativegatewayhq/gateway/pull/11`
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- `GOCACHE=/private/tmp/gateway-go-cache TEST_DATABASE_URL=postgres://gateway:***@127.0.0.1:55433/gateway?sslmode=disable make integration-test` 통과
+- PostgreSQL integration에서 Estimate/Reserve/charge 원자성, Capture/Release, rollback, retry, conflict, RECONCILING, append-only와 Wallet/Ledger projection 일치 검증 통과
+- OpenAI/xAI JSON generation/edit와 OpenAI multipart edit에서 Principal/selector/channel 전달, upstream-before-reserve 차단, native response 보존과 settlement fail-closed 검증 통과
+- billing `disabled` 회귀와 `required` process bootstrap 검증 통과
+- GitHub Actions `check` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32339761583/job/96336313777`
+- GitHub Actions `validate` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32339761644/job/96336313849`
 
 ## Rollback 계획
 
