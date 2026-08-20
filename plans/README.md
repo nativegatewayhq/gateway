@@ -174,5 +174,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260820-032` | completed | [Phase 3 Replicate Signed Webhook Reconciliation](./20260820_231225_plan_phase3_replicate_signed_webhooks.md) | `phase-3-replicate-signed-webhooks` |
 | `gateway-20260820-033` | completed | [Phase 3 fal Signed Webhook Reconciliation](./20260820_235333_plan_phase3_fal_signed_webhooks.md) | `phase-3-fal-signed-webhooks` |
 | `gateway-20260821-034` | completed | [Phase 3 Async Usage and Partial-output Settlement](./20260821_001646_plan_phase3_async_usage_partial_settlement.md) | `phase-3-async-usage-partial-settlement` |
+| `gateway-20260821-035` | in_progress | [Phase 3 Async Job Management Read API](./20260821_005344_plan_phase3_async_job_management_read_api.md) | `phase-3-async-job-management-read-api` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
