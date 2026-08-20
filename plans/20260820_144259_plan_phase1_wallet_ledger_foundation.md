@@ -1,9 +1,9 @@
 ---
 id: gateway-20260820-009
 title: Phase 1 Wallet and Append-only Ledger Foundation
-status: in_progress
+status: completed
 created_at: 2026-08-20T14:42:59+09:00
-updated_at: 2026-08-20T14:42:59+09:00
+updated_at: 2026-08-20T14:53:51+09:00
 owners:
   - gateway
 initiative: phase-1-wallet-ledger
@@ -182,24 +182,30 @@ make integration-test
 
 ## 완료 조건
 
-- [ ] wallet, reservation과 append-only ledger schema가 존재함
-- [ ] 금액이 정수 USD_TICKS로만 처리됨
-- [ ] Deposit/Reserve/Capture/Release/Refund lifecycle이 원자적임
-- [ ] 동일 operation retry가 이중 금전 효과를 만들지 않음
-- [ ] operation key 충돌이 명시적으로 거부됨
-- [ ] 동시 Reserve에서 available이 음수가 되지 않음
-- [ ] capture 차액과 실패 release가 정확히 available로 반환됨
-- [ ] refund가 captured 금액을 초과하지 않음
-- [ ] ledger update/delete가 DB에서 거부됨
-- [ ] projection이 ledger delta 합과 일치함
-- [ ] tenant ownership과 active status가 검증됨
-- [ ] 전체 race/integration/CI 통과
-- [ ] README와 Cloud 후속 계약이 기록됨
-- [ ] commit, PR과 CI 증거가 기록됨
+- [x] wallet, reservation과 append-only ledger schema가 존재함
+- [x] 금액이 정수 USD_TICKS로만 처리됨
+- [x] Deposit/Reserve/Capture/Release/Refund lifecycle이 원자적임
+- [x] 동일 operation retry가 이중 금전 효과를 만들지 않음
+- [x] operation key 충돌이 명시적으로 거부됨
+- [x] 동시 Reserve에서 available이 음수가 되지 않음
+- [x] capture 차액과 실패 release가 정확히 available로 반환됨
+- [x] refund가 captured 금액을 초과하지 않음
+- [x] ledger update/delete가 DB에서 거부됨
+- [x] projection이 ledger delta 합과 일치함
+- [x] tenant ownership과 active status가 검증됨
+- [x] 전체 race/integration/CI 통과
+- [x] README와 Cloud 후속 계약이 기록됨
+- [x] commit, PR과 CI 증거가 기록됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `f0d26aee72c5661065ffccdf7d9450aa35448ce7`
+- Pull Request: `https://github.com/nativegatewayhq/gateway/pull/9`
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- `GOCACHE=/private/tmp/gateway-go-cache TEST_DATABASE_URL=postgres://gateway:***@127.0.0.1:55433/gateway?sslmode=disable make integration-test` 통과
+- PostgreSQL integration에서 lifecycle, release, insufficient funds, tenant 상태, append-only trigger, projection reconciliation과 concurrent retry/reserve 검증 통과
+- GitHub Actions `check` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32337272693/job/96329142976`
+- GitHub Actions `validate` 통과: `https://github.com/nativegatewayhq/gateway/actions/runs/32337272674/job/96329142984`
 
 ## Rollback 계획
 
