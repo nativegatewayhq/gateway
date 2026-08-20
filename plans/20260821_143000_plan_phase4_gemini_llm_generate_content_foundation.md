@@ -1,9 +1,9 @@
 ---
 id: gateway-20260821-042
 title: Phase 4 Gemini Native LLM generateContent Foundation
-status: accepted
+status: in_progress
 created_at: 2026-08-21T14:30:00+09:00
-updated_at: 2026-08-21T14:30:00+09:00
+updated_at: 2026-08-21T15:00:00+09:00
 owners:
   - gateway
 initiative: phase-4-gemini-llm-generate-content-foundation

@@ -181,6 +181,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260821-039` | accepted | [Phase 4 OpenAI Responses Native Non-streaming Foundation](./20260821_064000_plan_phase4_openai_responses_foundation.md) | `phase-4-openai-responses-foundation` |
 | `gateway-20260821-040` | completed | [Phase 4 OpenAI Responses Token Usage Billing and Settlement](./20260821_080000_plan_phase4_openai_responses_token_settlement.md) | `phase-4-openai-responses-token-settlement` |
 | `gateway-20260821-041` | completed | [Phase 4 OpenAI Responses SSE Streaming and Disconnect Settlement](./20260821_123000_plan_phase4_openai_responses_streaming_settlement.md) | `phase-4-openai-responses-streaming-settlement` |
-| `gateway-20260821-042` | accepted | [Phase 4 Gemini Native LLM generateContent Foundation](./20260821_143000_plan_phase4_gemini_llm_generate_content_foundation.md) | `phase-4-gemini-llm-generate-content-foundation` |
+| `gateway-20260821-042` | in_progress | [Phase 4 Gemini Native LLM generateContent Foundation](./20260821_143000_plan_phase4_gemini_llm_generate_content_foundation.md) | `phase-4-gemini-llm-generate-content-foundation` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

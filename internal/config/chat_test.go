@@ -50,3 +50,18 @@ func TestResponsesConfigurationRequiresLimitsWithBilling(t *testing.T) {
 		t.Fatalf("paid cfg=%+v err=%v", cfg, err)
 	}
 }
+
+func TestGeminiLLMConfiguration(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://test", "GATEWAY_GEMINI_LLM_MODELS": "gemini-2.5-pro,gemini-2.5-flash"}
+	lookup := func(key string) (string, bool) { v, ok := values[key]; return v, ok }
+	cfg, err := Load(lookup)
+	if err != nil || len(cfg.GeminiLLMModels) != 2 || cfg.GeminiLLMModels[0] != "gemini-2.5-pro" {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+	for _, invalid := range []string{"gemini-image", "gemini-2.5-pro,gemini-2.5-pro", "bad model", ""} {
+		values["GATEWAY_GEMINI_LLM_MODELS"] = invalid
+		if _, err = Load(lookup); err == nil {
+			t.Fatalf("accepted %q", invalid)
+		}
+	}
+}

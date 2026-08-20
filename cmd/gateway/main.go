@@ -33,6 +33,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
+	geminioperation "github.com/nativegatewayhq/gateway/operations/gemini"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
@@ -167,6 +168,11 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway model registry initialization failed")
 		return 1
 	}
+	geminiLLMModels, err := geminioperation.NewRegistry(cfg.GeminiLLMModels)
+	if err != nil {
+		logger.Error("gateway Gemini LLM model registry initialization failed")
+		return 1
+	}
 	openAIExecutor := openaiProvider.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	chatLimits := make(map[string]chatoperation.Limits, len(cfg.OpenAIChatModelLimits))
 	for model, limit := range cfg.OpenAIChatModelLimits {
@@ -268,11 +274,11 @@ func run(stdout, stderr io.Writer) int {
 	var openAIImagesHandler *openaiProtocol.Handler
 	var openAIImageEditsHandler *openaiProtocol.EditHandler
 	if chargeBilling == nil {
-		geminiHandler = gemini.NewHandlerWithHealth(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes, healthGate)
+		geminiHandler = gemini.NewHandlerWithLLMModels(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes, healthGate, geminiLLMModels)
 		openAIImagesHandler = openaiProtocol.NewImagesHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, healthGate)
 		openAIImageEditsHandler = openaiProtocol.NewEditHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, healthGate)
 	} else {
-		geminiHandler = gemini.NewBillableHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
+		geminiHandler = gemini.NewBillableHandlerWithLLMModels(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, providerCredentialRegistry, healthGate, geminiLLMModels)
 		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
 		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry, healthGate)
 	}

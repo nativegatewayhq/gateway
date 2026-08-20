@@ -82,6 +82,7 @@ type Config struct {
 	DatabaseURL                    string
 	GoogleTimeout                  time.Duration
 	GeminiBodyBytes                int64
+	GeminiLLMModels                []string
 	ImagesTimeout                  time.Duration
 	ImagesBodyBytes                int64
 	ChatTimeout                    time.Duration
@@ -227,6 +228,22 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_GEMINI_MAX_REQUEST_BODY_BYTES: must be an integer between 1 and 33554432")
 		}
 		cfg.GeminiBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_GEMINI_LLM_MODELS"); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || seen[model] || model == "gemini-image" {
+				return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODELS: must contain unique non-image Gemini model IDs")
+			}
+			for _, character := range model {
+				if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-') {
+					return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODELS: contains an invalid model ID")
+				}
+			}
+			seen[model] = true
+			cfg.GeminiLLMModels = append(cfg.GeminiLLMModels, model)
+		}
 	}
 	if value, ok := lookup("GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT"); ok {
 		duration, err := time.ParseDuration(strings.TrimSpace(value))

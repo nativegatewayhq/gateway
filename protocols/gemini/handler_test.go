@@ -18,6 +18,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
+	geminioperation "github.com/nativegatewayhq/gateway/operations/gemini"
 	"github.com/nativegatewayhq/gateway/providers/google"
 )
 
@@ -108,6 +109,40 @@ func TestGenerateContentNativeSuccessPassThrough(t *testing.T) {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("logs leaked %q: %s", secret, logs.String())
 		}
+	}
+}
+
+func TestLLMGenerateContentUsesConfiguredOperationAndPreservesNativeBytes(t *testing.T) {
+	models, err := geminioperation.NewRegistry([]string{"gemini-2.5-pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerBody := `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Seoul"}}}]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":4,"totalTokenCount":12}}`
+	executor := &stubExecutor{response: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(providerBody))}}
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "gemini", Operation: "chat.completions", Model: "gemini-2.5-pro"}}}
+	handler := NewHandlerWithLLMModels(testLogger(io.Discard), &stubAuthenticator{principal: principal}, executor, 4096, nil, models)
+	requestBody := ` {"contents":[{"parts":[{"text":"secret"}]}],"systemInstruction":{"parts":[{"text":"system"}]},"tools":[{"functionDeclarations":[{"name":"weather"}]}],"futureField":{"kept":true}} `
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent?key=service-key", strings.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	forwarded, _ := io.ReadAll(executor.request.Body)
+	if response.Code != 200 || response.Body.String() != providerBody || string(forwarded) != requestBody || executor.request.Model != "gemini-2.5-pro" {
+		t.Fatalf("response=%d %q request=%q model=%q", response.Code, response.Body.String(), forwarded, executor.request.Model)
+	}
+}
+
+func TestManagedLLMGenerateContentFailsBeforeBodyBillingAndProvider(t *testing.T) {
+	models, _ := geminioperation.NewRegistry([]string{"gemini-2.5-pro"})
+	bill := &geminiBillingFake{}
+	executor := &stubExecutor{}
+	handler := NewBillableHandlerWithLLMModels(testLogger(io.Discard), &stubAuthenticator{}, nil, executor, 4096, bill, nil, nil, models)
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent?key=service-key", geminiPanicReader{})
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusPreconditionFailed || executor.calls != 0 || len(bill.events) != 0 || bill.replayCalls != 0 {
+		t.Fatalf("response=%d body=%s provider=%d billing_events=%v replay=%d", response.Code, response.Body.String(), executor.calls, bill.events, bill.replayCalls)
 	}
 }
 

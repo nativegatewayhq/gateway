@@ -72,13 +72,14 @@ func TestModelPermissionsCanonicalizationAndAuthorization(t *testing.T) {
 	permissions, err := CanonicalModelPermissions([]ModelPermission{
 		{Protocol: "openai", Operation: "image.edit", Model: "gpt-image-1"},
 		{Protocol: " gemini ", Operation: " image.generate ", Model: " gemini-image "},
+		{Protocol: "gemini", Operation: "chat.completions", Model: "gemini-2.5-pro"},
 		{Protocol: "openai", Operation: "image.edit", Model: "gpt-image-1"},
 	})
-	if err != nil || len(permissions) != 2 || permissions[0].Protocol != "gemini" || permissions[1].Operation != "image.edit" {
+	if err != nil || len(permissions) != 3 || permissions[0].Protocol != "gemini" || permissions[1].Operation != "image.generate" {
 		t.Fatalf("permissions=%+v error=%v", permissions, err)
 	}
 	principal := Principal{ModelAccessMode: ModelAccessAllowlist, ModelPermissions: permissions}
-	if !principal.AuthorizeModel("gemini", "image.generate", "gemini-image") || !principal.AuthorizeModel("openai", "image.edit", "gpt-image-1") {
+	if !principal.AuthorizeModel("gemini", "image.generate", "gemini-image") || !principal.AuthorizeModel("gemini", "chat.completions", "gemini-2.5-pro") || !principal.AuthorizeModel("openai", "image.edit", "gpt-image-1") {
 		t.Fatal("expected exact permissions denied")
 	}
 	for _, request := range []ModelPermission{{"openai", "image.generate", "gpt-image-1"}, {"openai", "image.edit", "gpt-image-*"}, {"gemini", "image.generate", "Gemini-image"}} {
