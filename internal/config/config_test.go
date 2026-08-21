@@ -444,6 +444,28 @@ func TestLoadRunwayConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadManagedVideoStorageConfiguration(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":                       "postgres://gateway:gateway@localhost/gateway",
+		"GATEWAY_VIDEO_STORAGE_MODE":                 "managed",
+		"GATEWAY_VIDEO_STORAGE_ENDPOINT":             "http://127.0.0.1:9000",
+		"GATEWAY_VIDEO_STORAGE_REGION":               "auto",
+		"GATEWAY_VIDEO_STORAGE_BUCKET":               "videos",
+		"GATEWAY_VIDEO_STORAGE_ACCESS_KEY_ID":        "access",
+		"GATEWAY_VIDEO_STORAGE_SECRET_ACCESS_KEY":    "secret",
+		"GATEWAY_VIDEO_STORAGE_CDN_BASE_URL":         "https://cdn.example",
+		"GATEWAY_VIDEO_STORAGE_FETCH_ORIGINS_RUNWAY": "https://runway.example",
+	}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || cfg.VideoStorage.Mode != "managed" || cfg.VideoStorage.FetchOrigins["runway"][0] != "https://runway.example" {
+		t.Fatalf("config=%+v err=%v", cfg.VideoStorage, err)
+	}
+	values["GATEWAY_VIDEO_STORAGE_FETCH_ORIGINS_RUNWAY"] = "http://runway.example"
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("unsafe video origin accepted")
+	}
+}
+
 func TestLoadFalRequiresModelsAndPublicOrigin(t *testing.T) {
 	_, err := Load(func(key string) (string, bool) {
 		if key == "GATEWAY_DATABASE_URL" {

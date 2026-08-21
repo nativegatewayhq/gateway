@@ -156,6 +156,21 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_OPENAI` | unset | Exact comma-separated HTTPS origins allowed for OpenAI result URL collection |
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_XAI` | unset | Exact comma-separated HTTPS origins allowed for xAI result URL collection |
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_GOOGLE` | unset | Exact comma-separated HTTPS origins allowed for Google result URL collection |
+| `GATEWAY_VIDEO_STORAGE_MODE` | `provider` | `provider` preserves temporary Runway output URLs; `managed` persists successful videos and returns CDN URLs |
+| `GATEWAY_VIDEO_STORAGE_ENDPOINT` | unset | S3-compatible HTTPS endpoint; loopback HTTP is accepted only for local testing |
+| `GATEWAY_VIDEO_STORAGE_REGION` | unset | S3 signing region; use `auto` for R2 |
+| `GATEWAY_VIDEO_STORAGE_BUCKET` | unset | Private video object bucket |
+| `GATEWAY_VIDEO_STORAGE_ACCESS_KEY_ID` | unset | Secret-manager supplied least-privilege object access key ID |
+| `GATEWAY_VIDEO_STORAGE_SECRET_ACCESS_KEY` | unset | Secret-manager supplied object secret; never logged |
+| `GATEWAY_VIDEO_STORAGE_CDN_BASE_URL` | unset | Public HTTPS CDN origin for managed video results |
+| `GATEWAY_VIDEO_STORAGE_MAX_VIDEOS` | `4` | Maximum output videos per Runway task; maximum 10 |
+| `GATEWAY_VIDEO_STORAGE_MAX_VIDEO_BYTES` | `536870912` | Maximum streamed bytes per video; maximum 2 GiB |
+| `GATEWAY_VIDEO_STORAGE_MAX_TOTAL_BYTES` | `1073741824` | Maximum bytes across one task; maximum 8 GiB |
+| `GATEWAY_VIDEO_STORAGE_MAX_CONCURRENT_DOWNLOADS` | `2` | Process-wide concurrent Provider video downloads; maximum 32 |
+| `GATEWAY_VIDEO_STORAGE_FETCH_TIMEOUT` | `2m` | Complete Provider video download timeout; maximum 10 minutes |
+| `GATEWAY_VIDEO_STORAGE_UPLOAD_TIMEOUT` | `10m` | Object upload and asset lease duration; maximum 30 minutes |
+| `GATEWAY_VIDEO_STORAGE_TEMP_DIR` | system temp | Directory for bounded mode-0600 video spools |
+| `GATEWAY_VIDEO_STORAGE_FETCH_ORIGINS_RUNWAY` | unset | Exact comma-separated HTTPS origins allowed for Runway output collection |
 | `GATEWAY_TELEMETRY_MODE` | `disabled` | `optional` or `required` enables process-owned OTLP tracing and metrics; runtime collector failures never fail traffic or readiness |
 | `GATEWAY_TELEMETRY_OTLP_ENDPOINT` | unset | OTLP HTTP/protobuf base endpoint; production requires HTTPS and local development may use loopback HTTP |
 | `GATEWAY_TELEMETRY_OTLP_AUTHORIZATION` | unset | Secret-manager supplied collector authorization value; never logged |
@@ -367,6 +382,10 @@ The Gateway reserves the maximum sale before creating the durable Job. Terminal 
 Official Runway SDK ephemeral uploads are supported through `POST /v1/uploads`. The SDK sends only the filename bootstrap JSON to the Gateway, receives the native signed `uploadUrl`, multipart `fields`, and `runwayUri`, then streams the file directly to Runway storage. Media bytes—up to Runway's native 200MB limit and at least 512 bytes—never pass through Gateway memory, disk, or egress. A failed direct upload must start with a new bootstrap rather than retrying an old signed form.
 
 Returned `runway://` capabilities expire after 24 hours. The Gateway stores only their SHA-256 digest and binds it to the issuing organization, project, API Key, and Runway channel. A video request using an unknown, expired, cross-Key, cross-tenant, or cross-channel URI is rejected before Billing reservation, Job creation, or Provider dispatch. Signed upload URLs, form fields, filenames, raw URIs, and file contents must never be logged or persisted.
+
+With `GATEWAY_VIDEO_STORAGE_MODE=managed`, a successful Runway task is not captured or exposed until every output video has been streamed into the configured S3/R2 bucket. Downloads require an exact Runway origin allowlist, public DNS answers, no redirect, a positive bounded `Content-Length`, and an allowlisted video MIME type. Files use bounded temporary spools and deterministic content-addressed keys; duplicate workers and settlement retries reuse an available asset and managed snapshot instead of downloading or charging again.
+
+While persistence is pending, native task retrieval reports `RUNNING` without exposing the temporary Provider URL. After persistence, the native `SUCCEEDED` response preserves status, cost, and extension fields while replacing only `output` entries with CDN URLs. Fetch, object upload, or snapshot uncertainty retains the Wallet reservation for reconciliation; it is never treated as a free Provider failure.
 
 The protocol-neutral Job core persists tenant ownership, immutable routing/charge identity, a separate internal Provider Job identifier, state transitions, append-only events, polling leases, cancellation intent, and terminal result snapshots in PostgreSQL. This release intentionally exposes no new HTTP route; the subsequent Replicate and fal native facades consume this application contract.
 

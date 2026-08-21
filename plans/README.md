@@ -192,6 +192,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260822-050` | completed | [Phase 5 Runway Native Video Generation Foundation](./20260822_110000_plan_phase5_runway_native_video_foundation.md) | `phase-5-runway-native-video-foundation` |
 | `gateway-20260822-051` | completed | [Phase 5 Runway Video Credit Billing and Settlement](./20260822_143000_plan_phase5_runway_video_billing_settlement.md) | `phase-5-runway-video-billing-settlement` |
 | `gateway-20260822-052` | completed | [Phase 5 Runway Native Ephemeral Uploads and Tenant Asset Binding](./20260822_170000_plan_phase5_runway_ephemeral_uploads.md) | `phase-5-runway-ephemeral-uploads` |
-| `gateway-20260822-053` | accepted | [Phase 5 Managed Video Output Storage and CDN Delivery](./20260822_213000_plan_phase5_managed_video_storage.md) | `phase-5-managed-video-storage` |
+| `gateway-20260822-053` | completed | [Phase 5 Managed Video Output Storage and CDN Delivery](./20260822_213000_plan_phase5_managed_video_storage.md) | `phase-5-managed-video-storage` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

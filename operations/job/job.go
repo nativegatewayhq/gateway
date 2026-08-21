@@ -66,6 +66,8 @@ type Job struct {
 	UsageReconciliationReason                 string
 	Version                                   int64
 	Snapshot                                  Snapshot
+	ManagedSnapshot                           Snapshot
+	ManagedResultRequired                     bool
 	FailureCategory                           string
 	CreatedAt, UpdatedAt                      time.Time
 	CompletedAt                               *time.Time
@@ -95,8 +97,12 @@ type PublicJob struct {
 
 func Public(value Job) PublicJob {
 	result := PublicJob{ID: value.ID, Status: value.Status, FailureCategory: value.FailureCategory, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
-	if value.Status == Succeeded || value.Status == Failed {
-		result.Result = &PublicResult{Status: value.Snapshot.Status, Headers: value.Snapshot.Headers, Body: append([]byte(nil), value.Snapshot.Body...)}
+	if (value.Status == Succeeded || value.Status == Failed) && !(value.Status == Succeeded && value.ManagedResultRequired && value.ManagedSnapshot.Status == 0) {
+		snapshot := value.Snapshot
+		if value.ManagedSnapshot.Status != 0 {
+			snapshot = value.ManagedSnapshot
+		}
+		result.Result = &PublicResult{Status: snapshot.Status, Headers: snapshot.Headers, Body: append([]byte(nil), snapshot.Body...)}
 	}
 	return result
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/runwayassets"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	"github.com/nativegatewayhq/gateway/internal/videostorage"
 	anthropicoperation "github.com/nativegatewayhq/gateway/operations/anthropic"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	geminioperation "github.com/nativegatewayhq/gateway/operations/gemini"
@@ -133,6 +134,30 @@ func run(stdout, stderr io.Writer) int {
 		}
 		readinessChecks = append(readinessChecks, objects.Ready)
 		imageResults.SetTelemetry(telemetryRuntime.Recorder)
+	}
+	var videoResults *videostorage.Manager
+	if cfg.VideoStorage.Mode == videostorage.Managed {
+		collector, storageErr := videostorage.NewCollector(cfg.VideoStorage)
+		if storageErr != nil {
+			logger.Error("gateway video storage initialization failed")
+			return 1
+		}
+		objects, storageErr := imagestorage.NewS3(cfg.VideoStorage.ImageObjectConfig())
+		if storageErr != nil {
+			logger.Error("gateway video storage initialization failed")
+			return 1
+		}
+		repository, storageErr := videostorage.NewRepository(pool)
+		if storageErr != nil {
+			logger.Error("gateway video storage initialization failed")
+			return 1
+		}
+		videoResults, storageErr = videostorage.NewManager(cfg.VideoStorage, collector, objects, repository)
+		if storageErr != nil {
+			logger.Error("gateway video storage initialization failed")
+			return 1
+		}
+		readinessChecks = append(readinessChecks, videoResults.Ready)
 	}
 	var redisLimiter *ratelimit.RedisLimiter
 	if cfg.RateLimitMode == config.RateLimitRequired {
@@ -464,6 +489,9 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway Job worker initialization failed")
 			return 1
 		}
+		if videoResults != nil {
+			asyncWorker.SetResultManager(videoResults)
+		}
 		asyncWorker.SetTelemetry(telemetryRuntime.Recorder)
 		if cfg.ReplicateEnabled {
 			replicateHandler = replicateProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.ReplicateBodyBytes, cfg.PublicBaseURL)
@@ -501,6 +529,7 @@ func run(stdout, stderr io.Writer) int {
 		if cfg.RunwayEnabled {
 			handler := runwayProtocol.NewHandler(logger, apiKeyAuthenticator, videoModels, jobService, cfg.RunwayBodyBytes)
 			handler.SetUploads(runwayAdapter, runwayAssetStore)
+			handler.SetManagedResults(videoResults != nil)
 			if cfg.BillingMode == config.BillingRequired {
 				handler.SetBilling(billingService)
 			}

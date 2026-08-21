@@ -20,6 +20,9 @@ type UsageSettler interface {
 type ProviderCreditSettler interface {
 	CompleteWithProviderCredits(context.Context, string, int64, billing.ResponseSnapshot) (billing.Charge, error)
 }
+type TerminalResultManager interface {
+	Transform(context.Context, joboperation.Job) (joboperation.Snapshot, error)
+}
 
 type WorkerConfig struct {
 	Interval, Lease, PollDelay, BaseBackoff, MaximumBackoff time.Duration
@@ -34,9 +37,11 @@ type Worker struct {
 	owner      string
 	now        func() time.Time
 	telemetry  *telemetry.Recorder
+	results    TerminalResultManager
 }
 
-func (worker *Worker) SetTelemetry(recorder *telemetry.Recorder) { worker.telemetry = recorder }
+func (worker *Worker) SetTelemetry(recorder *telemetry.Recorder)      { worker.telemetry = recorder }
+func (worker *Worker) SetResultManager(manager TerminalResultManager) { worker.results = manager }
 
 func NewWorker(repository *Repository, providers map[string]Provider, settler Settler, config WorkerConfig, owner string) (*Worker, error) {
 	if repository == nil || len(providers) == 0 || config.Interval <= 0 || config.Lease <= 0 || config.PollDelay <= 0 || config.BaseBackoff <= 0 || config.MaximumBackoff < config.BaseBackoff || config.BatchSize < 1 || config.BatchSize > 100 || config.MaximumAttempts < 1 || config.MaximumAttempts > 100 || owner == "" || len(owner) > 128 {
@@ -176,6 +181,23 @@ func (worker *Worker) settle(ctx context.Context, lease SettlementLease) error {
 		return errors.New("job settlement unavailable")
 	}
 	snapshot := billing.ResponseSnapshot{Status: lease.Job.Snapshot.Status, Headers: lease.Job.Snapshot.Headers, Body: lease.Job.Snapshot.Body}
+	if lease.Job.ManagedResultRequired && lease.Job.Status == joboperation.Succeeded {
+		if worker.results == nil {
+			return errors.New("managed result storage unavailable")
+		}
+		managed := lease.Job.ManagedSnapshot
+		if managed.Status == 0 {
+			var err error
+			managed, err = worker.results.Transform(ctx, lease.Job)
+			if err != nil {
+				return err
+			}
+			if err = worker.repository.StoreManagedSnapshot(ctx, lease, managed); err != nil {
+				return err
+			}
+		}
+		snapshot = billing.ResponseSnapshot{Status: managed.Status, Headers: managed.Headers, Body: managed.Body}
+	}
 	if lease.Job.Status == joboperation.Canceled {
 		snapshot = billing.ResponseSnapshot{Status: 204, Headers: map[string][]string{}, Body: []byte{}}
 	}

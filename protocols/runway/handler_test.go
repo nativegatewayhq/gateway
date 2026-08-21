@@ -240,3 +240,44 @@ func TestRetrieveProjectsNativeStatusAndHidesOtherProtocols(t *testing.T) {
 		t.Fatalf("cross protocol status=%d", recorder.Code)
 	}
 }
+
+func TestManagedRetrieveHidesProviderOutputUntilCDNSnapshot(t *testing.T) {
+	registry, _ := videooperation.NewRegistry([]string{"model"})
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAll}
+	providerBody := []byte(`{"id":"job_0123456789abcdef0123456789abcdef","status":"SUCCEEDED","output":["https://provider.example/signed.mp4"]}`)
+	managedBody := []byte(`{"id":"job_0123456789abcdef0123456789abcdef","status":"SUCCEEDED","output":["https://cdn.example/video.mp4"]}`)
+	service := &jobsStub{job: joboperation.Job{ID: "job_0123456789abcdef0123456789abcdef", Protocol: "runway", Model: "model", Status: joboperation.Succeeded, ManagedResultRequired: true, CreatedAt: time.Now(), Snapshot: joboperation.Snapshot{Status: 200, Body: providerBody}}}
+	handler := NewHandler(slog.Default(), authStub{principal}, registry, service, 1<<20)
+	handler.SetManagedResults(true)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+service.job.ID, nil)
+	request.Header.Set("Authorization", "Bearer key")
+	request.Header.Set("X-Runway-Version", "2024-11-06")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "provider.example") || !strings.Contains(recorder.Body.String(), `"RUNNING"`) {
+		t.Fatalf("pending response=%s", recorder.Body.String())
+	}
+	service.job.ManagedSnapshot = joboperation.Snapshot{Status: 200, Body: managedBody}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if !strings.Contains(recorder.Body.String(), "cdn.example") || strings.Contains(recorder.Body.String(), "provider.example") {
+		t.Fatalf("managed response=%s", recorder.Body.String())
+	}
+}
+
+func TestManagedSubmissionPersistsResultPolicy(t *testing.T) {
+	registry, _ := videooperation.NewRegistry([]string{"model"})
+	principal := apikey.Principal{OrganizationID: "org", ProjectID: "project", APIKeyID: "key", ModelAccessMode: apikey.ModelAccessAll}
+	service := &jobsStub{job: joboperation.Job{ID: "job_0123456789abcdef0123456789abcdef", Status: joboperation.Pending}}
+	handler := NewHandler(slog.Default(), authStub{principal}, registry, service, 1<<20)
+	handler.SetManagedResults(true)
+	request := httptest.NewRequest(http.MethodPost, "/v1/image_to_video", strings.NewReader(`{"model":"model","promptImage":"https://example.com/input.png","duration":5,"ratio":"1280:720"}`))
+	request.Header.Set("Authorization", "Bearer key")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Runway-Version", "2024-11-06")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !service.request.ManagedResultRequired {
+		t.Fatalf("status=%d request=%+v body=%s", recorder.Code, service.request, recorder.Body.String())
+	}
+}

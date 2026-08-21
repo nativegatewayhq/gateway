@@ -62,6 +62,7 @@ type Handler struct {
 	billing          Billing
 	uploader         Uploader
 	assets           AssetAuthorizer
+	managedResults   bool
 }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, service JobService, maximumBodyBytes int64) *Handler {
@@ -77,6 +78,7 @@ func (handler *Handler) SetUploads(uploader Uploader, assets AssetAuthorizer) {
 	handler.uploader = uploader
 	handler.assets = assets
 }
+func (handler *Handler) SetManagedResults(enabled bool) { handler.managedResults = enabled }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if handler == nil || handler.authenticator == nil || handler.models == nil || handler.jobs == nil || handler.maximumBodyBytes < 1 {
@@ -259,7 +261,7 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		chargeID = charge.ID
 		estimatedUsage = &joboperation.Usage{Dimension: "provider_credit", Unit: "microcredit", Quantity: charge.Quantity, Provenance: "request", ExtractorVersion: "runway-request-cost-v1", ResultExtractorVersion: "runway-task-cost-v1"}
 	}
-	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "runway", Operation: string(videooperation.Generate), Model: model, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: estimatedUsage}, providerrunway.SubmitPayload{Path: request.URL.Path, Body: outbound})
+	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "runway", Operation: string(videooperation.Generate), Model: model, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: estimatedUsage, ManagedResultRequired: handler.managedResults}, providerrunway.SubmitPayload{Path: request.URL.Path, Body: outbound})
 	if errors.Is(err, joboperation.ErrConflict) {
 		writeError(writer, http.StatusConflict, "idempotency conflict")
 		return
@@ -307,10 +309,18 @@ func (handler *Handler) get(writer http.ResponseWriter, request *http.Request, p
 		writeError(writer, http.StatusNotFound, "task not found")
 		return
 	}
-	if len(value.Snapshot.Body) > 0 && json.Valid(value.Snapshot.Body) {
+	snapshot := value.Snapshot
+	if value.ManagedSnapshot.Status != 0 {
+		snapshot = value.ManagedSnapshot
+	}
+	if value.ManagedResultRequired && value.Status == joboperation.Succeeded && value.ManagedSnapshot.Status == 0 {
+		writeJSON(writer, http.StatusOK, map[string]any{"id": value.ID, "status": "RUNNING", "createdAt": value.CreatedAt.UTC().Format(time.RFC3339Nano), "progress": 0})
+		return
+	}
+	if len(snapshot.Body) > 0 && json.Valid(snapshot.Body) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusOK)
-		_, _ = writer.Write(value.Snapshot.Body)
+		_, _ = writer.Write(snapshot.Body)
 		return
 	}
 	response := map[string]any{"id": value.ID, "status": nativeStatus(value.Status), "createdAt": value.CreatedAt.UTC().Format(time.RFC3339Nano)}
