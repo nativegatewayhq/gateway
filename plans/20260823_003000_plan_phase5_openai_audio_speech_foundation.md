@@ -1,9 +1,9 @@
 ---
 id: gateway-20260823-054
 title: Phase 5 OpenAI Audio Speech Native Foundation
-status: accepted
+status: completed
 created_at: 2026-08-23T00:30:00+09:00
-updated_at: 2026-08-23T00:30:00+09:00
+updated_at: 2026-08-23T04:00:00+09:00
 owners:
   - gateway
 initiative: phase-5-openai-audio-speech-foundation
@@ -200,19 +200,27 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] 공식 OpenAI Python·JavaScript SDK가 Key와 Base URL만 변경해 Speech를 호출함
-- [ ] 성공 audio가 전체 메모리 buffering 없이 byte-for-byte streaming됨
-- [ ] request/response size, timeout, MIME와 header 경계가 fail closed함
-- [ ] credential, input text, voice/custom voice ID와 audio content가 노출되지 않음
-- [ ] response commit 뒤 retry/fallback이 발생하지 않음
-- [ ] disabled/Billing-required 정책이 무과금 Provider 호출을 방지함
-- [ ] 기존 OpenAI image/chat/responses와 Runway 동작이 회귀하지 않음
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README와 conformance/cloud/dashboard handoff가 갱신됨
+- [x] 공식 OpenAI Python·JavaScript SDK가 Key와 Base URL만 변경해 Speech를 호출함
+- [x] 성공 audio가 전체 메모리 buffering 없이 byte-for-byte streaming됨
+- [x] request/response size, timeout, MIME와 header 경계가 fail closed함
+- [x] credential, input text, voice/custom voice ID와 audio content가 노출되지 않음
+- [x] response commit 뒤 retry/fallback이 발생하지 않음
+- [x] disabled/Billing-required 정책이 무과금 Provider 호출을 방지함
+- [x] 기존 OpenAI image/chat/responses와 Runway 동작이 회귀하지 않음
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README와 conformance/cloud/dashboard handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `operations/audio`: immutable OpenAI Speech model/capability registry 및 `/v1/models` projection
+- `providers/openai/speech.go`: fixed OpenAI origin/path, channel credential 교체, complete/idle timeout과 cancellation 전파
+- `protocols/openai/speech.go`: bounded duplicate-key JSON validation, model authorization, health gate, safe binary MIME/header와 32 KiB streaming relay
+- migration `000048`: `openai/audio.speech` API Key model permission 확장
+- config: Speech model/timeout/request-response byte limits와 Billing-required fail-closed 정책
+- 공식 OpenAI Python·JavaScript SDK Speech binary 응답 conformance 통과
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- Plan 전용 PostgreSQL DB와 격리 Redis DB 13에서 `make integration-test` 통과
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/openai -count=1` 통과
 
 ## Rollback 계획
 
