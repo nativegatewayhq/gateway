@@ -116,6 +116,11 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_GEMINI_LLM_MODEL_LIMITS` | unset | Comma-separated `model:maximum_input:maximum_output` token bounds; required for every enabled Gemini LLM model when billing is required |
 | `GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT` | `2m` | OpenAI/xAI image request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES` | `1048576` | Positive OpenAI Images JSON body limit up to 1 MiB |
+| `GATEWAY_OPENAI_SPEECH_MODELS` | unset | Comma-separated OpenAI text-to-speech models; enables native `POST /v1/audio/speech` only in BYOK mode |
+| `GATEWAY_OPENAI_SPEECH_REQUEST_TIMEOUT` | `2m` | Complete OpenAI Speech request timeout; maximum `10m` |
+| `GATEWAY_OPENAI_SPEECH_STREAM_IDLE_TIMEOUT` | `30s` | Maximum silence between upstream audio reads; maximum `10m` |
+| `GATEWAY_OPENAI_SPEECH_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum native Speech JSON request body |
+| `GATEWAY_OPENAI_SPEECH_MAX_RESPONSE_BODY_BYTES` | `268435456` | Maximum streamed audio response; maximum 2 GiB |
 | `GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES` | `67108864` | Image edit body limit; maximum 256 MiB |
 | `GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent multipart edit spool limit; maximum 128 |
 | `GATEWAY_BILLING_MODE` | `disabled` | `disabled` preserves BYOK pass-through; `required` enforces price and Wallet settlement |
@@ -302,6 +307,26 @@ For native-compatible multi-provider routing, set `GATEWAY_OPENAI_RESPONSES_ROUT
 Capability, credential, health, exact-price, margin, and spend-cap rejection may move to another candidate only before dispatch. A Provider HTTP response, timeout, reset, malformed response, incomplete stream, or client disconnect never triggers a second Provider call. Managed charges record immutable candidate, Provider model, policy, rank, and price-evaluation time using `openai-responses-route-v1`; idempotency replay uses the original logical request fingerprint and route-independent lookup.
 
 `previous_response_id` and `background=true` are rejected until durable Provider response ownership and background Job reconciliation are implemented. Unknown tool types also fail closed instead of being sent to a guessed Provider.
+
+## OpenAI Audio Speech
+
+Set `GATEWAY_OPENAI_SPEECH_MODELS` to enable native `POST /v1/audio/speech` in BYOK mode. Official OpenAI Python and JavaScript SDKs use the same Speech method after changing only `api_key` and `base_url`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="SERVICE_API_KEY", base_url="https://gateway.example/v1")
+audio = client.audio.speech.create(
+    model="tts-1",
+    voice="alloy",
+    input="Hello from Native Gateway",
+)
+audio.stream_to_file("speech.mp3")
+```
+
+The Gateway validates one bounded JSON object, exact model authorization, non-empty input and a built-in string or custom voice ID. Unknown future request fields are preserved. The service credential is replaced at the fixed OpenAI origin, and successful audio is copied in bounded chunks without buffering the complete file. Only safe content headers are returned; Provider request IDs, cookies, credentials, input text, voice IDs and audio bytes are never logged.
+
+Declared and streamed response sizes, idle/complete timeouts and audio MIME types fail closed. A Provider HTTP response, timeout, reset, invalid stream or client write failure never triggers a second speech generation. Speech is rejected at configuration load when `GATEWAY_BILLING_MODE=required`; Wallet settlement is intentionally owned by the next Speech billing plan.
 
 ### Anthropic Messages foundation
 

@@ -466,6 +466,25 @@ func TestLoadManagedVideoStorageConfiguration(t *testing.T) {
 	}
 }
 
+func TestOpenAISpeechConfigurationAndBillingBoundary(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":                          "postgres://gateway",
+		"GATEWAY_OPENAI_SPEECH_MODELS":                  "tts-1,gpt-4o-mini-tts",
+		"GATEWAY_OPENAI_SPEECH_REQUEST_TIMEOUT":         "3m",
+		"GATEWAY_OPENAI_SPEECH_STREAM_IDLE_TIMEOUT":     "20s",
+		"GATEWAY_OPENAI_SPEECH_MAX_REQUEST_BODY_BYTES":  "65536",
+		"GATEWAY_OPENAI_SPEECH_MAX_RESPONSE_BODY_BYTES": "1048576",
+	}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || len(cfg.OpenAISpeechModels) != 2 || cfg.SpeechTimeout != 3*time.Minute || cfg.SpeechStreamIdleTimeout != 20*time.Second || cfg.SpeechRequestBytes != 65536 || cfg.SpeechResponseBytes != 1048576 {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+	values["GATEWAY_BILLING_MODE"] = "required"
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("unbilled speech accepted in required billing mode")
+	}
+}
+
 func TestLoadFalRequiresModelsAndPublicOrigin(t *testing.T) {
 	_, err := Load(func(key string) (string, bool) {
 		if key == "GATEWAY_DATABASE_URL" {

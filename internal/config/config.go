@@ -53,6 +53,8 @@ const (
 	defaultFalJWKSRefresh      = time.Minute
 	defaultRunwayTimeout       = 2 * time.Minute
 	defaultRunwayBodyBytes     = int64(8 * 1024 * 1024)
+	defaultSpeechRequestBytes  = int64(1024 * 1024)
+	defaultSpeechResponseBytes = int64(256 * 1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -103,6 +105,11 @@ type Config struct {
 	OpenAIResponsesModels          []string
 	OpenAIResponsesModelLimits     map[string]ChatModelLimit
 	OpenAIResponsesRoutes          []ResponsesRoute
+	OpenAISpeechModels             []string
+	SpeechTimeout                  time.Duration
+	SpeechStreamIdleTimeout        time.Duration
+	SpeechRequestBytes             int64
+	SpeechResponseBytes            int64
 	ResponsesTimeout               time.Duration
 	ResponsesStreamIdleTimeout     time.Duration
 	ResponsesBodyBytes             int64
@@ -233,6 +240,10 @@ func Load(lookup LookupEnv) (Config, error) {
 		ResponsesTimeout:             defaultImagesTimeout,
 		ResponsesStreamIdleTimeout:   30 * time.Second,
 		ResponsesBodyBytes:           defaultChatBodyBytes,
+		SpeechTimeout:                defaultImagesTimeout,
+		SpeechStreamIdleTimeout:      30 * time.Second,
+		SpeechRequestBytes:           defaultSpeechRequestBytes,
+		SpeechResponseBytes:          defaultSpeechResponseBytes,
 		AnthropicTimeout:             defaultImagesTimeout,
 		AnthropicStreamIdleTimeout:   30 * time.Second,
 		AnthropicBodyBytes:           defaultChatBodyBytes,
@@ -473,6 +484,44 @@ func Load(lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MAX_BODY_BYTES: must be an integer between 1 and 33554432")
 		}
 		cfg.ResponsesBodyBytes = bodyBytes
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_SPEECH_MODELS"); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || seen[model] || strings.ContainsAny(model, "\r\n") {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_SPEECH_MODELS: must contain unique valid model IDs")
+			}
+			seen[model] = true
+			cfg.OpenAISpeechModels = append(cfg.OpenAISpeechModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_SPEECH_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_SPEECH_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.SpeechTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_SPEECH_STREAM_IDLE_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_SPEECH_STREAM_IDLE_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.SpeechStreamIdleTimeout = duration
+	}
+	for key, target := range map[string]*int64{"GATEWAY_OPENAI_SPEECH_MAX_REQUEST_BODY_BYTES": &cfg.SpeechRequestBytes, "GATEWAY_OPENAI_SPEECH_MAX_RESPONSE_BODY_BYTES": &cfg.SpeechResponseBytes} {
+		if value, ok := lookup(key); ok {
+			limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			maximum := defaultSpeechRequestBytes
+			if key == "GATEWAY_OPENAI_SPEECH_MAX_RESPONSE_BODY_BYTES" {
+				maximum = 2 * 1024 * 1024 * 1024
+			}
+			if err != nil || limit < 1 || limit > maximum {
+				return Config{}, fmt.Errorf("%s: must be a bounded positive integer", key)
+			}
+			*target = limit
+		}
 	}
 	if value, ok := lookup("GATEWAY_ANTHROPIC_REQUEST_TIMEOUT"); ok {
 		duration, err := time.ParseDuration(strings.TrimSpace(value))
@@ -719,6 +768,9 @@ func Load(lookup LookupEnv) (Config, error) {
 				return Config{}, fmt.Errorf("GATEWAY_OPENAI_CHAT_MODEL_LIMITS: every paid Chat model requires limits")
 			}
 		}
+	}
+	if cfg.BillingMode == BillingRequired && len(cfg.OpenAISpeechModels) > 0 {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_SPEECH_MODELS: speech billing is required before enabling models")
 	}
 	if cfg.BillingMode == BillingRequired && len(cfg.OpenAIResponsesModels) > 0 {
 		if len(cfg.OpenAIResponsesModelLimits) != len(cfg.OpenAIResponsesModels) {

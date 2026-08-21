@@ -11,6 +11,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
+	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
@@ -164,6 +165,20 @@ func TestModelsHandlerIncludesAuthorizedConfiguredRunwayVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.Code != http.StatusOK || len(list.Data) != 1 || list.Data[0].ID != "logical-video" || list.Data[0].OwnedBy != "runway" {
+		t.Fatalf("list=%+v", list)
+	}
+}
+
+func TestModelsHandlerIncludesAuthorizedConfiguredSpeech(t *testing.T) {
+	audio, _ := audiooperation.NewRegistry([]string{"tts-1"})
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: audiooperation.Speech, Model: "tts-1"}}}
+	handler := NewModelsHandlerWithAllAndAudio(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), nil, nil, nil, nil, audio, channelAvailability{"channel_00000000000000000000000000000001": true})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || len(list.Data) != 1 || list.Data[0].ID != "tts-1" || list.Data[0].OwnedBy != "openai" {
 		t.Fatalf("list=%+v", list)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
@@ -31,6 +32,13 @@ type ModelsHandler struct {
 		List() []responsesoperation.Model
 	}
 	video interface{ List() []videooperation.Route }
+	audio interface{ List() []audiooperation.Model }
+}
+
+func NewModelsHandlerWithAllAndAudio(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
+	List() []responsesoperation.Model
+}, video interface{ List() []videooperation.Route }, audio interface{ List() []audiooperation.Model }, availability ProviderAvailability) *ModelsHandler {
+	return &ModelsHandler{common: NewImagesHandler(logger, authenticator, models, nil, 1), chat: chat, responses: responses, video: video, audio: audio, availability: availability}
 }
 
 func NewModelsHandlerWithAll(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
@@ -195,6 +203,21 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 			if available {
 				data = append(data, modelObject{model.Model, "model", 0, "runway"})
 				seen[model.Model] = true
+			}
+		}
+	}
+	if handler.audio != nil {
+		for _, model := range handler.audio.List() {
+			if seen[model.ID] || !principal.AuthorizeModel("openai", audiooperation.Speech, model.ID) {
+				continue
+			}
+			available := configured[model.Provider]
+			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
+				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
+			}
+			if available {
+				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})
+				seen[model.ID] = true
 			}
 		}
 	}

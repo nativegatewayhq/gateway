@@ -35,6 +35,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	"github.com/nativegatewayhq/gateway/internal/videostorage"
 	anthropicoperation "github.com/nativegatewayhq/gateway/operations/anthropic"
+	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	geminioperation "github.com/nativegatewayhq/gateway/operations/gemini"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
@@ -275,6 +276,11 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway Responses model registry initialization failed")
 		return 1
 	}
+	audioModels, err := audiooperation.NewRegistry(cfg.OpenAISpeechModels)
+	if err != nil {
+		logger.Error("gateway Audio Speech model registry initialization failed")
+		return 1
+	}
 	anthropicLimits := make(map[string]anthropicoperation.Limits, len(cfg.AnthropicMessagesModelLimits))
 	for model, limit := range cfg.AnthropicMessagesModelLimits {
 		anthropicLimits[model] = anthropicoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
@@ -287,6 +293,7 @@ func run(stdout, stderr io.Writer) int {
 	var anthropicHandler http.Handler
 	var openAIChatHandler http.Handler
 	var openAIResponsesHandler http.Handler
+	var openAISpeechHandler http.Handler
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
@@ -373,6 +380,11 @@ func run(stdout, stderr io.Writer) int {
 		responsesHandler.SetTelemetry(telemetryRuntime.Recorder)
 		openAIResponsesHandler = responsesHandler
 	}
+	if len(cfg.OpenAISpeechModels) > 0 {
+		handler := openaiProtocol.NewSpeechHandler(logger, apiKeyAuthenticator, audioModels, openaiProvider.NewSpeech(providerCredentialRegistry, cfg.SpeechTimeout, cfg.SpeechStreamIdleTimeout), healthGate, cfg.SpeechRequestBytes, cfg.SpeechResponseBytes)
+		handler.SetTelemetry(telemetryRuntime.Recorder)
+		openAISpeechHandler = handler
+	}
 	if len(cfg.AnthropicMessagesModels) > 0 {
 		var handler *anthropicProtocol.Handler
 		if anthropicChargeBilling == nil {
@@ -406,7 +418,7 @@ func run(stdout, stderr io.Writer) int {
 	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
-	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAll(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, providerCredentialRegistry)
+	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAndAudio(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, providerCredentialRegistry)
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
@@ -600,6 +612,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIModels:        openAIModelsHandler,
 		OpenAIChat:          openAIChatHandler,
 		OpenAIResponses:     openAIResponsesHandler,
+		OpenAISpeech:        openAISpeechHandler,
 		Anthropic:           anthropicHandler,
 		Replicate:           replicateHandler,
 		ReplicateWebhook:    replicateWebhookHandler,

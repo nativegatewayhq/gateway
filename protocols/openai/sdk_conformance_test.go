@@ -16,10 +16,39 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 )
+
+func TestOfficialOpenAISpeechSDKsUseOnlyBaseURLAndKey(t *testing.T) {
+	registry, _ := audiooperation.NewRegistry([]string{"tts-1"})
+	handler := NewSpeechHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, speechExecutorFunc(func(_ context.Context, request openaiProvider.SpeechRequest) (*http.Response, error) {
+		body, _ := io.ReadAll(request.Body)
+		if !strings.Contains(string(body), `"model":"tts-1"`) || !strings.Contains(string(body), `"voice":"alloy"`) || !strings.Contains(string(body), `"input":"hello"`) {
+			t.Fatalf("speech SDK request=%s", body)
+		}
+		return &http.Response{StatusCode: 200, ContentLength: 16, Header: http.Header{"Content-Type": {"audio/mpeg"}}, Body: io.NopCloser(strings.NewReader("gateway-audio-ok"))}, nil
+	}), providerhealth.NoopGate{}, 4096, 4096)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+r=c.audio.speech.create(model="tts-1",voice="alloy",input="hello")
+assert r.read() == b"gateway-audio-ok"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python Speech SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;(async()=>{const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});const r=await c.audio.speech.create({model:"tts-1",voice:"alloy",input:"hello"});const b=Buffer.from(await r.arrayBuffer());if(b.toString()!=="gateway-audio-ok")process.exit(2)})().catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript Speech SDK: %v: %s", err, output)
+	}
+}
 
 func TestOfficialOpenAISDKsUseOnlyBaseURLAndKey(t *testing.T) {
 	handler := chatHandler(t, authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), chatExecutorFunc(func(context.Context, openaiProvider.ChatRequest) (*http.Response, error) {
