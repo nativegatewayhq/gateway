@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nativegatewayhq/gateway/internal/audiobilling"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
@@ -87,11 +88,63 @@ func TestSpeechRejectsDeclaredOversizeAndInvalidMIMEBeforeCommit(t *testing.T) {
 }
 
 func TestRelaySpeechBoundsUnknownLengthAndWriteFailure(t *testing.T) {
-	if err := relaySpeech(httptest.NewRecorder(), strings.NewReader(strings.Repeat("a", 33)), 32); err != errSpeechStreamTooLarge {
+	if _, err := relaySpeech(httptest.NewRecorder(), strings.NewReader(strings.Repeat("a", 33)), 32); err != errSpeechStreamTooLarge {
 		t.Fatalf("oversize err=%v", err)
 	}
-	if err := relaySpeech(errorWriter{}, strings.NewReader("audio"), 32); err != errSpeechStreamWrite {
+	if _, err := relaySpeech(errorWriter{}, strings.NewReader("audio"), 32); err != errSpeechStreamWrite {
 		t.Fatalf("write err=%v", err)
+	}
+}
+
+type speechBillingFake struct {
+	begins, completes, releases, reconciles int
+	charge                                  audiobilling.Charge
+	beginErr                                error
+}
+
+func (f *speechBillingFake) Begin(context.Context, audiobilling.BeginRequest) (audiobilling.Charge, error) {
+	f.begins++
+	return f.charge, f.beginErr
+}
+func (f *speechBillingFake) Complete(_ context.Context, _ string, e audiobilling.StreamEvidence) (audiobilling.Charge, error) {
+	f.completes++
+	f.charge.ResponseBytes = e.Bytes
+	f.charge.ResponseSHA256 = e.SHA256
+	return f.charge, nil
+}
+func (f *speechBillingFake) Release(context.Context, string, string) (audiobilling.Charge, error) {
+	f.releases++
+	return f.charge, nil
+}
+func (f *speechBillingFake) MarkReconciling(context.Context, string, string) error {
+	f.reconciles++
+	return nil
+}
+
+func TestBillableSpeechRequiresIdempotencyAndCapturesOnlyCompleteStream(t *testing.T) {
+	registry, _ := audiooperation.NewRegistry([]string{"tts-1"})
+	billing := &speechBillingFake{charge: audiobilling.Charge{ID: "asc_00000000000000000000000000000000"}}
+	handler := NewBillableSpeechHandler(slog.Default(), acceptingAuth(t), registry, speechExecutorFunc(func(context.Context, openaiProvider.SpeechRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, ContentLength: 5, Header: http.Header{"Content-Type": {"audio/mpeg"}}, Body: io.NopCloser(strings.NewReader("audio"))}, nil
+	}), providerhealth.NoopGate{}, 256, 256, billing)
+	makeRequest := func(key string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(`{"model":"tts-1","input":"한😀","voice":"alloy"}`))
+		r.Header.Set("Authorization", "Bearer service-secret")
+		r.Header.Set("Content-Type", "application/json")
+		if key != "" {
+			r.Header.Set("Idempotency-Key", key)
+		}
+		return r
+	}
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, makeRequest(""))
+	if missing.Code != http.StatusBadRequest || billing.begins != 0 {
+		t.Fatalf("missing status=%d begins=%d", missing.Code, billing.begins)
+	}
+	ok := httptest.NewRecorder()
+	handler.ServeHTTP(ok, makeRequest("speech-key"))
+	if ok.Code != 200 || ok.Body.String() != "audio" || billing.begins != 1 || billing.completes != 1 || billing.reconciles != 0 || billing.charge.ResponseBytes != 5 || billing.charge.ResponseSHA256 == ([32]byte{}) {
+		t.Fatalf("status=%d billing=%+v", ok.Code, billing)
 	}
 }
 

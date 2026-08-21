@@ -12,6 +12,8 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/app"
+	"github.com/nativegatewayhq/gateway/internal/audiobilling"
+	"github.com/nativegatewayhq/gateway/internal/audiopricing"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/chatbilling"
 	"github.com/nativegatewayhq/gateway/internal/chatpricing"
@@ -305,6 +307,7 @@ func run(stdout, stderr io.Writer) int {
 	var chatChargeBilling openaiProtocol.ChatBilling
 	var responsesChargeBilling openaiProtocol.ResponsesBilling
 	var anthropicChargeBilling anthropicProtocol.Billing
+	var audioChargeBilling openaiProtocol.SpeechBilling
 	var chatReconciliationWorker *chatreconciliation.Worker
 	if cfg.BillingMode == config.BillingRequired {
 		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
@@ -332,6 +335,17 @@ func run(stdout, stderr io.Writer) int {
 		chatChargeBilling = chatService
 		responsesChargeBilling = chatService
 		anthropicChargeBilling = chatService
+		audioPrices, audioPriceErr := audiopricing.New(pool, cfg.MinimumMarginBPS)
+		if audioPriceErr != nil {
+			logger.Error("gateway Audio pricing initialization failed")
+			return 1
+		}
+		audioService, audioBillingErr := audiobilling.NewWithControls(pool, audioPrices, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool))
+		if audioBillingErr != nil {
+			logger.Error("gateway Audio billing initialization failed")
+			return 1
+		}
+		audioChargeBilling = audioService
 		chatReconciliationWorker, chatBillingErr = chatreconciliation.New(pool, chatService, fmt.Sprintf("gateway-%d", os.Getpid()), cfg.ReconcileLease, cfg.ReconcileMaxAttempts)
 		if chatBillingErr != nil {
 			logger.Error("gateway Chat reconciliation initialization failed")
@@ -381,7 +395,12 @@ func run(stdout, stderr io.Writer) int {
 		openAIResponsesHandler = responsesHandler
 	}
 	if len(cfg.OpenAISpeechModels) > 0 {
-		handler := openaiProtocol.NewSpeechHandler(logger, apiKeyAuthenticator, audioModels, openaiProvider.NewSpeech(providerCredentialRegistry, cfg.SpeechTimeout, cfg.SpeechStreamIdleTimeout), healthGate, cfg.SpeechRequestBytes, cfg.SpeechResponseBytes)
+		var handler *openaiProtocol.SpeechHandler
+		if audioChargeBilling == nil {
+			handler = openaiProtocol.NewSpeechHandler(logger, apiKeyAuthenticator, audioModels, openaiProvider.NewSpeech(providerCredentialRegistry, cfg.SpeechTimeout, cfg.SpeechStreamIdleTimeout), healthGate, cfg.SpeechRequestBytes, cfg.SpeechResponseBytes)
+		} else {
+			handler = openaiProtocol.NewBillableSpeechHandler(logger, apiKeyAuthenticator, audioModels, openaiProvider.NewSpeech(providerCredentialRegistry, cfg.SpeechTimeout, cfg.SpeechStreamIdleTimeout), healthGate, cfg.SpeechRequestBytes, cfg.SpeechResponseBytes, audioChargeBilling)
+		}
 		handler.SetTelemetry(telemetryRuntime.Recorder)
 		openAISpeechHandler = handler
 	}

@@ -341,7 +341,9 @@ func validID(value, prefix string) bool {
 	_, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
 	return err == nil
 }
-func validChargeID(value string) bool { return validID(value, "charge_") || validID(value, "chc_") }
+func validChargeID(value string) bool {
+	return validID(value, "charge_") || validID(value, "chc_") || validID(value, "asc_")
+}
 func (store *Store) id(prefix string) (string, error) {
 	value := make([]byte, 16)
 	if _, err := io.ReadFull(store.entropy, value); err != nil {

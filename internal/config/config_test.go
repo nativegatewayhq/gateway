@@ -480,8 +480,8 @@ func TestOpenAISpeechConfigurationAndBillingBoundary(t *testing.T) {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
 	values["GATEWAY_BILLING_MODE"] = "required"
-	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
-		t.Fatal("unbilled speech accepted in required billing mode")
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err != nil {
+		t.Fatalf("billable speech rejected: %v", err)
 	}
 }
 
