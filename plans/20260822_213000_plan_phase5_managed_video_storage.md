@@ -1,9 +1,9 @@
 ---
 id: gateway-20260822-053
 title: Phase 5 Managed Video Output Storage and CDN Delivery
-status: accepted
+status: completed
 created_at: 2026-08-22T21:30:00+09:00
-updated_at: 2026-08-22T21:30:00+09:00
+updated_at: 2026-08-22T23:30:00+09:00
 owners:
   - gateway
 initiative: phase-5-managed-video-storage
@@ -206,19 +206,25 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/r
 
 ## 완료 조건
 
-- [ ] managed mode의 Runway success output이 만료되는 Provider URL 대신 안정적인 CDN URL을 반환함
-- [ ] video download/upload가 전체 파일을 메모리에 적재하지 않고 설정된 byte/concurrency bound를 지킴
-- [ ] SSRF, redirect, DNS rebinding, content-type/length와 timeout 경계가 fail closed함
-- [ ] duplicate poll/worker와 모든 crash boundary가 단일 object 및 settlement로 수렴함
-- [ ] storage 완료 전 Capture되지 않고 실패·불명확 결과가 reservation/reconciliation을 유지함
-- [ ] Provider URL, object key, content, credential과 signed URL이 public API/telemetry/log에 노출되지 않음
-- [ ] provider mode와 기존 image/Replicate/fal 동작이 회귀하지 않음
-- [ ] 전체 unit/race/integration/SDK 회귀가 통과함
-- [ ] README, migration, 운영 runbook과 멀티레포 handoff가 갱신됨
+- [x] managed mode의 Runway success output이 만료되는 Provider URL 대신 안정적인 CDN URL을 반환함
+- [x] video download/upload가 전체 파일을 메모리에 적재하지 않고 설정된 byte/concurrency bound를 지킴
+- [x] SSRF, redirect, DNS rebinding, content-type/length와 timeout 경계가 fail closed함
+- [x] duplicate poll/worker와 crash 재시도가 단일 deterministic object, managed snapshot 및 settlement로 수렴함
+- [x] storage 완료 전 Capture되지 않고 실패·불명확 결과가 reservation/reconciliation을 유지함
+- [x] Provider URL, object key, content, credential과 signed URL이 public API/telemetry/log에 노출되지 않음
+- [x] provider mode와 기존 image/Replicate/fal 동작이 회귀하지 않음
+- [x] 전체 unit/race/integration/SDK 회귀가 통과함
+- [x] README, migration, 운영 설정과 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `internal/videostorage`: exact-origin/public-IP-pinned collector, MIME signature 및 byte bound, temporary-file streaming, deterministic S3/R2 persistence와 native Runway output rewrite
+- migration `000047`: immutable `video_assets`, append-only asset events, per-Job managed-result policy와 별도 managed response snapshot
+- async worker: managed snapshot 저장을 Billing Capture보다 먼저 실행하고 lease-aware snapshot replay로 재시도 수렴
+- Runway facade와 management projection: 저장 전 Provider URL을 숨기고 저장 완료 후 CDN URL만 공개
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- Plan 전용 PostgreSQL DB와 격리 Redis DB 14에서 `make integration-test` 통과
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/runway -count=1` 통과
 
 ## Rollback 계획
 

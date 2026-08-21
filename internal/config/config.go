@@ -19,6 +19,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
+	"github.com/nativegatewayhq/gateway/internal/videostorage"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 )
 
@@ -127,6 +128,7 @@ type Config struct {
 	ProviderHealthMode             ProviderHealthMode
 	ProviderHealth                 providerhealth.Config
 	ImageStorage                   imagestorage.Config
+	VideoStorage                   videostorage.Config
 	Telemetry                      telemetry.Config
 	TrustedProxyPrefixes           []netip.Prefix
 	ReplicateEnabled               bool
@@ -250,6 +252,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ProviderHealthMode:           ProviderHealthDisabled,
 		ProviderHealth:               providerhealth.DefaultConfig(),
 		ImageStorage:                 imagestorage.DefaultConfig(),
+		VideoStorage:                 videostorage.DefaultConfig(),
 		Telemetry:                    telemetry.DefaultConfig(),
 		ReplicateEndpoint:            "https://api.replicate.com",
 		ReplicateTimeout:             defaultReplicateTimeout,
@@ -624,6 +627,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if err := loadImageStorage(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
+	if err := loadVideoStorage(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
 	if err := loadTelemetry(&cfg, lookup); err != nil {
@@ -1158,6 +1164,87 @@ func loadImageStorage(cfg *Config, lookup LookupEnv) error {
 	}
 	if err := cfg.ImageStorage.Validate(); err != nil {
 		return fmt.Errorf("GATEWAY_IMAGE_STORAGE_*: settings are invalid")
+	}
+	return nil
+}
+
+func loadVideoStorage(cfg *Config, lookup LookupEnv) error {
+	cfg.VideoStorage.FetchOrigins = map[string][]string{}
+	if value, ok := lookup("GATEWAY_VIDEO_STORAGE_MODE"); ok {
+		cfg.VideoStorage.Mode = videostorage.Mode(strings.ToLower(strings.TrimSpace(value)))
+	}
+	settings := []struct {
+		key    string
+		target *string
+	}{
+		{"GATEWAY_VIDEO_STORAGE_ENDPOINT", &cfg.VideoStorage.Endpoint},
+		{"GATEWAY_VIDEO_STORAGE_REGION", &cfg.VideoStorage.Region},
+		{"GATEWAY_VIDEO_STORAGE_BUCKET", &cfg.VideoStorage.Bucket},
+		{"GATEWAY_VIDEO_STORAGE_ACCESS_KEY_ID", &cfg.VideoStorage.AccessKeyID},
+		{"GATEWAY_VIDEO_STORAGE_SECRET_ACCESS_KEY", &cfg.VideoStorage.SecretAccessKey},
+		{"GATEWAY_VIDEO_STORAGE_CDN_BASE_URL", &cfg.VideoStorage.CDNBaseURL},
+		{"GATEWAY_VIDEO_STORAGE_TEMP_DIR", &cfg.VideoStorage.TemporaryDirectory},
+	}
+	for _, setting := range settings {
+		if value, ok := lookup(setting.key); ok {
+			*setting.target = strings.TrimSpace(value)
+		}
+	}
+	integers := []struct {
+		key    string
+		target *int64
+	}{
+		{"GATEWAY_VIDEO_STORAGE_MAX_VIDEO_BYTES", &cfg.VideoStorage.MaximumVideoBytes},
+		{"GATEWAY_VIDEO_STORAGE_MAX_TOTAL_BYTES", &cfg.VideoStorage.MaximumTotalBytes},
+	}
+	for _, setting := range integers {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded integer", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	counts := []struct {
+		key    string
+		target *int
+	}{
+		{"GATEWAY_VIDEO_STORAGE_MAX_VIDEOS", &cfg.VideoStorage.MaximumVideos},
+		{"GATEWAY_VIDEO_STORAGE_MAX_CONCURRENT_DOWNLOADS", &cfg.VideoStorage.MaximumConcurrentDownloads},
+	}
+	for _, setting := range counts {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded integer", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	durations := []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"GATEWAY_VIDEO_STORAGE_FETCH_TIMEOUT", &cfg.VideoStorage.FetchTimeout},
+		{"GATEWAY_VIDEO_STORAGE_UPLOAD_TIMEOUT", &cfg.VideoStorage.UploadTimeout},
+	}
+	for _, setting := range durations {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded duration", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	if value, ok := lookup("GATEWAY_VIDEO_STORAGE_FETCH_ORIGINS_RUNWAY"); ok {
+		for _, part := range strings.Split(value, ",") {
+			cfg.VideoStorage.FetchOrigins["runway"] = append(cfg.VideoStorage.FetchOrigins["runway"], strings.TrimSpace(part))
+		}
+	}
+	if err := cfg.VideoStorage.Validate(); err != nil {
+		return fmt.Errorf("GATEWAY_VIDEO_STORAGE_*: settings are invalid")
 	}
 	return nil
 }

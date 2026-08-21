@@ -34,6 +34,7 @@ type CreateRequest struct {
 	IdempotencyKey                        string
 	Fingerprint                           [32]byte
 	EstimatedUsage                        *joboperation.Usage
+	ManagedResultRequired                 bool
 }
 
 type ProviderAttempt struct {
@@ -147,8 +148,8 @@ func (repository *Repository) Create(ctx context.Context, request CreateRequest)
 	if request.EstimatedUsage != nil {
 		usageDimension, usageUnit, estimatedQuantity, extractorVersion, resultExtractorVersion = request.EstimatedUsage.Dimension, request.EstimatedUsage.Unit, request.EstimatedUsage.Quantity, request.EstimatedUsage.ExtractorVersion, request.EstimatedUsage.ResultExtractorVersion
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO async_jobs(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status,usage_dimension,usage_unit,estimated_quantity,usage_extractor_version,usage_result_extractor_version)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'PENDING',$14,$15,$16,$17,$18)`, id, request.RequestID, request.Owner.OrganizationID, request.Owner.ProjectID, request.Owner.APIKeyID, request.Protocol, request.Operation, request.Model, request.Provider, request.ChannelID, charge, key, fingerprint, usageDimension, usageUnit, estimatedQuantity, extractorVersion, resultExtractorVersion)
+	_, err = tx.Exec(ctx, `INSERT INTO async_jobs(id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status,usage_dimension,usage_unit,estimated_quantity,usage_extractor_version,usage_result_extractor_version,managed_result_required)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'PENDING',$14,$15,$16,$17,$18,$19)`, id, request.RequestID, request.Owner.OrganizationID, request.Owner.ProjectID, request.Owner.APIKeyID, request.Protocol, request.Operation, request.Model, request.Provider, request.ChannelID, charge, key, fingerprint, usageDimension, usageUnit, estimatedQuantity, extractorVersion, resultExtractorVersion, request.ManagedResultRequired)
 	if err != nil {
 		return joboperation.Job{}, false, err
 	}
@@ -160,7 +161,7 @@ func (repository *Repository) Create(ctx context.Context, request CreateRequest)
 		return joboperation.Job{}, false, err
 	}
 	created := repository.now().UTC()
-	return joboperation.Job{ID: id, RequestID: request.RequestID, Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, Owner: request.Owner, Provider: request.Provider, ChannelID: request.ChannelID, ChargeID: request.ChargeID, IdempotencyKey: request.IdempotencyKey, Fingerprint: request.Fingerprint, Status: joboperation.Pending, SettlementState: "NONE", EstimatedUsage: cloneUsage(request.EstimatedUsage), Version: 1, CreatedAt: created, UpdatedAt: created}, false, nil
+	return joboperation.Job{ID: id, RequestID: request.RequestID, Protocol: request.Protocol, Operation: request.Operation, Model: request.Model, Owner: request.Owner, Provider: request.Provider, ChannelID: request.ChannelID, ChargeID: request.ChargeID, IdempotencyKey: request.IdempotencyKey, Fingerprint: request.Fingerprint, Status: joboperation.Pending, SettlementState: "NONE", EstimatedUsage: cloneUsage(request.EstimatedUsage), ManagedResultRequired: request.ManagedResultRequired, Version: 1, CreatedAt: created, UpdatedAt: created}, false, nil
 }
 
 func (repository *Repository) Get(ctx context.Context, owner joboperation.Owner, id string) (joboperation.Job, error) {
@@ -676,6 +677,29 @@ func (repository *Repository) ClaimSettlements(ctx context.Context, owner string
 func (repository *Repository) MarkSettled(ctx context.Context, lease SettlementLease) error {
 	return repository.finishSettlement(ctx, lease, "SETTLED", "")
 }
+
+func (repository *Repository) StoreManagedSnapshot(ctx context.Context, lease SettlementLease, snapshot joboperation.Snapshot) error {
+	if snapshot.Status == 0 || joboperation.ValidateSnapshot(snapshot, repository.maximumBodyBytes) != nil {
+		return joboperation.ErrInvalid
+	}
+	snapshot.SHA256 = sha256.Sum256(snapshot.Body)
+	headers, err := json.Marshal(snapshot.Headers)
+	if err != nil {
+		return joboperation.ErrInvalid
+	}
+	result, err := repository.pool.Exec(ctx, `UPDATE async_jobs SET managed_response_status=$4,managed_response_headers=$5,managed_response_body=$6,managed_response_sha256=$7,updated_at=now() WHERE id=$1 AND settlement_state='PENDING' AND settlement_lease_owner=$2 AND settlement_lease_token=$3 AND managed_response_status IS NULL`, lease.Job.ID, lease.Owner, lease.Token, snapshot.Status, headers, snapshot.Body, snapshot.SHA256[:])
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 1 {
+		return nil
+	}
+	current, getErr := repository.getUnowned(ctx, lease.Job.ID)
+	if getErr != nil || current.ManagedSnapshot.Status != snapshot.Status || current.ManagedSnapshot.SHA256 != snapshot.SHA256 {
+		return joboperation.ErrLeaseLost
+	}
+	return nil
+}
 func (repository *Repository) MarkSettlementManual(ctx context.Context, lease SettlementLease, category string) error {
 	if !validCategory(category) {
 		return joboperation.ErrInvalid
@@ -741,17 +765,17 @@ func validOwner(owner joboperation.Owner) bool {
 	return owner.OrganizationID != "" && owner.ProjectID != "" && owner.APIKeyID != "" && len(owner.OrganizationID) <= 128 && len(owner.ProjectID) <= 128 && len(owner.APIKeyID) <= 200
 }
 func validCreate(request CreateRequest) bool {
-	return validOwner(request.Owner) && request.RequestID != "" && len(request.RequestID) <= 128 && request.Protocol != "" && request.Protocol == strings.ToLower(request.Protocol) && len(request.Protocol) <= 40 && request.Operation != "" && request.Operation == strings.ToLower(request.Operation) && len(request.Operation) <= 80 && strings.TrimSpace(request.Model) == request.Model && request.Model != "" && len(request.Model) <= 200 && request.Provider != "" && request.Provider == strings.ToLower(request.Provider) && len(request.Provider) <= 40 && request.ChannelID != "" && len(request.IdempotencyKey) <= 256 && (request.IdempotencyKey == "" || request.Fingerprint != ([32]byte{})) && (request.EstimatedUsage == nil || joboperation.ValidEstimatedUsage(*request.EstimatedUsage))
+	return validOwner(request.Owner) && request.RequestID != "" && len(request.RequestID) <= 128 && request.Protocol != "" && request.Protocol == strings.ToLower(request.Protocol) && len(request.Protocol) <= 40 && request.Operation != "" && request.Operation == strings.ToLower(request.Operation) && len(request.Operation) <= 80 && strings.TrimSpace(request.Model) == request.Model && request.Model != "" && len(request.Model) <= 200 && request.Provider != "" && request.Provider == strings.ToLower(request.Provider) && len(request.Provider) <= 40 && request.ChannelID != "" && len(request.IdempotencyKey) <= 256 && (request.IdempotencyKey == "" || request.Fingerprint != ([32]byte{})) && (request.EstimatedUsage == nil || joboperation.ValidEstimatedUsage(*request.EstimatedUsage)) && (!request.ManagedResultRequired || request.Protocol == "runway")
 }
 func validCategory(value string) bool {
 	return joboperation.ValidFailureCategory(value)
 }
 
 func sameCreate(existing joboperation.Job, request CreateRequest) bool {
-	return existing.Owner == request.Owner && existing.Protocol == request.Protocol && existing.Operation == request.Operation && existing.Model == request.Model && existing.Provider == request.Provider && existing.ChannelID == request.ChannelID && existing.ChargeID == request.ChargeID && existing.IdempotencyKey == request.IdempotencyKey && sameUsage(existing.EstimatedUsage, request.EstimatedUsage) && (request.IdempotencyKey == "" || existing.Fingerprint == request.Fingerprint)
+	return existing.Owner == request.Owner && existing.Protocol == request.Protocol && existing.Operation == request.Operation && existing.Model == request.Model && existing.Provider == request.Provider && existing.ChannelID == request.ChannelID && existing.ChargeID == request.ChargeID && existing.IdempotencyKey == request.IdempotencyKey && existing.ManagedResultRequired == request.ManagedResultRequired && sameUsage(existing.EstimatedUsage, request.EstimatedUsage) && (request.IdempotencyKey == "" || existing.Fingerprint == request.Fingerprint)
 }
 
-const jobSelect = `SELECT id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status,settlement_state,version,failure_category,response_status,response_headers,response_body,response_body_sha256,created_at,updated_at,completed_at,usage_dimension,usage_unit,estimated_quantity,usage_extractor_version,usage_result_extractor_version,
+const jobSelect = `SELECT id,request_id,organization_id,project_id,api_key_id,protocol,operation,model,provider,channel_id,charge_id,idempotency_key,request_fingerprint,status,settlement_state,version,failure_category,response_status,response_headers,response_body,response_body_sha256,managed_result_required,managed_response_status,managed_response_headers,managed_response_body,managed_response_sha256,created_at,updated_at,completed_at,usage_dimension,usage_unit,estimated_quantity,usage_extractor_version,usage_result_extractor_version,
     (SELECT dimension FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
     (SELECT unit FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
     (SELECT quantity FROM async_job_usage_evidence evidence WHERE evidence.job_id=async_jobs.id),
@@ -764,9 +788,9 @@ func scanJob(row pgx.Row) (joboperation.Job, bool, error) {
 	var item joboperation.Job
 	var charge, key, category, estimateDimension, estimateUnit, estimateExtractor, estimateResultExtractor, actualDimension, actualUnit, actualProvenance, actualExtractor, usageReason *string
 	var estimatedQuantity, actualQuantity *int64
-	var fingerprint, headers, body, digest []byte
-	var status *int
-	err := row.Scan(&item.ID, &item.RequestID, &item.Owner.OrganizationID, &item.Owner.ProjectID, &item.Owner.APIKeyID, &item.Protocol, &item.Operation, &item.Model, &item.Provider, &item.ChannelID, &charge, &key, &fingerprint, &item.Status, &item.SettlementState, &item.Version, &category, &status, &headers, &body, &digest, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt, &estimateDimension, &estimateUnit, &estimatedQuantity, &estimateExtractor, &estimateResultExtractor, &actualDimension, &actualUnit, &actualQuantity, &actualProvenance, &actualExtractor, &usageReason)
+	var fingerprint, headers, body, digest, managedHeaders, managedBody, managedDigest []byte
+	var status, managedStatus *int
+	err := row.Scan(&item.ID, &item.RequestID, &item.Owner.OrganizationID, &item.Owner.ProjectID, &item.Owner.APIKeyID, &item.Protocol, &item.Operation, &item.Model, &item.Provider, &item.ChannelID, &charge, &key, &fingerprint, &item.Status, &item.SettlementState, &item.Version, &category, &status, &headers, &body, &digest, &item.ManagedResultRequired, &managedStatus, &managedHeaders, &managedBody, &managedDigest, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt, &estimateDimension, &estimateUnit, &estimatedQuantity, &estimateExtractor, &estimateResultExtractor, &actualDimension, &actualUnit, &actualQuantity, &actualProvenance, &actualExtractor, &usageReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, false, nil
 	}
@@ -799,6 +823,14 @@ func scanJob(row pgx.Row) (joboperation.Job, bool, error) {
 			return item, false, joboperation.ErrInvalid
 		}
 		copy(item.Snapshot.SHA256[:], digest)
+	}
+	if managedStatus != nil {
+		item.ManagedSnapshot.Status = *managedStatus
+		item.ManagedSnapshot.Body = append([]byte(nil), managedBody...)
+		if err := json.Unmarshal(managedHeaders, &item.ManagedSnapshot.Headers); err != nil {
+			return item, false, joboperation.ErrInvalid
+		}
+		copy(item.ManagedSnapshot.SHA256[:], managedDigest)
 	}
 	return item, true, nil
 }
