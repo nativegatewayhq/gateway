@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/audiobilling"
+	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
@@ -35,6 +39,13 @@ type SpeechExecutor interface {
 	Create(context.Context, openaiProvider.SpeechRequest) (*http.Response, error)
 }
 
+type SpeechBilling interface {
+	Begin(context.Context, audiobilling.BeginRequest) (audiobilling.Charge, error)
+	Complete(context.Context, string, audiobilling.StreamEvidence) (audiobilling.Charge, error)
+	Release(context.Context, string, string) (audiobilling.Charge, error)
+	MarkReconciling(context.Context, string, string) error
+}
+
 type SpeechHandler struct {
 	common               *Handler
 	models               SpeechRegistry
@@ -43,6 +54,13 @@ type SpeechHandler struct {
 	maximumRequestBytes  int64
 	maximumResponseBytes int64
 	telemetry            *telemetry.Recorder
+	billing              SpeechBilling
+}
+
+func NewBillableSpeechHandler(logger *slog.Logger, authenticator Authenticator, models SpeechRegistry, executor SpeechExecutor, health providerhealth.Gate, maximumRequestBytes, maximumResponseBytes int64, billing SpeechBilling) *SpeechHandler {
+	h := NewSpeechHandler(logger, authenticator, models, executor, health, maximumRequestBytes, maximumResponseBytes)
+	h.billing = billing
+	return h
 }
 
 func NewSpeechHandler(logger *slog.Logger, authenticator Authenticator, models SpeechRegistry, executor SpeechExecutor, health providerhealth.Gate, maximumRequestBytes, maximumResponseBytes int64) *SpeechHandler {
@@ -121,10 +139,17 @@ func (handler *SpeechHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 	if !ok {
 		return
 	}
+	charge, ok := handler.beginCharge(tracked, request, principal, route, envelope, body)
+	if !ok {
+		return
+	}
 	response, executeErr := handler.execute(request.Context(), route, openaiProvider.SpeechRequest{ChannelID: route.ChannelID, ContentType: "application/json", Accept: request.Header.Get("Accept"), UserAgent: request.Header.Get("User-Agent"), ContentLength: int64(len(body)), Body: bytes.NewReader(body)})
 	if executeErr != nil {
 		handler.observe(request, permit, nil, executeErr)
 		providerOutcome = "failure"
+		if charge.ID != "" {
+			_ = handler.billing.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "executor_uncertain")
+		}
 		handler.writeExecutorError(tracked, executeErr)
 		return
 	}
@@ -132,13 +157,25 @@ func (handler *SpeechHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 	providerOutcome = "success"
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		handler.observe(request, permit, response, nil)
-		handler.writeProviderError(tracked, response)
+		known := handler.writeProviderError(tracked, response)
+		if charge.ID != "" {
+			if known {
+				if _, settleErr := handler.billing.Release(context.WithoutCancel(request.Context()), charge.ID, "provider_non_2xx"); settleErr != nil {
+					_ = handler.billing.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "release_failed")
+				}
+			} else {
+				_ = handler.billing.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "provider_error_unavailable")
+			}
+		}
 		return
 	}
 	contentType, err := speechContentType(response.Header.Get("Content-Type"))
 	if err != nil || response.ContentLength > handler.maximumResponseBytes {
 		handler.observe(request, permit, response, openaiProvider.ErrSpeechUpstream)
 		providerOutcome = "failure"
+		if charge.ID != "" {
+			_ = handler.billing.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "invalid_provider_response")
+		}
 		writeError(tracked, http.StatusBadGateway, "server_error", "invalid_provider_response", "invalid provider response")
 		return
 	}
@@ -148,15 +185,29 @@ func (handler *SpeechHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 		tracked.Header().Set("Content-Length", strconv.FormatInt(response.ContentLength, 10))
 	}
 	tracked.WriteHeader(response.StatusCode)
-	if err = relaySpeech(tracked, response.Body, handler.maximumResponseBytes, response.ContentLength); err != nil {
-		handler.observe(request, permit, response, err)
+	result, relayErr := relaySpeech(tracked, response.Body, handler.maximumResponseBytes, response.ContentLength)
+	if relayErr != nil {
+		handler.observe(request, permit, response, relayErr)
 		providerOutcome = "failure"
+		if charge.ID != "" {
+			_ = handler.billing.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "stream_uncertain")
+		}
 		return
+	}
+	if charge.ID != "" {
+		if _, err = handler.billing.Complete(context.WithoutCancel(request.Context()), charge.ID, audiobilling.StreamEvidence{Status: response.StatusCode, Headers: map[string][]string(tracked.Header()), Bytes: result.Bytes, SHA256: result.SHA256}); err != nil {
+			_ = handler.billing.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "settlement_failed")
+			providerOutcome = "failure"
+			return
+		}
 	}
 	handler.observe(request, permit, response, nil)
 }
 
-type speechEnvelope struct{ Model string }
+type speechEnvelope struct {
+	Model    string
+	Quantity int64
+}
 
 func parseSpeechEnvelope(body []byte) (speechEnvelope, error) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -194,7 +245,7 @@ func parseSpeechEnvelope(body []byte) (speechEnvelope, error) {
 	if _, err = decoder.Token(); err != nil || decoder.Decode(&struct{}{}) != io.EOF || model == "" || model != strings.TrimSpace(model) || len(model) > 200 || input == "" || utf8.RuneCountInString(input) > 4096 || !validVoice {
 		return speechEnvelope{}, errors.New("invalid speech request")
 	}
-	return speechEnvelope{Model: model}, nil
+	return speechEnvelope{Model: model, Quantity: int64(utf8.RuneCountInString(input))}, nil
 }
 
 func validSpeechVoice(raw json.RawMessage) bool {
@@ -233,8 +284,14 @@ func copySpeechHeaders(destination, source http.Header) {
 	}
 }
 
-func relaySpeech(writer http.ResponseWriter, source io.Reader, maximum int64, expected ...int64) error {
+type speechStreamResult struct {
+	Bytes  int64
+	SHA256 [32]byte
+}
+
+func relaySpeech(writer http.ResponseWriter, source io.Reader, maximum int64, expected ...int64) (speechStreamResult, error) {
 	limited := &io.LimitedReader{R: source, N: maximum}
+	digest := sha256.New()
 	buffer := make([]byte, 32*1024)
 	var total int64
 	for {
@@ -243,37 +300,64 @@ func relaySpeech(writer http.ResponseWriter, source io.Reader, maximum int64, ex
 			total += int64(count)
 			written, writeErr := writer.Write(buffer[:count])
 			if writeErr != nil || written != count {
-				return errSpeechStreamWrite
+				return speechStreamResult{}, errSpeechStreamWrite
 			}
+			_, _ = digest.Write(buffer[:count])
 			_ = http.NewResponseController(writer).Flush()
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
 		if readErr != nil {
-			return readErr
+			return speechStreamResult{}, readErr
 		}
 		if limited.N == 0 {
 			break
 		}
 	}
 	if len(expected) > 0 && expected[0] >= 0 && total != expected[0] {
-		return io.ErrUnexpectedEOF
+		return speechStreamResult{}, io.ErrUnexpectedEOF
 	}
 	var extra [1]byte
 	if count, readErr := source.Read(extra[:]); count > 0 {
-		return errSpeechStreamTooLarge
+		return speechStreamResult{}, errSpeechStreamTooLarge
 	} else if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return readErr
+		return speechStreamResult{}, readErr
 	}
-	return nil
+	var sum [32]byte
+	copy(sum[:], digest.Sum(nil))
+	return speechStreamResult{Bytes: total, SHA256: sum}, nil
 }
 
-func (handler *SpeechHandler) writeProviderError(writer http.ResponseWriter, response *http.Response) {
+func (handler *SpeechHandler) beginCharge(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route audiooperation.Model, envelope speechEnvelope, body []byte) (audiobilling.Charge, bool) {
+	if handler.billing == nil {
+		return audiobilling.Charge{}, true
+	}
+	key := r.Header.Get("Idempotency-Key")
+	if !idempotency.Valid(key) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "valid Idempotency-Key is required")
+		return audiobilling.Charge{}, false
+	}
+	fingerprint := idempotency.Fingerprint("openai", audiooperation.Speech, route.ID, route.ChannelID, "application/json", body)
+	c, err := handler.billing.Begin(r.Context(), audiobilling.BeginRequest{RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint, Quantity: envelope.Quantity})
+	if err == nil {
+		return c, true
+	}
+	status, code := http.StatusServiceUnavailable, "billing_unavailable"
+	if errors.Is(err, audiobilling.ErrConflict) || errors.Is(err, audiobilling.ErrPending) {
+		status, code = http.StatusConflict, "idempotency_conflict"
+	} else if errors.Is(err, audiobilling.ErrInvalid) {
+		status, code = http.StatusBadRequest, "invalid_request"
+	}
+	writeError(w, status, "invalid_request_error", code, "request could not be billed")
+	return audiobilling.Charge{}, false
+}
+
+func (handler *SpeechHandler) writeProviderError(writer http.ResponseWriter, response *http.Response) bool {
 	body, err := readBounded(response.Body, min(handler.maximumRequestBytes, 1<<20))
 	if err != nil {
 		writeError(writer, http.StatusBadGateway, "server_error", "invalid_provider_response", "invalid provider response")
-		return
+		return false
 	}
 	if contentType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type")); parseErr == nil && (contentType == "application/json" || contentType == "text/plain") {
 		writer.Header().Set("Content-Type", contentType)
@@ -283,6 +367,7 @@ func (handler *SpeechHandler) writeProviderError(writer http.ResponseWriter, res
 	}
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(body)
+	return true
 }
 
 func (handler *SpeechHandler) writeExecutorError(writer http.ResponseWriter, err error) {

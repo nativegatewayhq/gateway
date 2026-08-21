@@ -116,7 +116,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_GEMINI_LLM_MODEL_LIMITS` | unset | Comma-separated `model:maximum_input:maximum_output` token bounds; required for every enabled Gemini LLM model when billing is required |
 | `GATEWAY_OPENAI_IMAGES_REQUEST_TIMEOUT` | `2m` | OpenAI/xAI image request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_IMAGES_MAX_REQUEST_BODY_BYTES` | `1048576` | Positive OpenAI Images JSON body limit up to 1 MiB |
-| `GATEWAY_OPENAI_SPEECH_MODELS` | unset | Comma-separated OpenAI text-to-speech models; enables native `POST /v1/audio/speech` only in BYOK mode |
+| `GATEWAY_OPENAI_SPEECH_MODELS` | unset | Comma-separated OpenAI text-to-speech models; enables native `POST /v1/audio/speech` |
 | `GATEWAY_OPENAI_SPEECH_REQUEST_TIMEOUT` | `2m` | Complete OpenAI Speech request timeout; maximum `10m` |
 | `GATEWAY_OPENAI_SPEECH_STREAM_IDLE_TIMEOUT` | `30s` | Maximum silence between upstream audio reads; maximum `10m` |
 | `GATEWAY_OPENAI_SPEECH_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum native Speech JSON request body |
@@ -326,7 +326,21 @@ audio.stream_to_file("speech.mp3")
 
 The Gateway validates one bounded JSON object, exact model authorization, non-empty input and a built-in string or custom voice ID. Unknown future request fields are preserved. The service credential is replaced at the fixed OpenAI origin, and successful audio is copied in bounded chunks without buffering the complete file. Only safe content headers are returned; Provider request IDs, cookies, credentials, input text, voice IDs and audio bytes are never logged.
 
-Declared and streamed response sizes, idle/complete timeouts and audio MIME types fail closed. A Provider HTTP response, timeout, reset, invalid stream or client write failure never triggers a second speech generation. Speech is rejected at configuration load when `GATEWAY_BILLING_MODE=required`; Wallet settlement is intentionally owned by the next Speech billing plan.
+Declared and streamed response sizes, idle/complete timeouts and audio MIME types fail closed. A Provider HTTP response, timeout, reset, invalid stream or client write failure never triggers a second speech generation.
+
+In billing-required mode, publish a verified immutable character price before enabling traffic. Only `openai-speech-input-character-v1` is accepted; quantity is the exact Unicode scalar count of `input`, and cost/sale are ceiling-divided `USD_TICKS` per million characters. Every request requires `Idempotency-Key` because generated audio is deliberately not retained for replay.
+
+```bash
+gateway-audio-price \
+  -channel-id channel_00000000000000000000000000000001 \
+  -model tts-1 \
+  -publication-key openai-tts-1-2026-08 \
+  -effective-from 2026-08-01T00:00:00Z \
+  -cost 15000000 \
+  -sale 18000000
+```
+
+Wallet, hierarchical quota and Provider spend-cap capacity are reserved atomically before dispatch. A complete bounded binary stream is captured exactly once using only safe headers, byte count and SHA-256 evidence. Known non-2xx responses release the reservation; timeout, reset, invalid MIME/length, settlement failure and client disconnect retain it in reconciliation. Input, voice and audio content are not persisted.
 
 ### Anthropic Messages foundation
 

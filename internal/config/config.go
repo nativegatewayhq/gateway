@@ -769,9 +769,6 @@ func Load(lookup LookupEnv) (Config, error) {
 			}
 		}
 	}
-	if cfg.BillingMode == BillingRequired && len(cfg.OpenAISpeechModels) > 0 {
-		return Config{}, fmt.Errorf("GATEWAY_OPENAI_SPEECH_MODELS: speech billing is required before enabling models")
-	}
 	if cfg.BillingMode == BillingRequired && len(cfg.OpenAIResponsesModels) > 0 {
 		if len(cfg.OpenAIResponsesModelLimits) != len(cfg.OpenAIResponsesModels) {
 			return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS: every paid Responses model requires limits")

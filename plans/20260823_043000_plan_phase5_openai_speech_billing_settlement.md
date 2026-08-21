@@ -1,9 +1,9 @@
 ---
 id: gateway-20260823-055
 title: Phase 5 OpenAI Speech Character Pricing and Settlement
-status: accepted
+status: completed
 created_at: 2026-08-23T04:30:00+09:00
-updated_at: 2026-08-23T04:30:00+09:00
+updated_at: 2026-08-23T06:20:00+09:00
 owners:
   - gateway
 initiative: phase-5-openai-speech-billing-settlement
@@ -194,19 +194,23 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] verified input-character price만 publish·dispatch할 수 있음
-- [ ] Unicode quantity와 integer cost/sale/margin이 정확하고 immutable함
-- [ ] Provider dispatch 전에 Wallet·quota·spend cap이 원자적으로 예약됨
-- [ ] complete audio stream만 exactly-once Capture됨
-- [ ] known non-2xx는 Release되고 uncertain/commit 후 실패는 reservation을 유지함
-- [ ] duplicate idempotency request가 Provider·Ledger를 재실행하지 않음
-- [ ] input/voice/audio/credential이 DB·log·telemetry에 노출되지 않음
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README, CLI와 멀티레포 handoff가 갱신됨
+- [x] verified input-character price만 publish·dispatch할 수 있음
+- [x] Unicode quantity와 integer cost/sale/margin이 정확하고 immutable함
+- [x] Provider dispatch 전에 Wallet·quota·spend cap이 원자적으로 예약됨
+- [x] complete audio stream만 exactly-once Capture됨
+- [x] known non-2xx는 Release되고 uncertain/commit 후 실패는 reservation을 유지함
+- [x] duplicate idempotency request가 Provider·Ledger를 재실행하지 않음
+- [x] input/voice/audio/credential이 DB·log·telemetry에 노출되지 않음
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README, CLI와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/gateway-go-cache make check`
+- `TEST_DATABASE_URL=... TEST_REDIS_URL=... make integration-test`
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/openai -count=1`
+- 격리 DB `gateway_plan055`, Redis DB 12에서 migration 49 및 동시 Begin/Capture/Release/Reconciliation 검증
+- `gateway-audio-price`, immutable character price, audio charge/event/reconciliation schema와 native Speech billing wiring 구현
 
 ## Rollback 계획
 
