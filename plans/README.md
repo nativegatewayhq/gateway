@@ -198,5 +198,6 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260823-056` | completed | [Phase 5 OpenAI Audio Transcriptions Native Multipart Foundation](./20260823_070000_plan_phase5_openai_audio_transcriptions_foundation.md) | `phase-5-openai-audio-transcriptions-foundation` |
 | `gateway-20260824-057` | completed | [Phase 5 OpenAI Transcription Duration and Token Pricing Settlement](./20260824_114500_plan_phase5_openai_transcription_billing_settlement.md) | `phase-5-openai-transcription-billing-settlement` |
 | `gateway-20260824-058` | completed | [Phase 5 OpenAI Audio Translations Native Multipart Foundation](./20260824_124308_plan_phase5_openai_audio_translations_foundation.md) | `phase-5-openai-audio-translations-foundation` |
+| `gateway-20260824-059` | accepted | [Phase 5 OpenAI Audio Translation Duration Pricing and Settlement](./20260824_130934_plan_phase5_openai_audio_translation_billing_settlement.md) | `phase-5-openai-audio-translation-billing-settlement` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
