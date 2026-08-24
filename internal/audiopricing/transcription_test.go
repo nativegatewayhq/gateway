@@ -50,3 +50,15 @@ func TestTranscriptionPriceStrategiesAreExclusive(t *testing.T) {
 		t.Fatal("per-dimension margin violation accepted")
 	}
 }
+
+func TestCanonicalTranscriptionPriceMatchesPostgresTimestampPrecision(t *testing.T) {
+	from := time.Date(2026, 8, 24, 3, 36, 21, 987654321, time.FixedZone("KST", 9*60*60))
+	until := from.Add(time.Hour)
+	p := canonicalTranscriptionPrice(TranscriptionPrice{EffectiveFrom: from, EffectiveUntil: &until})
+	if p.EffectiveFrom.Location() != time.UTC || p.EffectiveFrom.Nanosecond() != 987654000 {
+		t.Fatalf("effective_from=%s", p.EffectiveFrom)
+	}
+	if p.EffectiveUntil == nil || p.EffectiveUntil.Location() != time.UTC || p.EffectiveUntil.Nanosecond() != 987654000 {
+		t.Fatalf("effective_until=%v", p.EffectiveUntil)
+	}
+}

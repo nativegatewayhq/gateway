@@ -248,9 +248,12 @@ func canonicalTranscriptionPrice(p TranscriptionPrice) TranscriptionPrice {
 	if p.Currency == "" {
 		p.Currency = "USD_TICKS"
 	}
-	p.EffectiveFrom = p.EffectiveFrom.UTC()
+	// PostgreSQL timestamptz preserves microseconds. Canonicalize before both
+	// insertion and publication-key equality checks so a nanosecond-bearing
+	// caller can replay the same immutable publication exactly.
+	p.EffectiveFrom = p.EffectiveFrom.UTC().Truncate(time.Microsecond)
 	if p.EffectiveUntil != nil {
-		until := p.EffectiveUntil.UTC()
+		until := p.EffectiveUntil.UTC().Truncate(time.Microsecond)
 		p.EffectiveUntil = &until
 	}
 	return p
