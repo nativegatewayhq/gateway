@@ -64,9 +64,83 @@ func (manager *Manager) Transform(ctx context.Context, input TransformInput) (re
 		return manager.transformOpenAI(ctx, input)
 	case "gemini":
 		return manager.transformGemini(ctx, input)
+	case "replicate":
+		return manager.transformReplicate(ctx, input)
+	case "fal":
+		return manager.transformFal(ctx, input)
 	default:
 		return nil, ErrInvalidContent
 	}
+}
+
+func (manager *Manager) transformReplicate(ctx context.Context, input TransformInput) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	var output []json.RawMessage
+	if json.Unmarshal(input.Body, &envelope) != nil || json.Unmarshal(envelope["output"], &output) != nil || len(output) > manager.config.MaximumImages {
+		return nil, ErrInvalidContent
+	}
+	for index, raw := range output {
+		var assetURL string
+		var encoded struct {
+			MIMEType string `json:"mime_type"`
+			Base64   string `json:"base64"`
+		}
+		var collected *Collected
+		var err error
+		if json.Unmarshal(raw, &assetURL) == nil && assetURL != "" {
+			collected, err = manager.collector.Fetch(ctx, input.Provider, assetURL)
+		} else if json.Unmarshal(raw, &encoded) == nil && encoded.Base64 != "" {
+			collected, err = manager.collector.DecodeBase64(encoded.Base64, encoded.MIMEType)
+		} else {
+			return nil, ErrInvalidContent
+		}
+		if err != nil {
+			return nil, err
+		}
+		stored, err := manager.persist(ctx, input, index, collected)
+		_ = collected.Close()
+		if err != nil {
+			return nil, err
+		}
+		output[index], _ = json.Marshal(stored)
+	}
+	envelope["output"], _ = json.Marshal(output)
+	return json.Marshal(envelope)
+}
+
+func (manager *Manager) transformFal(ctx context.Context, input TransformInput) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	var images []map[string]json.RawMessage
+	if json.Unmarshal(input.Body, &envelope) != nil || json.Unmarshal(envelope["images"], &images) != nil || len(images) > manager.config.MaximumImages {
+		return nil, ErrInvalidContent
+	}
+	for index, image := range images {
+		var assetURL, encoded, contentType string
+		_ = json.Unmarshal(image["url"], &assetURL)
+		_ = json.Unmarshal(image["base64"], &encoded)
+		_ = json.Unmarshal(image["content_type"], &contentType)
+		var collected *Collected
+		var err error
+		if assetURL != "" {
+			collected, err = manager.collector.Fetch(ctx, input.Provider, assetURL)
+		} else if encoded != "" {
+			collected, err = manager.collector.DecodeBase64(encoded, contentType)
+		} else {
+			return nil, ErrInvalidContent
+		}
+		if err != nil {
+			return nil, err
+		}
+		stored, err := manager.persist(ctx, input, index, collected)
+		_ = collected.Close()
+		if err != nil {
+			return nil, err
+		}
+		image["url"], _ = json.Marshal(stored)
+		delete(image, "base64")
+	}
+	envelope["images"], _ = json.Marshal(images)
+	return json.Marshal(envelope)
 }
 
 func (manager *Manager) transformOpenAI(ctx context.Context, input TransformInput) ([]byte, error) {

@@ -44,6 +44,14 @@ func TestFalWebhookMetadataUsesBoundedRouteWithoutCapability(t *testing.T) {
 	}
 }
 
+func TestPluginWebhookMetadataUsesBoundedRouteWithoutCapability(t *testing.T) {
+	request := httptest.NewRequest("POST", "https://gateway.example/internal/webhooks/plugin/job_00000000000000000000000000000000/whk_secretcapability", nil)
+	protocol, operation, route := requestMetadata(request)
+	if protocol != "plugin" || operation != "image.generate" || route != "/internal/webhooks/plugin/{job}/{token}" || boundedRoute(route) != route || strings.Contains(route, "secretcapability") {
+		t.Fatalf("metadata=%s/%s/%s", protocol, operation, route)
+	}
+}
+
 func TestOpenAIChatMetadataIsBounded(t *testing.T) {
 	request := httptest.NewRequest("POST", "https://gateway.example/v1/chat/completions", nil)
 	protocol, operation, route := requestMetadata(request)

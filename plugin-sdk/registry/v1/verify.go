@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 )
@@ -66,10 +67,26 @@ func VerifyAdmission(envelope Envelope, trust TrustPolicy, signedAt time.Time, e
 	}
 	canonical, err := CanonicalStatement(statement)
 	predicate := statement.Predicate
-	if err != nil || !bytes.Equal(canonical, payload) || predicate.PluginID != expected.PluginID || predicate.PluginVersion != expected.PluginVersion || predicate.Platform != expected.Platform || predicate.ManifestDigest != "sha256:"+expected.ManifestDigestHex() || predicate.GatewayCompatibility != expected.Manifest.Manifest.GatewayCompatibility || !manifest.IsCompatible(predicate.GatewayCompatibility, expected.GatewayVersion) {
+	expectedRuntime := manifest.ExecutionContract(expected.Manifest)
+	expectedSchema := RuntimeSchema
+	if expectedRuntime == AsyncRuntimeSDK {
+		expectedSchema = AsyncRuntimeSchema
+	}
+	if err != nil || !bytes.Equal(canonical, payload) || predicate.PluginID != expected.PluginID || predicate.PluginVersion != expected.PluginVersion || predicate.Platform != expected.Platform || predicate.ManifestDigest != "sha256:"+expected.ManifestDigestHex() || predicate.GatewayCompatibility != expected.Manifest.Manifest.GatewayCompatibility || predicate.RuntimeSDK != expectedRuntime || predicate.RuntimeSchema != expectedSchema || !manifest.IsCompatible(predicate.GatewayCompatibility, expected.GatewayVersion) {
 		return VerifiedAdmission{}, ErrInvalid
 	}
 	return VerifiedAdmission{Statement: statement, EnvelopeDigest: expected.EnvelopeDigest, PayloadDigest: Digest(payload)}, nil
+}
+
+func VerifyAsyncConformanceReport(admission VerifiedAdmission, report asyncconformance.Report) error {
+	if admission.Statement.Predicate.Conformance.SchemaVersion != asyncconformance.ReportSchema || admission.Statement.Predicate.RuntimeSDK != AsyncRuntimeSDK || report.PluginID != admission.Statement.Predicate.PluginID || report.PluginVersion != admission.Statement.Predicate.PluginVersion || "sha256:"+report.ManifestDigest != admission.Statement.Predicate.ManifestDigest || report.Outcome != "pass" {
+		return ErrInvalid
+	}
+	body, err := asyncconformance.CanonicalReport(report)
+	if err != nil || Digest(body) != admission.Statement.Predicate.Conformance.ReportDigest || asyncconformance.RequiredChecksDigest() != admission.Statement.Predicate.Conformance.RequiredChecksDigest {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func VerifyConformanceReport(admission VerifiedAdmission, report conformance.Report) error {

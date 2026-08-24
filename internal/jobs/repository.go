@@ -501,7 +501,9 @@ func webhookTokenDigest(secret []byte, token string) []byte {
 	return mac.Sum(nil)
 }
 
-func validWebhookProvider(provider string) bool { return provider == "replicate" || provider == "fal" }
+func validWebhookProvider(provider string) bool {
+	return provider == "replicate" || provider == "fal" || provider == "plugin"
+}
 
 func (repository *Repository) Reschedule(ctx context.Context, lease Lease, next time.Time, category string) error {
 	if next.IsZero() || !validCategory(category) {
@@ -765,7 +767,7 @@ func validOwner(owner joboperation.Owner) bool {
 	return owner.OrganizationID != "" && owner.ProjectID != "" && owner.APIKeyID != "" && len(owner.OrganizationID) <= 128 && len(owner.ProjectID) <= 128 && len(owner.APIKeyID) <= 200
 }
 func validCreate(request CreateRequest) bool {
-	return validOwner(request.Owner) && request.RequestID != "" && len(request.RequestID) <= 128 && request.Protocol != "" && request.Protocol == strings.ToLower(request.Protocol) && len(request.Protocol) <= 40 && request.Operation != "" && request.Operation == strings.ToLower(request.Operation) && len(request.Operation) <= 80 && strings.TrimSpace(request.Model) == request.Model && request.Model != "" && len(request.Model) <= 200 && request.Provider != "" && request.Provider == strings.ToLower(request.Provider) && len(request.Provider) <= 40 && request.ChannelID != "" && len(request.IdempotencyKey) <= 256 && (request.IdempotencyKey == "" || request.Fingerprint != ([32]byte{})) && (request.EstimatedUsage == nil || joboperation.ValidEstimatedUsage(*request.EstimatedUsage)) && (!request.ManagedResultRequired || request.Protocol == "runway")
+	return validOwner(request.Owner) && request.RequestID != "" && len(request.RequestID) <= 128 && request.Protocol != "" && request.Protocol == strings.ToLower(request.Protocol) && len(request.Protocol) <= 40 && request.Operation != "" && request.Operation == strings.ToLower(request.Operation) && len(request.Operation) <= 80 && strings.TrimSpace(request.Model) == request.Model && request.Model != "" && len(request.Model) <= 200 && request.Provider != "" && request.Provider == strings.ToLower(request.Provider) && len(request.Provider) <= 40 && request.ChannelID != "" && len(request.IdempotencyKey) <= 256 && (request.IdempotencyKey == "" || request.Fingerprint != ([32]byte{})) && (request.EstimatedUsage == nil || joboperation.ValidEstimatedUsage(*request.EstimatedUsage)) && (!request.ManagedResultRequired || request.Protocol == "runway" || request.Protocol == "replicate" || request.Protocol == "fal")
 }
 func validCategory(value string) bool {
 	return joboperation.ValidFailureCategory(value)

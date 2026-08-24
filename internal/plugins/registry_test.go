@@ -1,6 +1,9 @@
 package plugins
 
 import (
+	"context"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,6 +14,16 @@ import (
 func validated(t *testing.T, id, protocol string) manifest.Validated {
 	t.Helper()
 	body := []byte(`{"schema_version":"nativegateway.provider/v1","id":"` + id + `","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"sidecar","auth_secret_ref":"token"},"models":[{"id":"example-image-v1","protocols":["` + protocol + `"],"operations":["image.generate"],"capabilities":{"media_type":"application/json","output":["base64"],"maximum_images":2}}]}`)
+	value, err := manifest.Parse(body, "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func validatedAsync(t *testing.T, id, protocol string, callback bool) manifest.Validated {
+	t.Helper()
+	body := []byte(`{"schema_version":"nativegateway.provider/v1","id":"` + id + `","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"sidecar","auth_secret_ref":"token"},"models":[{"id":"example-async-image-v1","protocols":["` + protocol + `"],"operations":["image.generate"],"capabilities":{"media_type":"application/json","output":["url"],"maximum_images":2},"async":{"contract":"async/v1","callback":` + strconv.FormatBool(callback) + `}}]}`)
 	value, err := manifest.Parse(body, "0.1.0")
 	if err != nil {
 		t.Fatal(err)
@@ -38,6 +51,23 @@ func TestRegistryProducesStableImmutableRoute(t *testing.T) {
 	routes[0].Owner = "changed"
 	if registry.Routes()[0].Owner != "provider.example" {
 		t.Fatal("registry route mutated")
+	}
+}
+
+func TestRegistryPublishesAsyncBindingWithoutSyncExecution(t *testing.T) {
+	cfg := testConfig()
+	cfg.ResultOrigins = map[string][]string{"provider.async-example": {"https://assets.example.com"}}
+	registry, err := NewRegistry([]manifest.Validated{validatedAsync(t, "provider.async-example", "replicate", true)}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := registry.Bindings()[0]
+	if !binding.Async || !binding.Callback || !registry.SupportsAsyncProtocol("replicate") || registry.SupportsAsyncProtocol("openai") {
+		t.Fatalf("async binding = %#v", binding)
+	}
+	client := NewClient(registry)
+	if _, err = client.Execute(context.Background(), binding.ChannelID, "request", "replicate", ImageInput{Prompt: "x", Images: 1}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("sync execution accepted async binding: %v", err)
 	}
 }
 

@@ -43,6 +43,7 @@ type WebhookConfig struct {
 	PublicBaseURL  string
 	BindingTTL     time.Duration
 	CallbackSecret []byte
+	EnabledChannel func(string) bool
 }
 
 type ServiceConfig struct {
@@ -107,7 +108,7 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 		}
 		return joboperation.Job{}, err
 	}
-	if webhook, enabled := service.config.Webhooks[created.Provider]; enabled {
+	if webhook, enabled := service.config.Webhooks[created.Provider]; enabled && (webhook.EnabledChannel == nil || webhook.EnabledChannel(created.ChannelID)) {
 		injectable, ok := payload.(WebhookPayload)
 		if !ok {
 			return service.handleSubmitError(ctx, created, attempt, predispatchFailure("webhook payload unavailable"))

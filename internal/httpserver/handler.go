@@ -33,6 +33,7 @@ type Routes struct {
 	ReplicateWebhook     http.Handler
 	Fal                  http.Handler
 	FalWebhook           http.Handler
+	PluginWebhook        http.Handler
 	Runway               http.Handler
 	Management           http.Handler
 }
@@ -104,6 +105,9 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	}
 	if len(routeSets) > 0 && routeSets[0].FalWebhook != nil {
 		mux.Handle("/internal/webhooks/fal/", routeSets[0].FalWebhook)
+	}
+	if len(routeSets) > 0 && routeSets[0].PluginWebhook != nil {
+		mux.Handle("/internal/webhooks/plugin/", routeSets[0].PluginWebhook)
 	}
 	if len(routeSets) > 0 && routeSets[0].Management != nil {
 		mux.Handle("/gateway/v1/jobs", routeSets[0].Management)

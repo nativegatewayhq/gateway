@@ -1,0 +1,27 @@
+{
+  "schema_version": "nativegateway.provider/v1",
+  "id": "provider.async-example",
+  "version": "1.0.0",
+  "gateway_compatibility": ">=0.1.0 <1.0.0",
+  "transport": {
+    "kind": "http-sidecar",
+    "endpoint_ref": "async-sidecar",
+    "auth_secret_ref": "async-sidecar-token"
+  },
+  "models": [
+    {
+      "id": "example-async-image-v1",
+      "protocols": ["replicate"],
+      "operations": ["image.generate"],
+      "capabilities": {
+        "media_type": "application/json",
+        "output": ["base64"],
+        "maximum_images": 2
+      },
+      "async": {
+        "contract": "async/v1",
+        "callback": true
+      }
+    }
+  ]
+}

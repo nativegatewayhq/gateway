@@ -213,6 +213,10 @@ type Config struct {
 	PluginRegistryAdmissionDir      string
 	PluginRegistryPlatform          string
 	PluginRegistryMinimumSequence   uint64
+	PluginCallbackSecrets           [][]byte
+	PluginCallbackTolerance         time.Duration
+	PluginCallbackBindingTTL        time.Duration
+	PluginCallbackBodyBytes         int64
 }
 type ChatModelLimit struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 type ChatRoute struct {
@@ -349,6 +353,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		PluginMode:                      PluginDisabled,
 		PluginRegistryMode:              PluginRegistryDisabled,
 		PluginRegistryMinimumSequence:   1,
+		PluginCallbackTolerance:         defaultWebhookTolerance,
+		PluginCallbackBindingTTL:        defaultWebhookBindingTTL,
+		PluginCallbackBodyBytes:         2 << 20,
 		Plugins:                         plugins.Config{Timeout: 2 * time.Minute, MaximumRequestBytes: 2 << 20, MaximumResponseBytes: 64 << 20, MaximumConcurrency: 16, EndpointOrigins: map[string]string{}, AuthSecrets: map[string]string{}, ResultOrigins: map[string][]string{}},
 	}
 
@@ -1777,6 +1784,39 @@ func loadPlugins(cfg *Config, lookup LookupEnv) error {
 			return fmt.Errorf("GATEWAY_PLUGIN_MAX_CONCURRENCY: must be between 1 and 4096")
 		}
 		cfg.Plugins.MaximumConcurrency = parsed
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_CALLBACK_SECRETS"); ok {
+		for _, part := range strings.Split(value, ",") {
+			secret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(part))
+			if err != nil || len(secret) != 32 {
+				return fmt.Errorf("GATEWAY_PLUGIN_CALLBACK_SECRETS: must contain one or two base64-encoded 32-byte secrets")
+			}
+			cfg.PluginCallbackSecrets = append(cfg.PluginCallbackSecrets, secret)
+		}
+		if len(cfg.PluginCallbackSecrets) < 1 || len(cfg.PluginCallbackSecrets) > 2 {
+			return fmt.Errorf("GATEWAY_PLUGIN_CALLBACK_SECRETS: must contain one or two base64-encoded 32-byte secrets")
+		}
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_CALLBACK_TOLERANCE"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration < time.Minute || duration > 15*time.Minute {
+			return fmt.Errorf("GATEWAY_PLUGIN_CALLBACK_TOLERANCE: must be between 1m and 15m")
+		}
+		cfg.PluginCallbackTolerance = duration
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_CALLBACK_BINDING_TTL"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration < time.Hour || duration > 30*24*time.Hour {
+			return fmt.Errorf("GATEWAY_PLUGIN_CALLBACK_BINDING_TTL: must be between 1h and 720h")
+		}
+		cfg.PluginCallbackBindingTTL = duration
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_CALLBACK_BODY_BYTES"); ok {
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || parsed < 1 || parsed > 128<<20 {
+			return fmt.Errorf("GATEWAY_PLUGIN_CALLBACK_BODY_BYTES: must be a positive bounded integer")
+		}
+		cfg.PluginCallbackBodyBytes = parsed
 	}
 	if cfg.PluginMode != PluginDisabled && (cfg.PluginManifestDir == "" || len(cfg.Plugins.EndpointOrigins) == 0 || len(cfg.Plugins.AuthSecrets) == 0) {
 		return fmt.Errorf("GATEWAY_PLUGIN_*: enabled plugin mode requires manifest directory, endpoints, and auth secret references")

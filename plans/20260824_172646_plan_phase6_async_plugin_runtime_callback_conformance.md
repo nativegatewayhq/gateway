@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-065
 title: Phase 6 Public Async Plugin Runtime, Signed Callback, and Conformance
-status: accepted
+status: completed
 created_at: 2026-08-24T17:26:46+09:00
-updated_at: 2026-08-24T17:26:46+09:00
+updated_at: 2026-08-24T18:14:21+09:00
 owners:
   - gateway
 initiative: phase-6-async-plugin-runtime
@@ -254,23 +254,29 @@ go run ./cmd/gateway-plugin-conformance -profile async-v1 ...
 
 ## 완료 조건
 
-- [ ] manifest가 기존 sync digest/동작을 보존하면서 async Replicate/fal image capability를 strict 선언함
-- [ ] 외부 Adapter가 public SDK만으로 submit/poll/cancel과 signed callback을 구현함
-- [ ] Gateway Job ID와 opaque Provider Job ref가 public/durable 경계에서 분리됨
-- [ ] plugin-backed Replicate/fal native SDK 요청이 durable Job과 terminal native 결과로 수렴함
-- [ ] callback capability·HMAC·Job/channel/ref identity와 replay가 fail closed함
-- [ ] polling fallback, cancel, timeout과 재시작이 post-submit redispatch 없이 복구됨
-- [ ] partial success/failure/cancel/unknown usage가 기존 Wallet/Ledger 정책으로 정확히 한 번 정산됨
-- [ ] managed image와 immutable manifest/Registry/channel/Job/charge evidence가 보존됨
-- [ ] async conformance runner, report, fixtures와 standalone template가 제공됨
-- [ ] callback/ref/secret/tenant/content가 log·telemetry·report·DB 오류에 노출되지 않음
-- [ ] 기존 synchronous plugin, built-in Provider와 공식 OpenAI/Gemini/Replicate/fal SDK가 회귀하지 않음
-- [ ] unit/race/integration/SDK/public-module 검사가 통과함
-- [ ] README, CONTRIBUTING, examples, Makefile와 멀티레포 handoff가 갱신됨
+- [x] manifest가 기존 sync digest/동작을 보존하면서 async Replicate/fal image capability를 strict 선언함
+- [x] 외부 Adapter가 public SDK만으로 submit/poll/cancel과 signed callback을 구현함
+- [x] Gateway Job ID와 opaque Provider Job ref가 public/durable 경계에서 분리됨
+- [x] plugin-backed Replicate/fal native SDK 요청이 durable Job과 terminal native 결과로 수렴함
+- [x] callback capability·HMAC·Job/channel/ref identity와 replay가 fail closed함
+- [x] polling fallback, cancel, timeout과 재시작이 post-submit redispatch 없이 복구됨
+- [x] partial success/failure/cancel/unknown usage가 기존 Wallet/Ledger 정책으로 정확히 한 번 정산됨
+- [x] managed image와 immutable manifest/Registry/channel/Job/charge evidence가 보존됨
+- [x] async conformance runner, report, fixtures와 standalone template가 제공됨
+- [x] callback/ref/secret/tenant/content가 log·telemetry·report·DB 오류에 노출되지 않음
+- [x] 기존 synchronous plugin, built-in Provider와 공식 OpenAI/Gemini/Replicate/fal SDK가 회귀하지 않음
+- [x] unit/race/integration/SDK/public-module 검사가 통과함
+- [x] README, CONTRIBUTING, examples, Makefile와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과: fmt, vet, 전체 race unit test, 두 standalone public module dependency 격리와 모든 binary build.
+- 격리 PostgreSQL `gateway_plan065`와 Redis DB 15에서 전체 `make integration-test` 통과; 추가 plugin callback capability/replay durable CAS 통합 검사도 통과.
+- `go test -count=1 -tags=sdkconformance ./protocols/replicate ./protocols/fal` 통과: 공식 Replicate Python 1.0.7과 `@fal-ai/client` JavaScript SDK가 Base URL/Key만 바꿔 plugin candidate를 선택함.
+- `go test -count=1 -tags=sdkconformance ./protocols/openai ./protocols/gemini` 통과: 기존 synchronous plugin과 공식 SDK 호환 유지.
+- `GOWORK=off go test -race ./plugin-sdk/...` 통과: async wire/report/fixture/Registry profile의 public package 격리 유지.
+- standalone `go-async-sidecar-template`에 `gateway-plugin-conformance -profile async-v1` 실행: health/auth, submit/poll/cancel, callback signature/tamper와 wire failure 14개 check 모두 pass.
+- migration `000035_plugin_async_webhooks.sql`, bounded plugin webhook telemetry route와 managed Replicate/fal image transformation 검사가 통과함.
 
 ## Rollback 계획
 

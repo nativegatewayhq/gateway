@@ -121,6 +121,21 @@ func TestManagerTransformsGeminiImageAndPreservesTextParts(t *testing.T) {
 	}
 }
 
+func TestManagerTransformsAsyncNativeBase64Results(t *testing.T) {
+	for _, test := range []struct{ protocol, body string }{
+		{"replicate", `{"id":"job","output":[{"mime_type":"image/png","base64":"` + testPNGBase64() + `"}]}`},
+		{"fal", `{"request_id":"job","images":[{"content_type":"image/png","base64":"` + testPNGBase64() + `"}]}`},
+	} {
+		t.Run(test.protocol, func(t *testing.T) {
+			manager, objects := newManagerForTest(t)
+			result, err := manager.Transform(context.Background(), TransformInput{Protocol: test.protocol, Provider: "plugin", ChannelID: "channel_async", RequestID: "request_async", ChargeID: "charge_async", Body: []byte(test.body)})
+			if err != nil || len(objects.puts) != 1 || !strings.Contains(string(result), "https://cdn.example.test/") || strings.Contains(string(result), "base64") {
+				t.Fatalf("result=%s puts=%d err=%v", result, len(objects.puts), err)
+			}
+		})
+	}
+}
+
 func TestManagerReplayUsesAvailableAssetWithoutSecondPut(t *testing.T) {
 	manager, objects := newManagerForTest(t)
 	input := TransformInput{Protocol: "openai", Provider: "openai", ChannelID: "channel_00000000000000000000000000000001", RequestID: "request_replay", Body: []byte(`{"data":[{"b64_json":"` + testPNGBase64() + `"}]}`)}

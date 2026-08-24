@@ -26,6 +26,7 @@ import (
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	joboperation "github.com/nativegatewayhq/gateway/operations/job"
 	providerfal "github.com/nativegatewayhq/gateway/providers/fal"
+	providerplugin "github.com/nativegatewayhq/gateway/providers/plugin"
 )
 
 type Authenticator interface {
@@ -55,7 +56,10 @@ type Handler struct {
 	availability     Availability
 	maximumBodyBytes int64
 	publicBase       string
+	managedResults   bool
 }
+
+func (handler *Handler) SetManagedResults(enabled bool) { handler.managedResults = enabled }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, service JobService, chargeBilling Billing, availability Availability, maximumBodyBytes int64, publicBase string) *Handler {
 	return &Handler{logger: logger, authenticator: authenticator, models: models, jobs: service, billing: chargeBilling, availability: availability, maximumBodyBytes: maximumBodyBytes, publicBase: strings.TrimSuffix(publicBase, "/")}
@@ -137,7 +141,7 @@ func (handler *Handler) submit(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusUnprocessableEntity, "num_images is not supported for this model")
 		return
 	}
-	if selected.Provider != providercredentials.Fal || (handler.availability != nil && !handler.availability.ConfiguredChannel(request.Context(), selected.ChannelID, selected.Provider)) {
+	if (selected.Provider != providercredentials.Fal && selected.Provider != providercredentials.Plugin) || (handler.availability != nil && !handler.availability.ConfiguredChannel(request.Context(), selected.ChannelID, selected.Provider)) {
 		writeError(writer, http.StatusServiceUnavailable, "Queue provider unavailable")
 		return
 	}
@@ -160,7 +164,11 @@ func (handler *Handler) submit(writer http.ResponseWriter, request *http.Request
 		chargeID = charge.ID
 	}
 	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
-	value, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "fal", Operation: "image.generate", Model: model, Provider: string(selected.Provider), ChannelID: selected.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: usage}, providerfal.SubmitPayload{Body: body})
+	payload := any(providerfal.SubmitPayload{Body: body})
+	if selected.Provider == providercredentials.Plugin {
+		payload = providerplugin.WrapAsyncPayload(payload)
+	}
+	value, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "fal", Operation: "image.generate", Model: model, Provider: string(selected.Provider), ChannelID: selected.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: usage, ManagedResultRequired: handler.managedResults}, payload)
 	if err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "Queue request could not be submitted")
 		return
@@ -178,10 +186,6 @@ func (handler *Handler) status(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	writer.Header().Set("X-Fal-Request-Id", value.ID)
-	if !value.Status.Terminal() && len(value.Snapshot.Body) > 0 && json.Valid(value.Snapshot.Body) {
-		writeJSONBytes(writer, http.StatusOK, value.Snapshot.Body)
-		return
-	}
 	response := map[string]any{"status": "IN_QUEUE", "request_id": value.ID, "queue_position": 0}
 	switch value.Status {
 	case joboperation.Processing, joboperation.Reconciling:

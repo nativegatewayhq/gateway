@@ -30,6 +30,12 @@ func (modelsStub) Candidates(_, model string, _ imageoperation.Operation, _ imag
 	return []imageoperation.RoutingDecision{{Protocol: "fal", Model: model, Provider: providercredentials.Fal, ChannelID: "channel_00000000000000000000000000000005", Policy: imageoperation.Fixed, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 10, RequestExtractor: "fal-input-num_images-v1", ResultExtractor: "fal-output-v1"}}}, nil
 }
 
+type pluginModelsStub struct{}
+
+func (pluginModelsStub) Candidates(_, model string, _ imageoperation.Operation, _ imageoperation.MediaType) ([]imageoperation.RoutingDecision, error) {
+	return []imageoperation.RoutingDecision{{Protocol: "fal", Model: model, Provider: providercredentials.Plugin, ChannelID: "channel_plugin", Policy: imageoperation.Fixed, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 2, RequestExtractor: "fal-input-num_images-v1", ResultExtractor: "plugin-image-output-v1"}}}, nil
+}
+
 type jobsStub struct {
 	value         joboperation.Job
 	submits, gets int
@@ -97,6 +103,16 @@ func TestSubmitPassesMaximumOutputUsageToJob(t *testing.T) {
 	response := request(testHandler(service), http.MethodPost, "/fal-ai/flux/dev", `{"prompt":"cat","num_images":5}`)
 	if response.Code != http.StatusOK || service.request.EstimatedUsage == nil || service.request.EstimatedUsage.Quantity != 5 {
 		t.Fatalf("status=%d usage=%+v body=%s", response.Code, service.request.EstimatedUsage, response.Body.String())
+	}
+}
+func TestPluginRouteUsesDurableJobAndManagedResult(t *testing.T) {
+	service := &jobsStub{}
+	principal := apikey.Principal{APIKeyID: "key", ProjectID: "project", OrganizationID: "org"}
+	handler := NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authStub{principal}, pluginModelsStub{}, service, nil, nil, 1<<20, "https://gateway.example")
+	handler.SetManagedResults(true)
+	response := request(handler, http.MethodPost, "/fal-ai/example-async-image-v1", `{"prompt":"cat"}`)
+	if response.Code != http.StatusOK || service.request.Provider != "plugin" || !service.request.ManagedResultRequired {
+		t.Fatalf("status=%d request=%#v", response.Code, service.request)
 	}
 }
 

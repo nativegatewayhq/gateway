@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 )
@@ -43,8 +44,18 @@ func VerifyReportDirectory(snapshot Snapshot, directory string) error {
 		if !ok || Digest(body) != digest {
 			return ErrInvalid
 		}
-		report, decodeErr := conformance.DecodeReport(bytes.NewReader(body), MaximumConformanceReportBytes)
-		if decodeErr != nil || VerifyConformanceReport(admission, report) != nil {
+		switch admission.Statement.Predicate.Conformance.SchemaVersion {
+		case conformance.ReportSchema:
+			report, decodeErr := conformance.DecodeReport(bytes.NewReader(body), MaximumConformanceReportBytes)
+			if decodeErr != nil || VerifyConformanceReport(admission, report) != nil {
+				return ErrInvalid
+			}
+		case asyncconformance.ReportSchema:
+			report, decodeErr := asyncconformance.DecodeReport(bytes.NewReader(body), MaximumConformanceReportBytes)
+			if decodeErr != nil || VerifyAsyncConformanceReport(admission, report) != nil {
+				return ErrInvalid
+			}
+		default:
 			return ErrInvalid
 		}
 		used[digest] = true

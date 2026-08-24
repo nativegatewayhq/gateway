@@ -340,6 +340,38 @@ func TestSignedWebhookBindingReplayAndProviderIdentity(t *testing.T) {
 	}
 }
 
+func TestPluginWebhookCapabilityAndReplayUseDurableCAS(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	request.Provider, request.ChannelID = "plugin", "channel_00000000000000000000000000000004"
+	ctx := context.Background()
+	created, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := repository.BeginSubmit(ctx, owner, created.ID, "plugin-submit", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := testWebhookCallbackSecret()
+	binding, err := repository.CreateWebhookBinding(ctx, created.ID, "plugin", request.ChannelID, secret, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRef := "plugin:job-1"
+	if _, err = repository.ConfirmSubmit(ctx, owner, attempt, providerRef, joboperation.Processing, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	observation := joboperation.Observation{Status: joboperation.Canceled, ProviderJobID: providerRef, FailureCategory: "canceled", Usage: &joboperation.Usage{Dimension: "output", Unit: "image", Quantity: 0, Provenance: "webhook", ExtractorVersion: "plugin-image-output-v1"}}
+	delivery := WebhookObservation{JobID: created.ID, Provider: "plugin", DeliveryID: "delivery-plugin-" + request.RequestID, Token: binding.Token, ProviderJobID: providerRef, Observation: observation, CallbackSecret: secret}
+	terminal, replay, err := repository.ApplyWebhook(ctx, delivery)
+	if err != nil || replay || terminal.Status != joboperation.Canceled {
+		t.Fatalf("terminal=%+v replay=%v err=%v", terminal, replay, err)
+	}
+	if _, replay, err = repository.ApplyWebhook(ctx, delivery); err != nil || !replay {
+		t.Fatalf("replay=%v err=%v", replay, err)
+	}
+}
+
 func TestWebhookAndPollRaceConvergesOnOneTerminalEvent(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	request.Provider = "replicate"

@@ -39,6 +39,13 @@ type Client struct {
 	semaphore chan struct{}
 }
 
+func (client *Client) Binding(channelID string) (Binding, bool) {
+	if client == nil || client.registry == nil {
+		return Binding{}, false
+	}
+	return client.registry.Binding(channelID)
+}
+
 func (client *Client) Health(ctx context.Context) error {
 	if client == nil || client.registry == nil {
 		return ErrUnavailable
@@ -100,7 +107,7 @@ func (client *Client) Execute(ctx context.Context, channelID, requestID, protoco
 		return ExecuteResponse{}, ErrInvalidRequest
 	}
 	binding, ok := client.registry.Binding(channelID)
-	if !ok || binding.Protocol != protocol || input.Images > binding.MaximumImages {
+	if !ok || binding.Async || binding.Protocol != protocol || input.Images > binding.MaximumImages {
 		return ExecuteResponse{}, ErrInvalidRequest
 	}
 	ctx, cancel := context.WithTimeout(ctx, client.registry.config.Timeout)

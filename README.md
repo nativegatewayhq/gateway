@@ -47,8 +47,9 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 
 ## Configuration
 
-Provider plugins are disabled by default. The first version supports isolated
-HTTP sidecars for synchronous `image.generate`; see
+Provider plugins are disabled by default. Versioned HTTP sidecars support
+synchronous OpenAI/Gemini and durable asynchronous Replicate/fal
+`image.generate`; see
 [`examples/plugin`](./examples/plugin) for the public versioned SDK, strict
 manifest contract, standalone Go template, black-box conformance CLI, mock
 server, and native OpenAI/Gemini usage contract.
@@ -114,6 +115,10 @@ server, and native OpenAI/Gemini usage contract.
 | `GATEWAY_PLUGIN_MAX_REQUEST_BYTES` | `2097152` | Maximum canonical sidecar request envelope; maximum 64 MiB |
 | `GATEWAY_PLUGIN_MAX_RESPONSE_BYTES` | `67108864` | Maximum canonical sidecar response envelope; maximum 128 MiB |
 | `GATEWAY_PLUGIN_MAX_CONCURRENCY` | `16` | Process-wide sidecar execution concurrency cap; maximum 4096 |
+| `GATEWAY_PLUGIN_CALLBACK_SECRETS` | unset | One active, or active and previous, comma-separated base64 32-byte purpose-specific callback HMAC keys; required by callback-capable async manifests |
+| `GATEWAY_PLUGIN_CALLBACK_TOLERANCE` | `5m` | Accepted async plugin callback timestamp window, from `1m` through `15m` |
+| `GATEWAY_PLUGIN_CALLBACK_BINDING_TTL` | `168h` | Per-Job callback capability lifetime, from `1h` through `720h` |
+| `GATEWAY_PLUGIN_CALLBACK_BODY_BYTES` | `2097152` | Maximum exact signed callback body; maximum 128 MiB |
 | `GATEWAY_FAL_JWKS_TIMEOUT` | `5s` | Bounded JWKS request timeout; maximum `1m` |
 | `GATEWAY_FAL_JWKS_CACHE_TTL` | `24h` | Maximum successful key cache lifetime; HTTP cache headers may shorten it |
 | `GATEWAY_FAL_JWKS_REFRESH_COOLDOWN` | `1m` | Minimum interval between signature-mismatch refresh attempts |

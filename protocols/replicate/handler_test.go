@@ -28,6 +28,12 @@ func (modelsStub) Candidates(_, model string, _ imageoperation.Operation, _ imag
 	return []imageoperation.RoutingDecision{{Protocol: "replicate", Model: model, Provider: providercredentials.Replicate, ChannelID: "channel_00000000000000000000000000000004", Policy: imageoperation.Fixed, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 10, RequestExtractor: "replicate-input-num_outputs-v1", ResultExtractor: "replicate-output-v1"}}}, nil
 }
 
+type pluginModelsStub struct{}
+
+func (pluginModelsStub) Candidates(_, model string, _ imageoperation.Operation, _ imageoperation.MediaType) ([]imageoperation.RoutingDecision, error) {
+	return []imageoperation.RoutingDecision{{Protocol: "replicate", Model: model, Provider: providercredentials.Plugin, ChannelID: "channel_plugin", Policy: imageoperation.Fixed, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 2, RequestExtractor: "replicate-input-num_outputs-v1", ResultExtractor: "plugin-image-output-v1"}}}, nil
+}
+
 type jobsStub struct {
 	value            joboperation.Job
 	submits, cancels int
@@ -89,6 +95,19 @@ func TestCreatePassesMaximumOutputUsageToJob(t *testing.T) {
 	testHandler(service).ServeHTTP(response, request)
 	if response.Code != http.StatusCreated || service.request.EstimatedUsage == nil || service.request.EstimatedUsage.Quantity != 4 {
 		t.Fatalf("status=%d usage=%+v body=%s", response.Code, service.request.EstimatedUsage, response.Body.String())
+	}
+}
+func TestPluginRouteUsesDurableJobAndManagedResult(t *testing.T) {
+	service := &jobsStub{}
+	handler := NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authStub{principal: apikey.Principal{APIKeyID: "key", ProjectID: "project", OrganizationID: "org"}}, pluginModelsStub{}, service, nil, nil, 1<<20, "https://gateway.example")
+	handler.SetManagedResults(true)
+	request := httptest.NewRequest(http.MethodPost, "/v1/predictions", strings.NewReader(`{"version":"example-async-image-v1","input":{"prompt":"cat"}}`))
+	request.Header.Set("Authorization", "Bearer service")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || service.request.Provider != "plugin" || !service.request.ManagedResultRequired {
+		t.Fatalf("status=%d request=%#v", response.Code, service.request)
 	}
 }
 func TestValidationRejectsWebhookAndInvalidWait(t *testing.T) {

@@ -37,6 +37,7 @@ type Binding struct {
 	BearerToken                                                  string
 	MaximumImages                                                int
 	Output                                                       string
+	Async, Callback                                              bool
 	ResultOrigins                                                map[string]struct{}
 	RegistrySequence                                             uint64
 	RegistryIndexDigest, RegistryEnvelopeDigest, AdmissionDigest [32]byte
@@ -128,7 +129,10 @@ func newRegistry(validated []manifest.Validated, config Config, snapshot *regist
 				if model.Capabilities.Output[0] == "url" && len(resultOrigins) == 0 {
 					return nil, ErrInvalidConfiguration
 				}
-				binding := Binding{PluginID: item.Manifest.ID, Version: item.Manifest.Version, Model: model.ID, Protocol: protocol, ChannelID: channelID, CandidateID: candidateID, ManifestDigest: item.Digest, Origin: origin, BearerToken: bearerToken, MaximumImages: model.Capabilities.MaximumImages, Output: model.Capabilities.Output[0], ResultOrigins: resultOrigins}
+				binding := Binding{PluginID: item.Manifest.ID, Version: item.Manifest.Version, Model: model.ID, Protocol: protocol, ChannelID: channelID, CandidateID: candidateID, ManifestDigest: item.Digest, Origin: origin, BearerToken: bearerToken, MaximumImages: model.Capabilities.MaximumImages, Output: model.Capabilities.Output[0], ResultOrigins: resultOrigins, Async: model.Async != nil}
+				if model.Async != nil {
+					binding.Callback = model.Async.Callback
+				}
 				if snapshot != nil {
 					binding.RegistrySequence = result.indexEvidence.Sequence
 					binding.RegistryIndexDigest = result.indexEvidence.IndexDigest
@@ -215,6 +219,44 @@ func (registry *Registry) Bindings() []Binding {
 func (registry *Registry) ConfiguredChannel(channelID string) bool {
 	_, ok := registry.Binding(channelID)
 	return ok
+}
+
+func (registry *Registry) SupportsAsyncProtocol(protocol string) bool {
+	if registry == nil {
+		return false
+	}
+	for _, binding := range registry.bindings {
+		if binding.Async && binding.Protocol == protocol {
+			return true
+		}
+	}
+	return false
+}
+
+func (registry *Registry) SupportsCallbacks() bool {
+	if registry == nil {
+		return false
+	}
+	for _, binding := range registry.bindings {
+		if binding.Async && binding.Callback {
+			return true
+		}
+	}
+	return false
+}
+
+func (registry *Registry) AsyncIdentity(pluginID, version, digest, protocol, model string) (Binding, bool) {
+	if registry == nil {
+		return Binding{}, false
+	}
+	var found Binding
+	matched := false
+	for _, binding := range registry.bindings {
+		if binding.Async && binding.PluginID == pluginID && binding.Version == version && binding.DigestHex() == digest && binding.Protocol == protocol && binding.Model == model {
+			found, matched = binding, true
+		}
+	}
+	return cloneBinding(found), matched
 }
 
 func cloneRoute(route imageoperation.ModelRoute) imageoperation.ModelRoute {
