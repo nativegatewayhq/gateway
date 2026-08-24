@@ -43,12 +43,21 @@ type ModelsHandler struct {
 	transcriptionPricing interface {
 		EstimateTranscription(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error)
 	}
+	translationPricing interface {
+		EstimateTranslation(context.Context, audiopricing.TranslationPriceRequest) (audiopricing.TranslationEstimate, error)
+	}
 }
 
 func (handler *ModelsHandler) SetTranscriptionPricing(pricing interface {
 	EstimateTranscription(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error)
 }) {
 	handler.transcriptionPricing = pricing
+}
+
+func (handler *ModelsHandler) SetTranslationPricing(pricing interface {
+	EstimateTranslation(context.Context, audiopricing.TranslationPriceRequest) (audiopricing.TranslationEstimate, error)
+}) {
+	handler.translationPricing = pricing
 }
 
 func NewModelsHandlerWithAllAudioOperations(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
@@ -274,6 +283,10 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 			available := configured[model.Provider]
 			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
 				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
+			}
+			if available && handler.translationPricing != nil {
+				_, priceErr := handler.translationPricing.EstimateTranslation(request.Context(), audiopricing.TranslationPriceRequest{ChannelID: model.ChannelID, Model: model.ID})
+				available = priceErr == nil
 			}
 			if available {
 				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})

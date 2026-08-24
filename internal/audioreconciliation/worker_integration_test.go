@@ -144,3 +144,74 @@ func TestWorkerSettlesCompleteEvidenceAndManualizesUnknownOutcome(t *testing.T) 
 		t.Fatalf("overbound task=%s err=%v", taskState, err)
 	}
 }
+
+func translationReconciliationFixture(t *testing.T) (*TranslationWorker, *audiobilling.TranslationService, *pgxpool.Pool) {
+	_, _, pool := reconciliationFixture(t)
+	prices, _ := audiopricing.New(pool, 0)
+	_, err := prices.PublishTranslation(context.Background(), audiopricing.TranslationPrice{ChannelID: "channel_00000000000000000000000000000001", Model: "whisper-1", CostPerMinute: 60, SalePerMinute: 120, MaximumDurationMilliseconds: 600_000, EffectiveFrom: time.Now().Add(-time.Hour)}, "translation-reconciliation-price")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := audiobilling.NewTranslationWithControls(pool, prices, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := NewTranslation(pool, service, "translation-test-worker", time.Minute, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return worker, service, pool
+}
+
+func translationReconciliationBegin(key string) audiobilling.TranslationBeginRequest {
+	return audiobilling.TranslationBeginRequest{RequestID: "translation-" + key, OrganizationID: "org_audio_reconcile", ProjectID: "project_audio_reconcile", APIKeyID: "key_audio_reconcile", Model: "whisper-1", ChannelID: "channel_00000000000000000000000000000001", IdempotencyKey: key, Fingerprint: [32]byte{6}}
+}
+
+func TestTranslationWorkerSettlesEvidenceAndManualizesUnknownOrOverbound(t *testing.T) {
+	worker, service, pool := translationReconciliationFixture(t)
+	ctx := context.Background()
+	recoverable, err := service.Begin(ctx, translationReconciliationBegin("recoverable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := audiobilling.TranslationEvidence{SchemaVersion: "openai-translation-duration-json-v1", DurationMilliseconds: 60_001, Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, SHA256: [32]byte{7}}
+	if err = service.MarkReconciling(ctx, recoverable.ID, "settlement_failed", &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if processed, runErr := worker.RunOne(ctx); runErr != nil || !processed {
+		t.Fatalf("processed=%t err=%v", processed, runErr)
+	}
+	var chargeState, taskState string
+	if err = pool.QueryRow(ctx, `SELECT c.state,r.state FROM audio_translation_charges c JOIN audio_translation_reconciliations r ON r.charge_id=c.id WHERE c.id=$1`, recoverable.ID).Scan(&chargeState, &taskState); err != nil || chargeState != "CAPTURED" || taskState != "RESOLVED" {
+		t.Fatalf("charge=%s task=%s err=%v", chargeState, taskState, err)
+	}
+	unknown, err := service.Begin(ctx, translationReconciliationBegin("unknown"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.MarkReconciling(ctx, unknown.ID, "executor_uncertain", nil); err != nil {
+		t.Fatal(err)
+	}
+	if processed, runErr := worker.RunOne(ctx); runErr != nil || !processed {
+		t.Fatalf("processed=%t err=%v", processed, runErr)
+	}
+	if err = pool.QueryRow(ctx, `SELECT state FROM audio_translation_reconciliations WHERE charge_id=$1`, unknown.ID).Scan(&taskState); err != nil || taskState != "MANUAL_REVIEW" {
+		t.Fatalf("unknown task=%s err=%v", taskState, err)
+	}
+	overbound, err := service.Begin(ctx, translationReconciliationBegin("overbound"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overboundEvidence := evidence
+	overboundEvidence.DurationMilliseconds = overbound.MaximumDurationMilliseconds + 1
+	overboundEvidence.SHA256 = [32]byte{8}
+	if err = service.MarkReconciling(ctx, overbound.ID, "duration_upper_bound_exceeded", &overboundEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if processed, runErr := worker.RunOne(ctx); runErr != nil || !processed {
+		t.Fatalf("processed=%t err=%v", processed, runErr)
+	}
+	if err = pool.QueryRow(ctx, `SELECT state FROM audio_translation_reconciliations WHERE charge_id=$1`, overbound.ID).Scan(&taskState); err != nil || taskState != "MANUAL_REVIEW" {
+		t.Fatalf("overbound task=%s err=%v", taskState, err)
+	}
+}

@@ -27,8 +27,13 @@ func (value availability) ConfiguredProviders() []providercredentials.ProviderID
 type channelAvailability map[string]bool
 
 type transcriptionPricingFunc func(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error)
+type translationPricingFunc func(context.Context, audiopricing.TranslationPriceRequest) (audiopricing.TranslationEstimate, error)
 
 func (function transcriptionPricingFunc) EstimateTranscription(ctx context.Context, request audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error) {
+	return function(ctx, request)
+}
+
+func (function translationPricingFunc) EstimateTranslation(ctx context.Context, request audiopricing.TranslationPriceRequest) (audiopricing.TranslationEstimate, error) {
 	return function(ctx, request)
 }
 
@@ -231,6 +236,23 @@ func TestModelsHandlerIncludesAuthorizedTranslationOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "translation-public" {
+		t.Fatalf("list=%+v", list)
+	}
+}
+
+func TestModelsHandlerHidesManagedTranslationWithoutActivePrice(t *testing.T) {
+	translations, _ := audiooperation.NewTranslationRegistry([]string{"translation-public"}, map[string]string{"translation-public": "whisper-1"}, nil)
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: audiooperation.Translation, Model: "translation-public"}}}
+	handler := NewModelsHandlerWithAllAudioOperations(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), nil, nil, nil, nil, nil, nil, translations, channelAvailability{"channel_00000000000000000000000000000001": true})
+	handler.SetTranslationPricing(translationPricingFunc(func(context.Context, audiopricing.TranslationPriceRequest) (audiopricing.TranslationEstimate, error) {
+		return audiopricing.TranslationEstimate{}, audiopricing.ErrUnavailable
+	}))
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 0 {
 		t.Fatalf("list=%+v", list)
 	}
 }

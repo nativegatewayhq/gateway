@@ -1,5 +1,5 @@
 // Command gateway-audio-price publishes and inspects immutable Speech and
-// transcription prices.
+// transcription and translation prices.
 package main
 
 import (
@@ -19,7 +19,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, os.Getenv)) }
 func run(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	f := flag.NewFlagSet("gateway-audio-price", flag.ContinueOnError)
 	f.SetOutput(stderr)
-	operation := f.String("operation", "speech", "speech or transcription")
+	operation := f.String("operation", "speech", "speech, transcription, or translation")
 	action := f.String("action", "publish", "publish, estimate, or inspect")
 	channel := f.String("channel-id", "", "Provider channel ID")
 	model := f.String("model", "", "Audio model")
@@ -40,7 +40,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	if f.Parse(args) != nil {
 		return 2
 	}
-	if (*operation != "speech" && *operation != "transcription") || (*action != "publish" && *action != "estimate" && *action != "inspect") || *channel == "" || *model == "" {
+	if (*operation != "speech" && *operation != "transcription" && *operation != "translation") || (*action != "publish" && *action != "estimate" && *action != "inspect") || *channel == "" || *model == "" {
 		fmt.Fprintln(stderr, "audio price arguments are invalid")
 		return 2
 	}
@@ -70,6 +70,9 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	if *operation == "transcription" {
 		return runTranscription(service, ctx, stdout, stderr, *action, *channel, *model, *key, *effective, *strategy, *costInput, *costOutput, *saleInput, *saleOutput, *maximumInput, *maximumOutput, *costMinute, *saleMinute, *maximumDuration)
 	}
+	if *operation == "translation" {
+		return runTranslation(service, ctx, stdout, stderr, *action, *channel, *model, *key, *effective, *costMinute, *saleMinute, *maximumDuration)
+	}
 	if *action != "publish" {
 		fmt.Fprintln(stderr, "speech only supports publish")
 		return 2
@@ -87,6 +90,37 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		return 1
 	}
 	fmt.Fprintln(stdout, p.ID)
+	return 0
+}
+
+func runTranslation(service *audiopricing.Service, ctx context.Context, stdout, stderr io.Writer, action, channel, model, key, effective, costMinute, saleMinute, maximumDuration string) int {
+	if action != "publish" {
+		estimate, err := service.EstimateTranslation(ctx, audiopricing.TranslationPriceRequest{ChannelID: channel, Model: model})
+		if err != nil {
+			fmt.Fprintln(stderr, "translation price unavailable")
+			return 1
+		}
+		if action == "inspect" {
+			fmt.Fprintf(stdout, "%s %s %d %d\n", estimate.Price.ID, estimate.Price.Strategy, estimate.MaximumCost, estimate.MaximumSale)
+		} else {
+			fmt.Fprintf(stdout, "%d %d\n", estimate.MaximumCost, estimate.MaximumSale)
+		}
+		return 0
+	}
+	cost, costErr := strconv.ParseInt(costMinute, 10, 64)
+	sale, saleErr := strconv.ParseInt(saleMinute, 10, 64)
+	maximum, maximumErr := strconv.ParseInt(maximumDuration, 10, 64)
+	at, timeErr := time.Parse(time.RFC3339, effective)
+	if key == "" || costErr != nil || saleErr != nil || maximumErr != nil || timeErr != nil || cost < 0 || sale < 1 || maximum < 1 {
+		fmt.Fprintln(stderr, "translation price arguments are invalid")
+		return 2
+	}
+	published, err := service.PublishTranslation(ctx, audiopricing.TranslationPrice{ChannelID: channel, Model: model, CostPerMinute: cost, SalePerMinute: sale, MaximumDurationMilliseconds: maximum, EffectiveFrom: at}, key)
+	if err != nil {
+		fmt.Fprintln(stderr, "translation price publication failed")
+		return 1
+	}
+	fmt.Fprintln(stdout, published.ID)
 	return 0
 }
 
