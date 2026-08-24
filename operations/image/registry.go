@@ -146,6 +146,13 @@ func DefaultRegistryWithReplicate(models []string) (*Registry, error) {
 }
 
 func DefaultRegistryWithAsync(replicateModels, falModels []string) (*Registry, error) {
+	return DefaultRegistryWithAsyncAndAdditional(replicateModels, falModels, nil)
+}
+
+// DefaultRegistryWithAsyncAndAdditional builds one collision-checked immutable
+// registry. Additional routes are expected to come from a validated plugin
+// snapshot; they cannot shadow built-in or asynchronous model identities.
+func DefaultRegistryWithAsyncAndAdditional(replicateModels, falModels []string, additional []ModelRoute) (*Registry, error) {
 	routes := defaultRoutes()
 	for _, model := range replicateModels {
 		digest := sha256.Sum256([]byte(model))
@@ -162,6 +169,7 @@ func DefaultRegistryWithAsync(replicateModels, falModels []string) (*Registry, e
 		owner, _, _ := strings.Cut(model, "/")
 		routes = append(routes, ModelRoute{Protocol: "fal", Model: model, Owner: owner, Capabilities: []Capability{{Generate, JSON}}, Policy: Fixed, FixedCandidateID: candidateID, Candidates: []ChannelCandidate{{ID: candidateID, Provider: providercredentials.Fal, ProviderModel: model, ChannelID: "channel_00000000000000000000000000000005", Enabled: true}}, Usage: UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 10, RequestExtractor: "fal-input-num_images-v1", ResultExtractor: "fal-output-v1"}})
 	}
+	routes = append(routes, additional...)
 	return NewRegistry(routes...)
 }
 
@@ -253,7 +261,7 @@ func validProtocol(protocol string) bool {
 }
 
 func validRouteProtocol(protocol string, provider providercredentials.ProviderID) bool {
-	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI)) || (protocol == "gemini" && provider == providercredentials.Google) || (protocol == "replicate" && provider == providercredentials.Replicate) || (protocol == "fal" && provider == providercredentials.Fal)
+	return (protocol == "openai" && (provider == providercredentials.OpenAI || provider == providercredentials.XAI || provider == providercredentials.Plugin)) || (protocol == "gemini" && (provider == providercredentials.Google || provider == providercredentials.Plugin)) || (protocol == "replicate" && provider == providercredentials.Replicate) || (protocol == "fal" && provider == providercredentials.Fal)
 }
 
 func validCandidateID(value string) bool {

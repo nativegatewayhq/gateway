@@ -47,6 +47,11 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 
 ## Configuration
 
+Provider plugins are disabled by default. The first version supports isolated
+HTTP sidecars for synchronous `image.generate`; see
+[`examples/plugin`](./examples/plugin) for the manifest, validator, mock server,
+and native OpenAI/Gemini usage contract.
+
 | Environment variable | Default | Description |
 |---|---|---|
 | `GATEWAY_HTTP_ADDR` | `:8080` | TCP host and numeric port to listen on |
@@ -93,6 +98,15 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_FAL_WEBHOOK_CALLBACK_SECRET` | unset | Base64-encoded 32-byte deployment secret used to HMAC per-Job callback capabilities |
 | `GATEWAY_FAL_WEBHOOK_BINDING_TTL` | `168h` | Callback capability lifetime; configurable from `1h` through `720h` |
 | `GATEWAY_FAL_JWKS_URL` | `https://rest.fal.ai/.well-known/jwks.json` | Fixed fal ED25519 key-set URL; only the exact well-known path is accepted |
+| `GATEWAY_PLUGIN_MODE` | `disabled` | `optional` loads a validated local snapshot; `required` additionally makes sidecar health part of readiness |
+| `GATEWAY_PLUGIN_MANIFEST_DIR` | unset | Absolute, non-writable trusted directory containing only regular Provider Manifest v1 JSON files |
+| `GATEWAY_PLUGIN_ENDPOINTS_JSON` | unset | JSON mapping of manifest endpoint refs to exact loopback HTTP or operator-controlled HTTPS origins |
+| `GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON` | unset | JSON mapping of manifest secret refs to environment-variable names; values are resolved separately and never stored in manifests |
+| `GATEWAY_PLUGIN_RESULT_ORIGINS_JSON` | unset | Optional plugin-ID to exact HTTPS result-origin allowlist for URL output manifests |
+| `GATEWAY_PLUGIN_TIMEOUT` | `2m` | Sidecar request timeout; maximum `5m` |
+| `GATEWAY_PLUGIN_MAX_REQUEST_BYTES` | `2097152` | Maximum canonical sidecar request envelope; maximum 64 MiB |
+| `GATEWAY_PLUGIN_MAX_RESPONSE_BYTES` | `67108864` | Maximum canonical sidecar response envelope; maximum 128 MiB |
+| `GATEWAY_PLUGIN_MAX_CONCURRENCY` | `16` | Process-wide sidecar execution concurrency cap; maximum 4096 |
 | `GATEWAY_FAL_JWKS_TIMEOUT` | `5s` | Bounded JWKS request timeout; maximum `1m` |
 | `GATEWAY_FAL_JWKS_CACHE_TTL` | `24h` | Maximum successful key cache lifetime; HTTP cache headers may shorten it |
 | `GATEWAY_FAL_JWKS_REFRESH_COOLDOWN` | `1m` | Minimum interval between signature-mismatch refresh attempts |

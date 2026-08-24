@@ -18,6 +18,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/audioassets"
 	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
+	"github.com/nativegatewayhq/gateway/internal/plugins"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/speechstorage"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
@@ -73,6 +74,7 @@ type ProviderHealthMode string
 type ReplicateWebhookMode string
 type FalWebhookMode string
 type JobManagementMode string
+type PluginMode string
 
 const (
 	BillingDisabled          BillingMode          = "disabled"
@@ -87,6 +89,9 @@ const (
 	FalWebhookRequired       FalWebhookMode       = "required"
 	JobManagementDisabled    JobManagementMode    = "disabled"
 	JobManagementRequired    JobManagementMode    = "required"
+	PluginDisabled           PluginMode           = "disabled"
+	PluginOptional           PluginMode           = "optional"
+	PluginRequired           PluginMode           = "required"
 )
 
 // Config contains non-provider process settings. Provider credentials remain
@@ -196,6 +201,9 @@ type Config struct {
 	PublicBaseURL                   string
 	JobManagementMode               JobManagementMode
 	JobManagementCursorSecrets      [][]byte
+	PluginMode                      PluginMode
+	PluginManifestDir               string
+	Plugins                         plugins.Config
 }
 type ChatModelLimit struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 type ChatRoute struct {
@@ -329,6 +337,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		RunwayBodyBytes:                 defaultRunwayBodyBytes,
 		RunwayPollInterval:              5 * time.Second,
 		JobManagementMode:               JobManagementDisabled,
+		PluginMode:                      PluginDisabled,
+		Plugins:                         plugins.Config{Timeout: 2 * time.Minute, MaximumRequestBytes: 2 << 20, MaximumResponseBytes: 64 << 20, MaximumConcurrency: 16, EndpointOrigins: map[string]string{}, AuthSecrets: map[string]string{}, ResultOrigins: map[string][]string{}},
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -836,6 +846,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if err := loadRunway(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
+	if err := loadPlugins(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
 	if value, ok := lookup("GATEWAY_JOB_MANAGEMENT_MODE"); ok {
@@ -1659,6 +1672,125 @@ func loadReconciliation(cfg *Config, lookup LookupEnv) error {
 		}
 	}
 	return nil
+}
+
+func loadPlugins(cfg *Config, lookup LookupEnv) error {
+	if value, ok := lookup("GATEWAY_PLUGIN_MODE"); ok {
+		cfg.PluginMode = PluginMode(strings.TrimSpace(value))
+	}
+	if cfg.PluginMode != PluginDisabled && cfg.PluginMode != PluginOptional && cfg.PluginMode != PluginRequired {
+		return fmt.Errorf("GATEWAY_PLUGIN_MODE: must be disabled, optional, or required")
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_MANIFEST_DIR"); ok {
+		cfg.PluginManifestDir = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_ENDPOINTS_JSON"); ok {
+		if err := decodePluginJSON(value, &cfg.Plugins.EndpointOrigins); err != nil || len(cfg.Plugins.EndpointOrigins) > 128 {
+			return fmt.Errorf("GATEWAY_PLUGIN_ENDPOINTS_JSON: must be a bounded JSON object")
+		}
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON"); ok {
+		var references map[string]string
+		if err := decodePluginJSON(value, &references); err != nil || len(references) > 128 {
+			return fmt.Errorf("GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON: must be a bounded JSON object")
+		}
+		for reference, environmentName := range references {
+			if !validPluginReference(reference) || !validEnvironmentName(environmentName) {
+				return fmt.Errorf("GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON: contains an invalid reference")
+			}
+			secret, exists := lookup(environmentName)
+			if !exists || secret == "" || len(secret) > 4096 || strings.TrimSpace(secret) != secret {
+				return fmt.Errorf("GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON: referenced secret is unavailable")
+			}
+			cfg.Plugins.AuthSecrets[reference] = secret
+		}
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_RESULT_ORIGINS_JSON"); ok {
+		if err := decodePluginJSON(value, &cfg.Plugins.ResultOrigins); err != nil || len(cfg.Plugins.ResultOrigins) > 128 {
+			return fmt.Errorf("GATEWAY_PLUGIN_RESULT_ORIGINS_JSON: must be a bounded JSON object")
+		}
+		var combined []string
+		for _, origins := range cfg.Plugins.ResultOrigins {
+			combined = append(combined, origins...)
+		}
+		if len(combined) > 32 {
+			return fmt.Errorf("GATEWAY_PLUGIN_RESULT_ORIGINS_JSON: must contain no more than 32 origins")
+		}
+		cfg.ImageStorage.FetchOrigins["plugin"] = combined
+		if cfg.ImageStorage.Validate() != nil {
+			return fmt.Errorf("GATEWAY_PLUGIN_RESULT_ORIGINS_JSON: contains an invalid origin")
+		}
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 5*time.Minute {
+			return fmt.Errorf("GATEWAY_PLUGIN_TIMEOUT: must be a positive duration no greater than 5m")
+		}
+		cfg.Plugins.Timeout = duration
+	}
+	byteSettings := []struct {
+		key     string
+		target  *int64
+		maximum int64
+	}{{"GATEWAY_PLUGIN_MAX_REQUEST_BYTES", &cfg.Plugins.MaximumRequestBytes, 64 << 20}, {"GATEWAY_PLUGIN_MAX_RESPONSE_BYTES", &cfg.Plugins.MaximumResponseBytes, 128 << 20}}
+	for _, setting := range byteSettings {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil || parsed < 1 || parsed > setting.maximum {
+				return fmt.Errorf("%s: must be a positive bounded integer", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_MAX_CONCURRENCY"); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || parsed < 1 || parsed > 4096 {
+			return fmt.Errorf("GATEWAY_PLUGIN_MAX_CONCURRENCY: must be between 1 and 4096")
+		}
+		cfg.Plugins.MaximumConcurrency = parsed
+	}
+	if cfg.PluginMode != PluginDisabled && (cfg.PluginManifestDir == "" || len(cfg.Plugins.EndpointOrigins) == 0 || len(cfg.Plugins.AuthSecrets) == 0) {
+		return fmt.Errorf("GATEWAY_PLUGIN_*: enabled plugin mode requires manifest directory, endpoints, and auth secret references")
+	}
+	return nil
+}
+
+func decodePluginJSON(raw string, target any) error {
+	if len(raw) == 0 || len(raw) > 1<<20 {
+		return fmt.Errorf("invalid JSON")
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("trailing JSON")
+	}
+	return nil
+}
+
+func validPluginReference(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-')) {
+			return false
+		}
+	}
+	return true
+}
+func validEnvironmentName(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if !(character >= 'A' && character <= 'Z' || character == '_' || index > 0 && character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func parseLogLevel(value string) (slog.Level, error) {

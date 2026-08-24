@@ -119,6 +119,13 @@ func NewHandlerWithLLMModels(logger *slog.Logger, authenticator Authenticator, e
 	return handler
 }
 
+func NewHandlerWithImageAndLLMModels(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, availability ProviderAvailability, health providerhealth.Gate, llmModels *geminioperation.Registry) *Handler {
+	handler := NewHandlerWithLLMModels(logger, authenticator, executor, maxBodyBytes, health, llmModels)
+	handler.models = models
+	handler.availability = availability
+	return handler
+}
+
 func NewBillableHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, executor Executor, maxBodyBytes int64, chargeBilling Billing) *Handler {
 	return NewBillableHandlerWithAvailability(logger, authenticator, models, executor, maxBodyBytes, chargeBilling, nil)
 }
@@ -155,6 +162,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	started := time.Now()
 	model, action, _ := modelActionFromRequest(request)
 	providerModel := model
+	provider := providercredentials.Google
 	operation := string(imageoperation.Generate)
 	candidateID, channelID, routingPolicy := "", "", "fixed"
 	if legacyChannel, ok := providercredentials.LegacyChannel(providercredentials.Google); ok {
@@ -168,7 +176,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		if recover() != nil {
 			if healthPermit.ChannelID != "" {
 				if dispatched {
-					handler.observeHealth(request, channelID, healthPermit, nil, errProviderPanic)
+					handler.observeHealth(request, provider, channelID, healthPermit, nil, errProviderPanic)
 				} else {
 					handler.releaseHealthPermit(request, healthPermit)
 				}
@@ -184,7 +192,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			"request_id", requestid.FromContext(request.Context()),
 			"protocol", "gemini",
 			"operation", operation,
-			"provider", "google",
+			"provider", string(provider),
 			"candidate_id", candidateID,
 			"channel_id", channelID,
 			"routing_policy", routingPolicy,
@@ -230,6 +238,14 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	var candidates []imageoperation.RoutingDecision
+	if operation == string(imageoperation.Generate) && handler.models != nil {
+		var routeErr error
+		candidates, routeErr = handler.models.Candidates("gemini", model, imageoperation.Generate, imageoperation.JSON)
+		if routeErr != nil && handler.billing != nil {
+			writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
+			return
+		}
+	}
 	if handler.billing != nil {
 		if operation == geminioperation.ChatCompletions {
 			if handler.llmBilling == nil {
@@ -239,12 +255,6 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		} else {
 			if handler.models == nil {
 				writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "billing unavailable")
-				return
-			}
-			var routeErr error
-			candidates, routeErr = handler.models.Candidates("gemini", model, imageoperation.Generate, imageoperation.JSON)
-			if routeErr != nil {
-				writeError(tracked, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "model is not enabled for billed image generation")
 				return
 			}
 		}
@@ -283,6 +293,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	if handler.billing == nil {
+		if len(candidates) > 0 {
+			healthy, healthErr := handler.healthyCandidates(request, candidates)
+			if healthErr != nil || len(healthy) == 0 {
+				writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+				return
+			}
+			selected := healthy[0]
+			if !geminiProviderConfigured(request.Context(), handler.availability, selected) {
+				writeError(tracked, http.StatusServiceUnavailable, "UNAVAILABLE", "provider unavailable")
+				return
+			}
+			provider, providerModel, candidateID, channelID, routingPolicy = selected.Provider, selected.ProviderModel, selected.CandidateID, selected.ChannelID, string(selected.Policy)
+		}
 		permit, allowed := handler.claimFixedHealth(tracked, request, channelID)
 		if !allowed {
 			return
@@ -335,6 +358,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		}
 		charge, fallbackDepth, healthPermit = selection.charge, selection.rank, selection.permit
 		providerModel = selection.decision.ProviderModel
+		provider = selection.decision.Provider
 		candidateID, channelID, routingPolicy = selection.decision.CandidateID, selection.decision.ChannelID, string(selection.decision.Policy)
 	}
 
@@ -347,7 +371,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if handler.telemetry != nil {
 		handler.telemetry.Route(request.Context(), telemetry.RouteRecord{Protocol: "gemini", Operation: operation, Policy: routingPolicy, Outcome: "success"})
 	}
-	response, err := handler.executeProvider(request.Context(), operation, google.GenerateContentRequest{
+	response, err := handler.executeProvider(request.Context(), provider, operation, google.GenerateContentRequest{
 		Model:       providerModel,
 		ChannelID:   channelID,
 		Action:      action,
@@ -359,7 +383,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		APIClient:   request.Header.Get("x-goog-api-client"),
 		Body:        bytes.NewReader(body),
 	})
-	handler.observeHealth(request, channelID, healthPermit, response, err)
+	handler.observeHealth(request, provider, channelID, healthPermit, response, err)
 	if err != nil {
 		if charge != nil {
 			snapshot := handler.executorErrorSnapshot(err)
@@ -391,7 +415,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		}
 		snapshot := billing.ResponseSnapshot{Status: response.StatusCode, Headers: safeGeminiResponseHeaders(response.Header), Body: responseBody}
 		if response.StatusCode >= 200 && response.StatusCode <= 299 && handler.results != nil {
-			managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "gemini", Provider: "google", ChannelID: channelID, RequestID: requestid.FromContext(request.Context()), ChargeID: charge.ID, Body: responseBody})
+			managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "gemini", Provider: string(provider), ChannelID: channelID, RequestID: requestid.FromContext(request.Context()), ChargeID: charge.ID, Body: responseBody})
 			if storageErr != nil {
 				handler.reconciliationError(tracked, request.Context(), charge.ID, geminiKnownObservation(true, billing.StorageFailed, snapshot))
 				return
@@ -412,7 +436,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			handler.writeSnapshot(tracked, handler.storageErrorSnapshot(), false)
 			return
 		}
-		managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "gemini", Provider: "google", ChannelID: channelID, RequestID: requestid.FromContext(request.Context()), Body: responseBody})
+		managedBody, storageErr := handler.results.Transform(request.Context(), imagestorage.TransformInput{Protocol: "gemini", Provider: string(provider), ChannelID: channelID, RequestID: requestid.FromContext(request.Context()), Body: responseBody})
 		if storageErr != nil {
 			handler.writeSnapshot(tracked, handler.storageErrorSnapshot(), false)
 			return
@@ -437,19 +461,19 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
-func (handler *Handler) executeProvider(ctx context.Context, operation string, providerRequest google.GenerateContentRequest) (response *http.Response, err error) {
+func (handler *Handler) executeProvider(ctx context.Context, provider providercredentials.ProviderID, operation string, providerRequest google.GenerateContentRequest) (response *http.Response, err error) {
 	if handler.telemetry == nil {
 		return handler.executor.GenerateContent(ctx, providerRequest)
 	}
-	providerCtx, span, started := handler.telemetry.StartProvider(ctx, "google", "gemini", operation)
+	providerCtx, span, started := handler.telemetry.StartProvider(ctx, string(provider), "gemini", operation)
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: operation, Outcome: "failure"})
+			handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: string(provider), Protocol: "gemini", Operation: operation, Outcome: "failure"})
 			panic(recovered)
 		}
 	}()
 	response, err = handler.executor.GenerateContent(providerCtx, providerRequest)
-	handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: "google", Protocol: "gemini", Operation: operation, Outcome: geminiProviderTelemetryOutcome(response, err)})
+	handler.telemetry.EndProvider(providerCtx, span, started, telemetry.ProviderRecord{Provider: string(provider), Protocol: "gemini", Operation: operation, Outcome: geminiProviderTelemetryOutcome(response, err)})
 	return response, err
 }
 
@@ -515,8 +539,8 @@ func (handler *Handler) serveBillableLLM(writer http.ResponseWriter, request *ht
 		handler.writeSnapshot(writer, charge.Response, true)
 		return
 	}
-	response, executeErr := handler.executeProvider(request.Context(), geminioperation.ChatCompletions, google.GenerateContentRequest{Model: model, ChannelID: channelID, Query: request.URL.Query(), ContentType: request.Header.Get("Content-Type"), Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), APIClient: request.Header.Get("x-goog-api-client"), Body: bytes.NewReader(body)})
-	handler.observeHealth(request, channelID, permit, response, executeErr)
+	response, executeErr := handler.executeProvider(request.Context(), providercredentials.Google, geminioperation.ChatCompletions, google.GenerateContentRequest{Model: model, ChannelID: channelID, Query: request.URL.Query(), ContentType: request.Header.Get("Content-Type"), Accept: request.Header.Get("Accept"), UserAgent: request.UserAgent(), APIClient: request.Header.Get("x-goog-api-client"), Body: bytes.NewReader(body)})
+	handler.observeHealth(request, providercredentials.Google, channelID, permit, response, executeErr)
 	if executeErr != nil {
 		reason := "executor_connection_lost"
 		if errors.Is(executeErr, google.ErrTimeout) {
@@ -633,8 +657,8 @@ func (handler *Handler) serveBillableLLMStream(writer http.ResponseWriter, reque
 		handler.writeLLMBillingError(writer, chatbilling.ErrConflict)
 		return
 	}
-	response, executeErr := handler.executeProvider(request.Context(), geminioperation.ChatCompletions, google.GenerateContentRequest{Model: model, ChannelID: channelID, Action: "streamGenerateContent", Streaming: true, Query: request.URL.Query(), ContentType: request.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: request.UserAgent(), APIClient: request.Header.Get("x-goog-api-client"), Body: bytes.NewReader(body)})
-	handler.observeHealth(request, channelID, permit, response, executeErr)
+	response, executeErr := handler.executeProvider(request.Context(), providercredentials.Google, geminioperation.ChatCompletions, google.GenerateContentRequest{Model: model, ChannelID: channelID, Action: "streamGenerateContent", Streaming: true, Query: request.URL.Query(), ContentType: request.Header.Get("Content-Type"), Accept: "text/event-stream", UserAgent: request.UserAgent(), APIClient: request.Header.Get("x-goog-api-client"), Body: bytes.NewReader(body)})
+	handler.observeHealth(request, providercredentials.Google, channelID, permit, response, executeErr)
 	if executeErr != nil {
 		reason := "executor_connection_lost"
 		if errors.Is(executeErr, google.ErrTimeout) || errors.Is(executeErr, google.ErrStreamIdle) {
@@ -989,7 +1013,7 @@ func (handler *Handler) releaseHealthPermit(request *http.Request, permit provid
 	}
 }
 
-func (handler *Handler) observeHealth(request *http.Request, channelID string, permit providerhealth.Permit, response *http.Response, executionErr error) {
+func (handler *Handler) observeHealth(request *http.Request, provider providercredentials.ProviderID, channelID string, permit providerhealth.Permit, response *http.Response, executionErr error) {
 	outcome := providerhealth.Neutral
 	if executionErr != nil {
 		if errors.Is(executionErr, providercredentials.ErrCredentialUnavailable) {
@@ -1016,7 +1040,7 @@ func (handler *Handler) observeHealth(request *http.Request, channelID string, p
 	}
 	observation := providerhealth.Observation{ChannelID: channelID, ObservationID: requestid.FromContext(request.Context()), Outcome: outcome, Permit: permit}
 	if _, err := handler.health.Observe(context.WithoutCancel(request.Context()), observation); err != nil {
-		handler.logger.Warn("provider health observation failed", "request_id", requestid.FromContext(request.Context()), "provider", "google", "channel_id", channelID, "category", "health_unavailable")
+		handler.logger.Warn("provider health observation failed", "request_id", requestid.FromContext(request.Context()), "provider", string(provider), "channel_id", channelID, "category", "health_unavailable")
 	}
 }
 

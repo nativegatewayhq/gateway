@@ -18,6 +18,7 @@ const (
 	Fal       ProviderID = "fal"
 	Anthropic ProviderID = "anthropic"
 	Runway    ProviderID = "runway"
+	Plugin    ProviderID = "plugin"
 )
 
 var (
@@ -30,7 +31,7 @@ var (
 func ParseProviderID(value string) (ProviderID, error) {
 	provider := ProviderID(strings.ToLower(strings.TrimSpace(value)))
 	switch provider {
-	case Google, OpenAI, XAI, Replicate, Fal, Anthropic, Runway:
+	case Google, OpenAI, XAI, Replicate, Fal, Anthropic, Runway, Plugin:
 		return provider, nil
 	default:
 		return "", ErrUnknownProvider

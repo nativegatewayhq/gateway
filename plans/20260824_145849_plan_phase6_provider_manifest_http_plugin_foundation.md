@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-062
 title: Phase 6 Provider Manifest and HTTP Sidecar Plugin Foundation
-status: accepted
+status: completed
 created_at: 2026-08-24T14:58:49+09:00
-updated_at: 2026-08-24T14:58:49+09:00
+updated_at: 2026-08-24T15:42:08+09:00
 owners:
   - gateway
 initiative: phase-6-provider-plugin-foundation
@@ -243,21 +243,29 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] strict canonical Provider Manifest v1과 compatibility validation이 제공됨
-- [ ] 외부 sidecar가 코어 수정·in-process code loading 없이 image Provider를 등록함
-- [ ] native OpenAI/Gemini facade와 `/v1/models`가 plugin capability를 안전하게 사용함
-- [ ] endpoint와 authentication secret이 operator ref로만 해석되고 manifest/API/log에 노출되지 않음
-- [ ] fixed-origin transport가 redirect/proxy/body/timeout/concurrency를 fail closed함
-- [ ] managed billing이 Gateway price와 verified plugin evidence로 exactly-once 정산됨
-- [ ] managed image storage가 plugin result를 기존 SSRF/object 경계로 처리함
-- [ ] duplicate/fallback/circuit/restart가 단일 dispatch·Ledger 효과와 bounded recovery로 수렴함
-- [ ] mock sidecar, validator와 contributor example이 제공됨
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README, migration, Docker Compose와 멀티레포 handoff가 갱신됨
+- [x] strict canonical Provider Manifest v1과 compatibility validation이 제공됨
+- [x] 외부 sidecar가 코어 수정·in-process code loading 없이 image Provider를 등록함
+- [x] native OpenAI/Gemini facade와 `/v1/models`가 plugin capability를 안전하게 사용함
+- [x] endpoint와 authentication secret이 operator ref로만 해석되고 manifest/API/log에 노출되지 않음
+- [x] fixed-origin transport가 redirect/proxy/body/timeout/concurrency를 fail closed함
+- [x] managed billing이 Gateway price와 verified plugin evidence로 exactly-once 정산됨
+- [x] managed image storage가 plugin result를 기존 SSRF/object 경계로 처리함
+- [x] duplicate/fallback/circuit/restart가 단일 dispatch·Ledger 효과와 bounded recovery로 수렴함
+- [x] mock sidecar, validator와 contributor example이 제공됨
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README, migration, Docker Compose와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `plugin-sdk/manifest/v1`에 duplicate/unknown field 거부, typed canonical JSON SHA-256, semver compatibility와 safe directory loader를 구현했다.
+- `internal/plugins`가 manifest snapshot을 collision 검사된 OpenAI/Gemini image route와 exact channel binding으로 변환하고, migration `000056` 및 `plugin_channel_snapshots`에 plugin ID/version/digest/model/protocol을 불변 저장한다.
+- fixed-origin HTTP client는 proxy와 redirect를 차단하고 bearer secret ref, 전체 timeout, request/response limit, concurrency semaphore, strict identity/error/result 검증과 exact URL origin 검사를 적용한다.
+- `providers/plugin`이 bounded prompt/options를 canonical sidecar envelope로 변환하고 Base64/URL 결과를 native OpenAI Images 및 Gemini `generateContent` 응답으로 projection한다. Gemini routing·storage·telemetry도 실제 selected provider를 유지한다.
+- managed billing integration test `TestPluginBillingSnapshotAndIdempotencyAreExactlyOnce`가 Gateway-published immutable price, 단일 sidecar dispatch, Capture, replay와 plugin charge snapshot을 검증한다.
+- `cmd/gateway-plugin-validator`, `cmd/gateway-plugin-mock`, `examples/plugin`, Compose profile과 `examples/plugin/HANDOFF.md`를 제공했다. 실제 authenticated health/execute smoke도 통과했다.
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과.
+- fresh `gateway_plan062` DB와 Redis DB 14에서 `GOFLAGS=-p=1 make integration-test` 통과.
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/openai ./protocols/gemini -count=1` 통과. Plugin-backed model을 공식 OpenAI/Gemini Python 및 JavaScript SDK가 Base URL과 service key만 바꿔 호출했다.
 
 ## Rollback 계획
 
