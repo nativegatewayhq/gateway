@@ -124,6 +124,15 @@ type Config struct {
 	TranscriptionFieldBytes         int64
 	TranscriptionResponseBytes      int64
 	TranscriptionSpoolLimit         int
+	OpenAITranslationModels         []string
+	OpenAITranslationModelMap       map[string]string
+	OpenAITranslationCapabilities   map[string]audiooperation.TranslationCapabilities
+	TranslationTimeout              time.Duration
+	TranslationRequestBytes         int64
+	TranslationFileBytes            int64
+	TranslationFieldBytes           int64
+	TranslationResponseBytes        int64
+	TranslationSpoolLimit           int
 	ResponsesTimeout                time.Duration
 	ResponsesStreamIdleTimeout      time.Duration
 	ResponsesBodyBytes              int64
@@ -266,6 +275,14 @@ func Load(lookup LookupEnv) (Config, error) {
 		TranscriptionFieldBytes:         defaultTranscriptionFieldBytes,
 		TranscriptionResponseBytes:      defaultTranscriptionResponseBytes,
 		TranscriptionSpoolLimit:         8,
+		OpenAITranslationModelMap:       map[string]string{},
+		OpenAITranslationCapabilities:   map[string]audiooperation.TranslationCapabilities{},
+		TranslationTimeout:              defaultImagesTimeout,
+		TranslationRequestBytes:         defaultTranscriptionRequestBytes,
+		TranslationFileBytes:            defaultTranscriptionFileBytes,
+		TranslationFieldBytes:           defaultTranscriptionFieldBytes,
+		TranslationResponseBytes:        defaultTranscriptionResponseBytes,
+		TranslationSpoolLimit:           8,
 		AnthropicTimeout:                defaultImagesTimeout,
 		AnthropicStreamIdleTimeout:      30 * time.Second,
 		AnthropicBodyBytes:              defaultChatBodyBytes,
@@ -593,6 +610,52 @@ func Load(lookup LookupEnv) (Config, error) {
 		}
 		cfg.TranscriptionSpoolLimit = limit
 	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSLATION_MODELS"); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || seen[model] || strings.ContainsAny(model, "\r\n") {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSLATION_MODELS: must contain unique valid model IDs")
+			}
+			seen[model] = true
+			cfg.OpenAITranslationModels = append(cfg.OpenAITranslationModels, model)
+		}
+	}
+	for key, target := range map[string]any{"GATEWAY_OPENAI_TRANSLATION_MODEL_MAP": &cfg.OpenAITranslationModelMap, "GATEWAY_OPENAI_TRANSLATION_MODEL_CAPABILITIES_JSON": &cfg.OpenAITranslationCapabilities} {
+		if value, ok := lookup(key); ok {
+			decoder := json.NewDecoder(strings.NewReader(value))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+				return Config{}, fmt.Errorf("%s: must be a bounded object", key)
+			}
+		}
+	}
+	if len(cfg.OpenAITranslationModelMap) > 128 || len(cfg.OpenAITranslationCapabilities) > 128 {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSLATION_MODEL_CAPABILITIES_JSON: must be a bounded object")
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSLATION_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSLATION_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.TranslationTimeout = duration
+	}
+	for key, target := range map[string]*int64{"GATEWAY_OPENAI_TRANSLATION_MAX_REQUEST_BODY_BYTES": &cfg.TranslationRequestBytes, "GATEWAY_OPENAI_TRANSLATION_MAX_FILE_BYTES": &cfg.TranslationFileBytes, "GATEWAY_OPENAI_TRANSLATION_MAX_FIELD_BYTES": &cfg.TranslationFieldBytes, "GATEWAY_OPENAI_TRANSLATION_MAX_RESPONSE_BODY_BYTES": &cfg.TranslationResponseBytes} {
+		if value, ok := lookup(key); ok {
+			limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil || limit < 1 || limit > 512*1024*1024 {
+				return Config{}, fmt.Errorf("%s: must be a bounded positive integer", key)
+			}
+			*target = limit
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSLATION_MAX_CONCURRENT_SPOOLS"); ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit < 1 || limit > 128 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSLATION_MAX_CONCURRENT_SPOOLS: must be an integer between 1 and 128")
+		}
+		cfg.TranslationSpoolLimit = limit
+	}
 	if value, ok := lookup("GATEWAY_ANTHROPIC_REQUEST_TIMEOUT"); ok {
 		duration, err := time.ParseDuration(strings.TrimSpace(value))
 		if err != nil || duration <= 0 || duration > 10*time.Minute {
@@ -854,6 +917,15 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 	if _, err := audiooperation.NewTranscriptionRegistry(cfg.OpenAITranscriptionModels, cfg.OpenAITranscriptionCapabilities); err != nil {
 		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON: invalid model capabilities")
+	}
+	if cfg.TranslationFileBytes > cfg.TranslationRequestBytes {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSLATION_MAX_FILE_BYTES: cannot exceed request body limit")
+	}
+	if _, err := audiooperation.NewTranslationRegistry(cfg.OpenAITranslationModels, cfg.OpenAITranslationModelMap, cfg.OpenAITranslationCapabilities); err != nil {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSLATION_MODEL_CAPABILITIES_JSON: invalid model capabilities")
+	}
+	if cfg.BillingMode == BillingRequired && len(cfg.OpenAITranslationModels) > 0 {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSLATION_MODELS: managed translation billing is unavailable")
 	}
 	if cfg.BillingMode == BillingRequired && len(cfg.GeminiLLMModels) > 0 {
 		if len(cfg.GeminiLLMModelLimits) != len(cfg.GeminiLLMModels) {

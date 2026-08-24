@@ -101,6 +101,60 @@ assert r.text == "gateway transcript"`
 	}
 }
 
+func TestOfficialOpenAITranslationSDKsUseOnlyBaseURLAndKey(t *testing.T) {
+	registry, _ := audiooperation.NewTranslationRegistry([]string{"translation-public"}, map[string]string{"translation-public": "whisper-1"}, map[string]audiooperation.TranslationCapabilities{"translation-public": {ResponseFormats: []string{"json", "text"}, Prompt: true, Temperature: true}})
+	calls := 0
+	handler := NewTranslationHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, translationExecutorFunc(func(_ context.Context, request openaiProvider.TranslationRequest) (*http.Response, error) {
+		calls++
+		media, parameters, err := mime.ParseMediaType(request.ContentType)
+		if err != nil || media != "multipart/form-data" {
+			t.Fatalf("content type=%s err=%v", request.ContentType, err)
+		}
+		reader := multipart.NewReader(request.Body, parameters["boundary"])
+		got := map[string]string{}
+		for {
+			part, partErr := reader.NextPart()
+			if partErr == io.EOF {
+				break
+			}
+			if partErr != nil {
+				t.Fatal(partErr)
+			}
+			body, _ := io.ReadAll(part)
+			got[part.FormName()] = string(body)
+		}
+		if got["model"] != "whisper-1" || got["file"] != "sdk-audio" {
+			t.Fatalf("request=%v", got)
+		}
+		if got["response_format"] == "text" {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/plain"}}, Body: io.NopCloser(strings.NewReader("gateway translation text"))}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"text":"gateway translation"}`))}, nil
+	}), providerhealth.NoopGate{}, 4096, 1024, 1024, 4096, 2)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+f=("sample.wav",b"sdk-audio","audio/wav")
+assert c.audio.translations.create(model="translation-public",file=f).text == "gateway translation"
+f=("sample.wav",b"sdk-audio","audio/wav")
+assert c.audio.translations.create(model="translation-public",file=f,response_format="text") == "gateway translation text"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python Translation SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;const {toFile}=require("openai");(async()=>{const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});let f=await toFile(Buffer.from("sdk-audio"),"sample.wav",{type:"audio/wav"});let r=await c.audio.translations.create({model:"translation-public",file:f});if(r.text!=="gateway translation")process.exit(2);f=await toFile(Buffer.from("sdk-audio"),"sample.wav",{type:"audio/wav"});r=await c.audio.translations.create({model:"translation-public",file:f,response_format:"text"});if(r!=="gateway translation text")process.exit(3)})().catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript Translation SDK: %v: %s", err, output)
+	}
+	if calls != 4 {
+		t.Fatalf("provider calls=%d", calls)
+	}
+}
+
 func TestOfficialOpenAITranscriptionSDKsPreserveManagedUsageSettlement(t *testing.T) {
 	registry, _ := audiooperation.NewTranscriptionRegistry([]string{"gpt-4o-transcribe"}, map[string]audiooperation.TranscriptionCapabilities{"gpt-4o-transcribe": {ResponseFormats: []string{"json"}}})
 	billing := &transcriptionBillingStub{}

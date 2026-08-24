@@ -497,6 +497,18 @@ func TestOpenAITranscriptionConfigurationSupportsBillingRequired(t *testing.T) {
 	}
 }
 
+func TestOpenAITranslationConfigurationAndManagedFailClosed(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway", "GATEWAY_OPENAI_TRANSLATION_MODELS": "translation-public", "GATEWAY_OPENAI_TRANSLATION_MODEL_MAP": `{"translation-public":"whisper-1"}`, "GATEWAY_OPENAI_TRANSLATION_MODEL_CAPABILITIES_JSON": `{"translation-public":{"response_formats":["json","text","verbose_json","srt","vtt"],"prompt":true,"temperature":true}}`, "GATEWAY_OPENAI_TRANSLATION_REQUEST_TIMEOUT": "4m", "GATEWAY_OPENAI_TRANSLATION_MAX_REQUEST_BODY_BYTES": "65536", "GATEWAY_OPENAI_TRANSLATION_MAX_FILE_BYTES": "32768", "GATEWAY_OPENAI_TRANSLATION_MAX_FIELD_BYTES": "2048", "GATEWAY_OPENAI_TRANSLATION_MAX_RESPONSE_BODY_BYTES": "8192", "GATEWAY_OPENAI_TRANSLATION_MAX_CONCURRENT_SPOOLS": "3"}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || cfg.OpenAITranslationModelMap["translation-public"] != "whisper-1" || !cfg.OpenAITranslationCapabilities["translation-public"].Temperature || cfg.TranslationTimeout != 4*time.Minute || cfg.TranslationFileBytes != 32768 || cfg.TranslationSpoolLimit != 3 {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+	values["GATEWAY_BILLING_MODE"] = "required"
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil || !strings.Contains(err.Error(), "managed translation billing") {
+		t.Fatalf("managed translation error=%v", err)
+	}
+}
+
 func TestLoadFalRequiresModelsAndPublicOrigin(t *testing.T) {
 	_, err := Load(func(key string) (string, bool) {
 		if key == "GATEWAY_DATABASE_URL" {
