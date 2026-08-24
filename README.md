@@ -121,6 +121,15 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_SPEECH_STREAM_IDLE_TIMEOUT` | `30s` | Maximum silence between upstream audio reads; maximum `10m` |
 | `GATEWAY_OPENAI_SPEECH_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum native Speech JSON request body |
 | `GATEWAY_OPENAI_SPEECH_MAX_RESPONSE_BODY_BYTES` | `268435456` | Maximum streamed audio response; maximum 2 GiB |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MODELS` | unset | Comma-separated OpenAI transcription models; enables native `POST /v1/audio/transcriptions` in BYOK mode |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON` | unset | Exact model capability map for streaming, response formats, language, prompt, and timestamps |
+| `GATEWAY_OPENAI_TRANSCRIPTION_REQUEST_TIMEOUT` | `2m` | Complete transcription upload and response timeout; maximum `10m` |
+| `GATEWAY_OPENAI_TRANSCRIPTION_STREAM_IDLE_TIMEOUT` | `30s` | Maximum silence between upstream transcription response reads; maximum `10m` |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum inbound transcription multipart body |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MAX_FILE_BYTES` | `62914560` | Maximum audio file part; cannot exceed the request limit |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MAX_FIELD_BYTES` | `65536` | Maximum bytes per non-file multipart field |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MAX_RESPONSE_BODY_BYTES` | `33554432` | Maximum native JSON, text, subtitle, or SSE response |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent bounded transcription multipart spools; maximum 128 |
 | `GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES` | `67108864` | Image edit body limit; maximum 256 MiB |
 | `GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent multipart edit spool limit; maximum 128 |
 | `GATEWAY_BILLING_MODE` | `disabled` | `disabled` preserves BYOK pass-through; `required` enforces price and Wallet settlement |
@@ -341,6 +350,26 @@ gateway-audio-price \
 ```
 
 Wallet, hierarchical quota and Provider spend-cap capacity are reserved atomically before dispatch. A complete bounded binary stream is captured exactly once using only safe headers, byte count and SHA-256 evidence. Known non-2xx responses release the reservation; timeout, reset, invalid MIME/length, settlement failure and client disconnect retain it in reconciliation. Input, voice and audio content are not persisted.
+
+## OpenAI Audio Transcriptions
+
+Set `GATEWAY_OPENAI_TRANSCRIPTION_MODELS` to enable native `POST /v1/audio/transcriptions` in BYOK mode. Official OpenAI Python and JavaScript SDKs continue to use `audio.transcriptions.create` after changing only `api_key` and `base_url`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="SERVICE_API_KEY", base_url="https://gateway.example/v1")
+with open("sample.wav", "rb") as audio:
+    transcript = client.audio.transcriptions.create(
+        model="gpt-4o-transcribe",
+        file=audio,
+    )
+print(transcript.text)
+```
+
+The Gateway parses the inbound multipart stream under independent request, file, field, part, and concurrency limits. Small audio files remain in bounded memory; larger files spill to a permission-restricted temporary file. It then reconstructs a new multipart request, replaces the service credential, and sends it only to the fixed OpenAI transcription origin. Input audio, filename, prompt, transcript content, credentials, and Provider request IDs are never logged.
+
+Capabilities are fail closed per model. `response_formats` defaults to `json`; optional language, prompt, timestamp, and SSE streaming fields are accepted only when declared in `GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON`. Native JSON, text, SRT, VTT, and capability-enabled SSE response bytes are preserved within the configured limit. Provider responses, timeout, reset, panic, and client cancellation never trigger redispatch. Billing-required deployments reject enabled transcription models until verified duration/token settlement is implemented.
 
 ### Anthropic Messages foundation
 
