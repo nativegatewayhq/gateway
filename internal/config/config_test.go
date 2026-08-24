@@ -577,3 +577,28 @@ func TestPluginConfigurationRejectsEnabledModeWithoutReferences(t *testing.T) {
 		t.Fatal("incomplete plugin configuration accepted")
 	}
 }
+
+func TestPluginRegistryRequiredConfigurationIsLocalAndBounded(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":                     "postgres://gateway",
+		"GATEWAY_PLUGIN_MODE":                      "required",
+		"GATEWAY_PLUGIN_MANIFEST_DIR":              "/trusted/plugins",
+		"GATEWAY_PLUGIN_ENDPOINTS_JSON":            `{"example-sidecar":"http://127.0.0.1:8081"}`,
+		"GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON":      `{"example-token":"PLUGIN_TOKEN"}`,
+		"PLUGIN_TOKEN":                             "super-secret-value",
+		"GATEWAY_PLUGIN_REGISTRY_MODE":             "required",
+		"GATEWAY_PLUGIN_REGISTRY_TRUST_FILE":       "/trusted/registry/trust.json",
+		"GATEWAY_PLUGIN_REGISTRY_INDEX_FILE":       "/trusted/registry/index.dsse.json",
+		"GATEWAY_PLUGIN_REGISTRY_ADMISSION_DIR":    "/trusted/registry/admissions",
+		"GATEWAY_PLUGIN_REGISTRY_PLATFORM":         "linux/arm64",
+		"GATEWAY_PLUGIN_REGISTRY_MINIMUM_SEQUENCE": "17",
+	}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || cfg.PluginRegistryMode != PluginRegistryRequired || cfg.PluginRegistryMinimumSequence != 17 || cfg.PluginRegistryTrustFile != "/trusted/registry/trust.json" {
+		t.Fatalf("registry config rejected: %+v %v", cfg, err)
+	}
+	delete(values, "GATEWAY_PLUGIN_REGISTRY_TRUST_FILE")
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil || strings.Contains(err.Error(), "super-secret-value") {
+		t.Fatalf("unsafe incomplete registry config error: %v", err)
+	}
+}

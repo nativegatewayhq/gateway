@@ -60,3 +60,8 @@ Exit code `0` means every check passed, `1` is a contract failure, and `2` is
 invalid local configuration. Runtime v1 is backward compatible within v1:
 fields are not removed or reinterpreted, and incompatible changes use a new
 schema version.
+
+For official signed admission, offline verification, compatibility matrix,
+release yank, key rotation, and rollback policy, read
+[`REGISTRY.md`](./REGISTRY.md). Registry verification never downloads or runs
+an artifact.

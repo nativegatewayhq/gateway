@@ -164,6 +164,12 @@ Conformance는 실제 유료 Provider 호출이 아닌 전용 test-mode contract
 기존 버전 폐기는 새 버전 공개와 migration 기간을 제공하는 별도 Plan으로만
 진행한다.
 
+공식 Adapter Registry 기여는 OCI digest, source commit, conformance report,
+SBOM과 provenance descriptor를 함께 제출해야 한다. 제출자가 만든 서명이나
+report만으로 official 상태를 부여하지 않고 Registry의 격리된 pipeline이
+재검증한다. Gateway PR에는 private key, mutable image tag, remote download
+동작 또는 sequence floor를 낮추는 rollback을 추가하지 않는다.
+
 ## 프로젝트 불변 조건
 
 다음 조건을 위반하는 변경은 승인할 수 없다.

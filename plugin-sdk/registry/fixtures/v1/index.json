@@ -1,0 +1,1 @@
+{"schema_version":"nativegateway.adapter-registry-fixtures/v1","fixtures":[{"path":"invalid-envelope-duplicate-signature.json","kind":"envelope","outcome":"registry.invalid"},{"path":"invalid-index-sequence.json","kind":"index","outcome":"registry.invalid"},{"path":"invalid-trust-private-field.json","kind":"trust","outcome":"registry.invalid"}]}

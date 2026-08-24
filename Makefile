@@ -12,6 +12,7 @@ build:
 	go build -o bin/gateway-audio-price ./cmd/gateway-audio-price
 	go build -o bin/gateway-plugin-validator ./cmd/gateway-plugin-validator
 	go build -o bin/gateway-plugin-conformance ./cmd/gateway-plugin-conformance
+	go build -o bin/gateway-plugin-registry ./cmd/gateway-plugin-registry
 	go build -o bin/gateway-plugin-mock ./cmd/gateway-plugin-mock
 
 fmt:
@@ -26,6 +27,7 @@ test:
 public-sdk-test:
 	cd examples/plugin/go-sidecar-template && GOWORK=off go test ./...
 	test -z "$$(cd examples/plugin/go-sidecar-template && GOWORK=off go list -deps ./... | grep 'github.com/nativegatewayhq/gateway/internal/' || true)"
+	test -z "$$(cd examples/plugin/go-sidecar-template && GOWORK=off go list -deps github.com/nativegatewayhq/gateway/plugin-sdk/registry/v1 | grep 'github.com/nativegatewayhq/gateway/internal/' || true)"
 
 integration-test:
 	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi

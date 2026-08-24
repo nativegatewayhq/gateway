@@ -5,6 +5,7 @@ import (
 	"time"
 
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
+	registryv1 "github.com/nativegatewayhq/gateway/plugin-sdk/registry/v1"
 )
 
 func validated(t *testing.T, id, protocol string) manifest.Validated {
@@ -48,5 +49,23 @@ func TestRegistryRejectsUnsafeOriginAndCollision(t *testing.T) {
 	}
 	if _, err := NewRegistry([]manifest.Validated{validated(t, "provider.one", "openai"), validated(t, "provider.two", "openai")}, testConfig()); err == nil {
 		t.Fatal("expected model collision rejection")
+	}
+}
+
+func TestAdmittedRegistryChangesChannelAndCarriesImmutableEvidence(t *testing.T) {
+	item := validated(t, "provider.example", "openai")
+	plain, err := NewRegistry([]manifest.Validated{item}, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	snapshot := registryv1.Snapshot{Index: registryv1.VerifiedIndex{Index: registryv1.Index{Sequence: 7, CreatedAt: time.Now().UTC().Truncate(time.Second), ExpiresAt: time.Now().UTC().Add(time.Hour).Truncate(time.Second)}, EnvelopeDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", PayloadDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}, Admissions: map[string]registryv1.VerifiedAdmission{"provider.example@1.0.0": {EnvelopeDigest: admissionDigest}}}
+	admitted, err := NewAdmittedRegistry([]manifest.Validated{item}, testConfig(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := admitted.Bindings()[0]
+	if binding.ChannelID == plain.Bindings()[0].ChannelID || binding.RegistrySequence != 7 || binding.RegistryIndexDigest == [32]byte{} || binding.AdmissionDigest == [32]byte{} {
+		t.Fatalf("missing admitted identity: %#v", binding)
 	}
 }
