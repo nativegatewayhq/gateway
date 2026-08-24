@@ -24,6 +24,7 @@ type Routes struct {
 	OpenAIChat           http.Handler
 	OpenAIResponses      http.Handler
 	OpenAISpeech         http.Handler
+	OpenAISpeechAssets   http.Handler
 	OpenAITranscriptions http.Handler
 	OpenAITranslations   http.Handler
 	OpenAIAudioAssets    http.Handler
@@ -69,6 +70,9 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	}
 	if len(routeSets) > 0 && routeSets[0].OpenAISpeech != nil {
 		mux.Handle("/v1/audio/speech", routeSets[0].OpenAISpeech)
+	}
+	if len(routeSets) > 0 && routeSets[0].OpenAISpeechAssets != nil {
+		mux.Handle("/v1/audio/speech/assets/", routeSets[0].OpenAISpeechAssets)
 	}
 	if len(routeSets) > 0 && routeSets[0].OpenAITranscriptions != nil {
 		mux.Handle("/v1/audio/transcriptions", routeSets[0].OpenAITranscriptions)

@@ -287,6 +287,14 @@ func requestMetadata(request *http.Request) (string, string, string) {
 		return "openai", "models.list", "/v1/models"
 	case path == "/v1/chat/completions":
 		return "openai", "chat.completions", "/v1/chat/completions"
+	case path == "/v1/audio/speech":
+		return "openai", "audio.speech", "/v1/audio/speech"
+	case strings.HasPrefix(path, "/v1/audio/speech/assets/") && strings.HasSuffix(path, "/content"):
+		return "openai", "audio.speech.asset.content", "/v1/audio/speech/assets/{id}/content"
+	case strings.HasPrefix(path, "/v1/audio/speech/assets/") && request.Method == http.MethodDelete:
+		return "openai", "audio.speech.asset.delete", "/v1/audio/speech/assets/{id}"
+	case strings.HasPrefix(path, "/v1/audio/speech/assets/"):
+		return "openai", "audio.speech.asset.get", "/v1/audio/speech/assets/{id}"
 	case path == "/v1/audio/transcriptions":
 		return "openai", "audio.transcription", "/v1/audio/transcriptions"
 	case path == "/v1/audio/translations":
@@ -342,7 +350,7 @@ func boundedProtocol(value string) string {
 	return allowed(value, "openai", "gemini", "replicate", "fal", "gateway")
 }
 func boundedOperation(value string) string {
-	return allowed(value, "image.generate", "image.edit", "chat.completions", "audio.transcription", "audio.translation", "audio.asset.create", "audio.asset.get", "audio.asset.delete", "models.list", "jobs.list", "jobs.get", "health.live", "health.ready", "unknown")
+	return allowed(value, "image.generate", "image.edit", "chat.completions", "audio.speech", "audio.speech.asset.get", "audio.speech.asset.content", "audio.speech.asset.delete", "audio.transcription", "audio.translation", "audio.asset.create", "audio.asset.get", "audio.asset.delete", "models.list", "jobs.list", "jobs.get", "health.live", "health.ready", "unknown")
 }
 func boundedProvider(value string) string {
 	return allowed(value, "openai", "xai", "google", "replicate", "fal")
@@ -357,7 +365,7 @@ func boundedTransition(value string) string {
 	return allowed(value, "begin", "capture", "release", "reconciling", "replay")
 }
 func boundedStage(value string) string {
-	return allowed(value, "fetch", "upload", "transform", "delete", "cleanup")
+	return allowed(value, "fetch", "upload", "capture", "transform", "delete", "cleanup")
 }
 func boundedAuthStage(value string) string {
 	return allowed(value, "authenticate", "network", "rate_limit", "model_authorization")
@@ -376,5 +384,5 @@ func boundedRejection(value string) string {
 }
 func boundedSource(value string) string { return allowed(value, "url", "base64", "inline") }
 func boundedRoute(value string) string {
-	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/assets", "/v1/audio/assets/{id}", "/v1/models", "/gateway/v1/jobs", "/gateway/v1/jobs/{id}", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
+	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions", "/v1/audio/speech", "/v1/audio/speech/assets/{id}", "/v1/audio/speech/assets/{id}/content", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/assets", "/v1/audio/assets/{id}", "/v1/models", "/gateway/v1/jobs", "/gateway/v1/jobs/{id}", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
 }

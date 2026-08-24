@@ -31,7 +31,7 @@ func TestPrivateS3RoundTrip(t *testing.T) {
 	if err = store.Put(ctx, key, "audio/wav", int64(len(value)), digest, bytes.NewReader(value)); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	body, err := store.Get(ctx, key, 1024)
+	body, err := store.Get(ctx, key, int64(len(value)))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

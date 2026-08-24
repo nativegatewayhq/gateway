@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-061
 title: Phase 5 Managed Speech Output Storage and Authorized Delivery
-status: accepted
+status: completed
 created_at: 2026-08-24T14:19:33+09:00
-updated_at: 2026-08-24T14:19:33+09:00
+updated_at: 2026-08-24T14:52:05+09:00
 owners:
   - gateway
 initiative: phase-5-managed-speech-output-delivery
@@ -118,7 +118,7 @@ Plan 053의 managed video output은 비동기 Provider URL을 수집한 후 CDN 
 
 ### 3. Private object persistence
 
-- `speech/<organization>/<asset-id>/<digest>.<extension>` deterministic key를 사용한다.
+- `audio/speech/<organization>/<asset-id>/<digest>.<extension>` deterministic key를 사용한다.
 - S3/R2 conditional put, configured SSE와 HEAD identity 검증을 제공한다.
 - capture 완료 spool을 seekable stream으로 upload하고 DB의 available transition 뒤에만 content API를 연다.
 - cleanup worker가 expired/failed/orphaned asset을 lease로 claim해 object와 spool 잔재를 정리한다.
@@ -246,22 +246,31 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] 기본 Speech 요청이 기존 official SDK native binary contract를 그대로 유지함
-- [ ] managed 요청이 동일 binary와 opaque asset response header를 제공함
-- [ ] Provider stream이 전체 메모리 적재 없이 downstream과 private spool로 bounded capture됨
-- [ ] client disconnect와 process restart 뒤 storage/settlement가 Provider 재호출 없이 수렴함
-- [ ] private S3/R2 conditional persistence와 tenant-scoped metadata/content/delete가 동작함
-- [ ] authenticated GET/HEAD/single-range download가 safe header와 byte bound를 지킴
-- [ ] duplicate request/worker가 단일 asset/object/Provider/Ledger effect로 수렴함
-- [ ] storage 실패가 verified Provider charge를 잘못 Release하거나 이중 Capture하지 않음
-- [ ] delete/retention과 active capture/download race가 lease로 안전하게 수렴함
-- [ ] audio/input/voice/object key/digest/credential이 API·log·telemetry·billing DB에 노출되지 않음
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README, migration, Docker Compose와 멀티레포 handoff가 갱신됨
+- [x] 기본 Speech 요청이 기존 official SDK native binary contract를 그대로 유지함
+- [x] managed 요청이 동일 binary와 opaque asset response header를 제공함
+- [x] Provider stream이 전체 메모리 적재 없이 downstream과 private spool로 bounded capture됨
+- [x] client disconnect와 process restart 뒤 storage/settlement가 Provider 재호출 없이 수렴함
+- [x] private S3/R2 conditional persistence와 tenant-scoped metadata/content/delete가 동작함
+- [x] authenticated GET/HEAD/single-range download가 safe header와 byte bound를 지킴
+- [x] duplicate request/worker가 단일 asset/object/Provider/Ledger effect로 수렴함
+- [x] storage 실패가 verified Provider charge를 잘못 Release하거나 이중 Capture하지 않음
+- [x] delete/retention과 active capture/download race가 lease로 안전하게 수렴함
+- [x] audio/input/voice/object key/digest/credential이 API·log·telemetry·billing DB에 노출되지 않음
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README, migration, Docker Compose와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- migration `000055`: tenant/API-key ownership, immutable charge/request/content identity, lifecycle state, lease와 append-only events
+- `internal/speechstorage`: bounded mode-0600 capture, downstream disconnect continuation, deterministic conditional S3 persistence, put-response-loss recovery, authenticated read lease와 retention cleanup
+- OpenAI facade: opt-in managed header, native binary response와 opaque asset header, completed object replay without Provider/Ledger duplication
+- Speech asset API: bounded private metadata, logical delete와 authenticated GET/HEAD/single-range content delivery
+- S3 conditional reuse 시 existing object의 exact length와 SHA-256를 재검증하도록 공통 private audio store를 강화함
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과
+- 격리 PostgreSQL `gateway_plan061`, 빈 Redis DB와 실제 MinIO를 사용한 전체 `make integration-test` 통과
+- actual MinIO capture/open/delete round trip와 PERSISTING/RECONCILING recovery, active-download/delete race integration tests 통과
+- official OpenAI Python·JavaScript Speech 회귀와 Python·Node managed delivery SDK-conformance tests 통과
+- 정적 schema/telemetry 감사에서 input, voice, audio body, object key/digest와 credential의 공개·고카디널리티 노출이 없음
 
 ## Rollback 계획
 

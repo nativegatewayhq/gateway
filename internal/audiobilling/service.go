@@ -103,6 +103,9 @@ func (s *Service) Begin(ctx context.Context, r BeginRequest) (Charge, error) {
 		if c.State == "RESERVED" || c.State == "RECONCILING" {
 			return Charge{}, ErrPending
 		}
+		if c.State == "CAPTURED" {
+			return c, nil
+		}
 		return Charge{}, ErrConflict
 	}
 	est, err := s.estimator.EstimateInTx(ctx, tx, audiopricing.Request{ChannelID: r.ChannelID, Protocol: "openai", Operation: "audio.speech", Model: r.Model, Quantity: r.Quantity})

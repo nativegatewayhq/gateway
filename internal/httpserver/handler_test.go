@@ -112,6 +112,18 @@ func TestOpenAISpeechRouteIsExact(t *testing.T) {
 	}
 }
 
+func TestOpenAISpeechAssetRoutesAreMounted(t *testing.T) {
+	assets := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	handler := NewHandler(discardLogger(), nil, Routes{OpenAISpeechAssets: assets})
+	for path, want := range map[string]int{"/v1/audio/speech/assets/speechasset_00000000000000000000000000000001": http.StatusCreated, "/v1/audio/speech/assets/speechasset_00000000000000000000000000000001/content": http.StatusCreated, "/v1/audio/speech": http.StatusNotFound} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != want {
+			t.Fatalf("%s=%d", path, response.Code)
+		}
+	}
+}
+
 func TestOpenAITranscriptionsRouteIsExact(t *testing.T) {
 	transcriptions := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
 	handler := NewHandler(discardLogger(), nil, Routes{OpenAITranscriptions: transcriptions})

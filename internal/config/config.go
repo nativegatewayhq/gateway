@@ -19,6 +19,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	"github.com/nativegatewayhq/gateway/internal/speechstorage"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	"github.com/nativegatewayhq/gateway/internal/videostorage"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
@@ -160,6 +161,7 @@ type Config struct {
 	ProviderHealth                  providerhealth.Config
 	ImageStorage                    imagestorage.Config
 	AudioInputStorage               audioassets.Config
+	SpeechOutputStorage             speechstorage.Config
 	VideoStorage                    videostorage.Config
 	Telemetry                       telemetry.Config
 	TrustedProxyPrefixes            []netip.Prefix
@@ -305,6 +307,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ProviderHealth:                  providerhealth.DefaultConfig(),
 		ImageStorage:                    imagestorage.DefaultConfig(),
 		AudioInputStorage:               audioassets.DefaultConfig(),
+		SpeechOutputStorage:             speechstorage.DefaultConfig(),
 		VideoStorage:                    videostorage.DefaultConfig(),
 		Telemetry:                       telemetry.DefaultConfig(),
 		ReplicateEndpoint:               "https://api.replicate.com",
@@ -815,6 +818,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if err := loadAudioInputStorage(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
+	if err := loadSpeechOutputStorage(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
 	if err := loadVideoStorage(&cfg, lookup); err != nil {
@@ -1414,6 +1420,63 @@ func loadAudioInputStorage(cfg *Config, lookup LookupEnv) error {
 	}
 	if err := cfg.AudioInputStorage.Validate(); err != nil {
 		return fmt.Errorf("GATEWAY_AUDIO_INPUT_STORAGE_*: settings are invalid")
+	}
+	return nil
+}
+
+func loadSpeechOutputStorage(cfg *Config, lookup LookupEnv) error {
+	if value, ok := lookup("GATEWAY_SPEECH_OUTPUT_STORAGE_MODE"); ok {
+		cfg.SpeechOutputStorage.Mode = speechstorage.Mode(strings.ToLower(strings.TrimSpace(value)))
+	}
+	for _, setting := range []struct {
+		key    string
+		target *string
+	}{
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_ENDPOINT", &cfg.SpeechOutputStorage.Endpoint},
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_REGION", &cfg.SpeechOutputStorage.Region},
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_BUCKET", &cfg.SpeechOutputStorage.Bucket},
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_ACCESS_KEY_ID", &cfg.SpeechOutputStorage.AccessKeyID},
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_SECRET_ACCESS_KEY", &cfg.SpeechOutputStorage.SecretAccessKey},
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_SERVER_SIDE_ENCRYPTION", &cfg.SpeechOutputStorage.ServerSideEncryption},
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_TEMP_DIR", &cfg.SpeechOutputStorage.TemporaryDirectory},
+	} {
+		if value, ok := lookup(setting.key); ok {
+			*setting.target = strings.TrimSpace(value)
+		}
+	}
+	if value, ok := lookup("GATEWAY_SPEECH_OUTPUT_STORAGE_MAX_BYTES"); ok {
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return fmt.Errorf("GATEWAY_SPEECH_OUTPUT_STORAGE_MAX_BYTES: must be a valid bounded integer")
+		}
+		cfg.SpeechOutputStorage.MaximumBytes = parsed
+	}
+	if value, ok := lookup("GATEWAY_SPEECH_OUTPUT_STORAGE_MAX_CONCURRENT_CAPTURES"); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("GATEWAY_SPEECH_OUTPUT_STORAGE_MAX_CONCURRENT_CAPTURES: must be a valid bounded integer")
+		}
+		cfg.SpeechOutputStorage.MaximumConcurrentCaptures = parsed
+	}
+	for _, setting := range []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"GATEWAY_SPEECH_OUTPUT_STORAGE_UPLOAD_TIMEOUT", &cfg.SpeechOutputStorage.UploadTimeout}, {"GATEWAY_SPEECH_OUTPUT_STORAGE_DOWNLOAD_TIMEOUT", &cfg.SpeechOutputStorage.DownloadTimeout}, {"GATEWAY_SPEECH_OUTPUT_STORAGE_RETENTION", &cfg.SpeechOutputStorage.Retention}, {"GATEWAY_SPEECH_OUTPUT_STORAGE_CLEANUP_INTERVAL", &cfg.SpeechOutputStorage.CleanupInterval}, {"GATEWAY_SPEECH_OUTPUT_STORAGE_CLEANUP_LEASE", &cfg.SpeechOutputStorage.CleanupLease},
+	} {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded duration", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	if err := cfg.SpeechOutputStorage.Validate(); err != nil {
+		return fmt.Errorf("GATEWAY_SPEECH_OUTPUT_STORAGE_*: settings are invalid")
+	}
+	if cfg.SpeechOutputStorage.Mode == speechstorage.Managed && cfg.SpeechOutputStorage.MaximumBytes > cfg.SpeechResponseBytes {
+		return fmt.Errorf("GATEWAY_SPEECH_OUTPUT_STORAGE_MAX_BYTES: must not exceed the Speech response limit")
 	}
 	return nil
 }
