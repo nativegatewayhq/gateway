@@ -114,6 +114,13 @@ func TestMigrateIsRepeatable(t *testing.T) {
 	if !strings.Contains(accessDefault, "all") {
 		t.Fatalf("model access default=%s", accessDefault)
 	}
+	var modelPermissionConstraint string
+	if err := pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='service_api_key_model_permissions'::regclass AND conname='service_api_key_model_permissions_operation_check'`).Scan(&modelPermissionConstraint); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(modelPermissionConstraint, "audio.translation") || !strings.Contains(modelPermissionConstraint, "audio.transcription") {
+		t.Fatalf("model permission constraint=%s", modelPermissionConstraint)
+	}
 	var protocolConstraint string
 	if err := pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='image_request_charges'::regclass AND conname='image_request_charges_protocol_check'`).Scan(&protocolConstraint); err != nil {
 		t.Fatal(err)

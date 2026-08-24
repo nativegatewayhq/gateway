@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-058
 title: Phase 5 OpenAI Audio Translations Native Multipart Foundation
-status: accepted
+status: in_progress
 created_at: 2026-08-24T12:43:08+09:00
-updated_at: 2026-08-24T12:43:08+09:00
+updated_at: 2026-08-24T12:50:19+09:00
 owners:
   - gateway
 initiative: phase-5-openai-audio-translations-foundation

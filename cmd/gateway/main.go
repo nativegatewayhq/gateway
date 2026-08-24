@@ -289,6 +289,11 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway Audio Transcription model registry initialization failed")
 		return 1
 	}
+	translationModels, err := audiooperation.NewTranslationRegistry(cfg.OpenAITranslationModels, cfg.OpenAITranslationModelMap, cfg.OpenAITranslationCapabilities)
+	if err != nil {
+		logger.Error("gateway Audio Translation model registry initialization failed")
+		return 1
+	}
 	anthropicLimits := make(map[string]anthropicoperation.Limits, len(cfg.AnthropicMessagesModelLimits))
 	for model, limit := range cfg.AnthropicMessagesModelLimits {
 		anthropicLimits[model] = anthropicoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
@@ -303,6 +308,7 @@ func run(stdout, stderr io.Writer) int {
 	var openAIResponsesHandler http.Handler
 	var openAISpeechHandler http.Handler
 	var openAITranscriptionHandler http.Handler
+	var openAITranslationHandler http.Handler
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
@@ -446,6 +452,11 @@ func run(stdout, stderr io.Writer) int {
 		handler.SetTelemetry(telemetryRuntime.Recorder)
 		openAITranscriptionHandler = handler
 	}
+	if len(cfg.OpenAITranslationModels) > 0 {
+		handler := openaiProtocol.NewTranslationHandler(logger, apiKeyAuthenticator, translationModels, openaiProvider.NewTranslation(providerCredentialRegistry, cfg.TranslationTimeout), healthGate, cfg.TranslationRequestBytes, cfg.TranslationFileBytes, cfg.TranslationFieldBytes, cfg.TranslationResponseBytes, cfg.TranslationSpoolLimit)
+		handler.SetTelemetry(telemetryRuntime.Recorder)
+		openAITranslationHandler = handler
+	}
 	if len(cfg.AnthropicMessagesModels) > 0 {
 		var handler *anthropicProtocol.Handler
 		if anthropicChargeBilling == nil {
@@ -479,7 +490,7 @@ func run(stdout, stderr io.Writer) int {
 	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
-	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAudioOperations(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, transcriptionModels, providerCredentialRegistry)
+	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAudioOperations(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, transcriptionModels, translationModels, providerCredentialRegistry)
 	openAIModelsHandler.SetTranscriptionPricing(transcriptionPricing)
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
@@ -694,6 +705,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIResponses:      openAIResponsesHandler,
 		OpenAISpeech:         openAISpeechHandler,
 		OpenAITranscriptions: openAITranscriptionHandler,
+		OpenAITranslations:   openAITranslationHandler,
 		Anthropic:            anthropicHandler,
 		Replicate:            replicateHandler,
 		ReplicateWebhook:     replicateWebhookHandler,

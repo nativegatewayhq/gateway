@@ -37,6 +37,9 @@ type ModelsHandler struct {
 	transcriptions interface {
 		List() []audiooperation.TranscriptionModel
 	}
+	translations interface {
+		List() []audiooperation.TranslationModel
+	}
 	transcriptionPricing interface {
 		EstimateTranscription(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error)
 	}
@@ -52,8 +55,10 @@ func NewModelsHandlerWithAllAudioOperations(logger *slog.Logger, authenticator A
 	List() []responsesoperation.Model
 }, video interface{ List() []videooperation.Route }, audio interface{ List() []audiooperation.Model }, transcriptions interface {
 	List() []audiooperation.TranscriptionModel
+}, translations interface {
+	List() []audiooperation.TranslationModel
 }, availability ProviderAvailability) *ModelsHandler {
-	return &ModelsHandler{common: NewImagesHandler(logger, authenticator, models, nil, 1), chat: chat, responses: responses, video: video, audio: audio, transcriptions: transcriptions, availability: availability}
+	return &ModelsHandler{common: NewImagesHandler(logger, authenticator, models, nil, 1), chat: chat, responses: responses, video: video, audio: audio, transcriptions: transcriptions, translations: translations, availability: availability}
 }
 
 func NewModelsHandlerWithAllAndAudio(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
@@ -254,6 +259,21 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 			if available && handler.transcriptionPricing != nil {
 				_, priceErr := handler.transcriptionPricing.EstimateTranscription(request.Context(), audiopricing.TranscriptionPriceRequest{ChannelID: model.ChannelID, Model: model.ID})
 				available = priceErr == nil
+			}
+			if available {
+				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})
+				seen[model.ID] = true
+			}
+		}
+	}
+	if handler.translations != nil {
+		for _, model := range handler.translations.List() {
+			if seen[model.ID] || !principal.AuthorizeModel("openai", audiooperation.Translation, model.ID) {
+				continue
+			}
+			available := configured[model.Provider]
+			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
+				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
 			}
 			if available {
 				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})

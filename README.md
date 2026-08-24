@@ -130,6 +130,15 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_TRANSCRIPTION_MAX_FIELD_BYTES` | `65536` | Maximum bytes per non-file multipart field |
 | `GATEWAY_OPENAI_TRANSCRIPTION_MAX_RESPONSE_BODY_BYTES` | `33554432` | Maximum native JSON, text, subtitle, or SSE response |
 | `GATEWAY_OPENAI_TRANSCRIPTION_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent bounded transcription multipart spools; maximum 128 |
+| `GATEWAY_OPENAI_TRANSLATION_MODELS` | unset | Comma-separated logical OpenAI audio translation models; BYOK only until verified translation billing is implemented |
+| `GATEWAY_OPENAI_TRANSLATION_MODEL_MAP` | unset | JSON object mapping logical translation model IDs to exact OpenAI Provider model IDs |
+| `GATEWAY_OPENAI_TRANSLATION_MODEL_CAPABILITIES_JSON` | unset | Exact translation capability map for response formats, prompt, and temperature |
+| `GATEWAY_OPENAI_TRANSLATION_REQUEST_TIMEOUT` | `2m` | Complete translation upload and response timeout; maximum `10m` |
+| `GATEWAY_OPENAI_TRANSLATION_MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum inbound translation multipart body |
+| `GATEWAY_OPENAI_TRANSLATION_MAX_FILE_BYTES` | `62914560` | Maximum translation audio file part; cannot exceed the request limit |
+| `GATEWAY_OPENAI_TRANSLATION_MAX_FIELD_BYTES` | `65536` | Maximum bytes per translation non-file multipart field |
+| `GATEWAY_OPENAI_TRANSLATION_MAX_RESPONSE_BODY_BYTES` | `33554432` | Maximum native translation JSON, text, or subtitle response |
+| `GATEWAY_OPENAI_TRANSLATION_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent bounded translation multipart spools; maximum 128 |
 | `GATEWAY_IMAGE_EDITS_MAX_REQUEST_BODY_BYTES` | `67108864` | Image edit body limit; maximum 256 MiB |
 | `GATEWAY_IMAGE_EDIT_MAX_CONCURRENT_SPOOLS` | `8` | Concurrent multipart edit spool limit; maximum 128 |
 | `GATEWAY_BILLING_MODE` | `disabled` | `disabled` preserves BYOK pass-through; `required` enforces price and Wallet settlement |
@@ -390,6 +399,26 @@ gateway-audio-price \
 Use `openai-transcription-duration-v1` with `-cost-per-minute`, `-sale-per-minute`, and `-maximum-duration-milliseconds` for duration-billed models. `-action estimate` prints the active maximum cost and sale; `-action inspect` also prints its immutable price ID and strategy.
 
 Managed requests require `Idempotency-Key`. Wallet, hierarchical quota, and Provider spend cap reserve the published maximum before dispatch. Strict native `usage.type=tokens` or `usage.type=duration` evidence determines actual Capture and releases the difference. Known non-2xx responses Release; timeout, reset, panic, invalid/missing usage, settlement failure, or an incomplete stream retain the reservation for bounded reconciliation. Usage-less text/SRT/VTT formats remain available in BYOK mode but fail closed before managed dispatch. Audio, filename, prompt, transcript, segments, and credentials are not stored as billing evidence.
+
+## OpenAI Audio Translations
+
+Set `GATEWAY_OPENAI_TRANSLATION_MODELS` to enable native `POST /v1/audio/translations` in BYOK mode. The operation is isolated as `audio.translation`; it does not reuse transcription permissions, telemetry dimensions, or Provider URLs. A logical model may map to an OpenAI model such as `whisper-1` through `GATEWAY_OPENAI_TRANSLATION_MODEL_MAP`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="SERVICE_API_KEY", base_url="https://gateway.example/v1")
+with open("speech.wav", "rb") as audio:
+    translation = client.audio.translations.create(
+        model="translation-public",
+        file=audio,
+    )
+print(translation.text)
+```
+
+The Gateway requires exactly one file and model. Only `prompt`, `response_format`, and decimal `temperature` in the inclusive `0..1` range are accepted as optional fields, subject to the model capability declaration. Translation does not accept transcription-only language, timestamp, diarization, or streaming fields. Native JSON, verbose JSON, text, SRT, and VTT responses are returned unchanged within configured bounds.
+
+Inbound multipart data is validated and reconstructed through bounded memory/file spools before being sent only to the fixed OpenAI `/v1/audio/translations` origin with a replaced Provider credential. Provider errors, timeouts, resets, panics, client cancellation, and response-limit failures never cause redispatch. Audio, filename, prompt, translated text, service keys, and Provider credentials are not stored or logged. Enabling translation models while `GATEWAY_BILLING_MODE=required` fails closed until a separate verified pricing and settlement plan is implemented.
 
 ### Anthropic Messages foundation
 
