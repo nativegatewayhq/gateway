@@ -224,6 +224,7 @@ go run ./cmd/gateway-plugin-conformance ...
 
 ## 검증 증거
 
+- 구현 Pull Request: [#95](https://github.com/nativegatewayhq/gateway/pull/95), 구현 commit `b2818bb`.
 - `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과: fmt, vet, 전체 race unit test, standalone public module dependency 검사와 모든 binary build.
 - fresh PostgreSQL `gateway_plan063` 및 Redis DB 15에서 `GOFLAGS=-p=1 make integration-test` 통과: plugin channel snapshot, billing/idempotency와 전체 Gateway integration suite 유지.
 - `go test -tags=sdkconformance ./protocols/openai ./protocols/gemini -count=1` 통과: 기존 공식 OpenAI/Gemini SDK plugin wire 호환 유지.
