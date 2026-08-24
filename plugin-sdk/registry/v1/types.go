@@ -13,6 +13,8 @@ const RuntimeSchema = "nativegateway.plugin-request/v1"
 const RuntimeSDK = "runtime/v1"
 const AsyncRuntimeSchema = "nativegateway.plugin-async/v1"
 const AsyncRuntimeSDK = "async/v1"
+const VideoRuntimeSchema = "nativegateway.plugin-video/v1"
+const VideoRuntimeSDK = "video/v1"
 
 const MaximumIndexBytes = 4 << 20
 const MaximumAdmissionBytes = 1 << 20

@@ -319,6 +319,8 @@ func requestMetadata(request *http.Request) (string, string, string) {
 		return "fal", "image.generate", "/internal/webhooks/fal/{job}/{token}"
 	case strings.HasPrefix(path, "/internal/webhooks/plugin/"):
 		return "plugin", "image.generate", "/internal/webhooks/plugin/{job}/{token}"
+	case strings.HasPrefix(path, "/internal/webhooks/plugin-video/"):
+		return "plugin", "video.generate", "/internal/webhooks/plugin-video/{job}/{token}"
 	case strings.HasPrefix(path, "/v1beta/models/"):
 		return "gemini", "image.generate", "/v1beta/models/{model}:generateContent"
 	case path == "/health/live":
@@ -386,5 +388,5 @@ func boundedRejection(value string) string {
 }
 func boundedSource(value string) string { return allowed(value, "url", "base64", "inline") }
 func boundedRoute(value string) string {
-	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions", "/v1/audio/speech", "/v1/audio/speech/assets/{id}", "/v1/audio/speech/assets/{id}/content", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/assets", "/v1/audio/assets/{id}", "/v1/models", "/gateway/v1/jobs", "/gateway/v1/jobs/{id}", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/internal/webhooks/plugin/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
+	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions", "/v1/audio/speech", "/v1/audio/speech/assets/{id}", "/v1/audio/speech/assets/{id}/content", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/assets", "/v1/audio/assets/{id}", "/v1/models", "/gateway/v1/jobs", "/gateway/v1/jobs/{id}", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/internal/webhooks/plugin/{job}/{token}", "/internal/webhooks/plugin-video/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
 }

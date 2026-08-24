@@ -38,6 +38,22 @@ func (provider *AsyncProvider) Submit(ctx context.Context, job joboperation.Job,
 		callback = value.callback
 		payload = value.payload
 	}
+	if isVideoBinding(provider.client, job.ChannelID) {
+		binding, _ := provider.client.Binding(job.ChannelID)
+		input, err := videoInput(payload, binding)
+		if err != nil {
+			return jobs.SubmitResult{}, videoKnownFailure("invalid_request", http.StatusBadRequest)
+		}
+		response, err := provider.client.SubmitVideo(ctx, job.ChannelID, job.RequestID, job.ID, input, callback)
+		if err != nil {
+			return jobs.SubmitResult{}, pluginProviderError(err)
+		}
+		observation, err := videoObservation(response.Observation, job.ID, response.ProviderJobRef, "submit")
+		if err != nil {
+			return jobs.SubmitResult{}, &jobs.ProviderError{Category: "invalid_response"}
+		}
+		return jobs.SubmitResult{ProviderJobID: response.ProviderJobRef, Observation: observation, PollAfter: provider.pollAfter}, nil
+	}
 	input, err := asyncImageInput(job.Protocol, payload)
 	if err != nil {
 		return jobs.SubmitResult{}, knownPluginFailure("invalid_request", http.StatusBadRequest)
@@ -54,6 +70,13 @@ func (provider *AsyncProvider) Submit(ctx context.Context, job joboperation.Job,
 }
 
 func (provider *AsyncProvider) Poll(ctx context.Context, attempt jobs.ProviderAttempt) (joboperation.Observation, error) {
+	if isVideoBinding(provider.client, attempt.ChannelID) {
+		response, err := provider.client.ControlVideo(ctx, attempt.ChannelID, attempt.JobID+":poll", attempt.JobID, "poll", attempt.ProviderJobID)
+		if err != nil {
+			return joboperation.Observation{}, pluginProviderError(err)
+		}
+		return videoObservation(response.Observation, attempt.JobID, attempt.ProviderJobID, "poll")
+	}
 	response, err := provider.client.ControlAsync(ctx, attempt.ChannelID, attempt.JobID+":poll", attempt.JobID, "poll", attempt.ProviderJobID)
 	if err != nil {
 		return joboperation.Observation{}, pluginProviderError(err)
@@ -62,6 +85,13 @@ func (provider *AsyncProvider) Poll(ctx context.Context, attempt jobs.ProviderAt
 }
 
 func (provider *AsyncProvider) Cancel(ctx context.Context, attempt jobs.ProviderAttempt) (joboperation.Observation, error) {
+	if isVideoBinding(provider.client, attempt.ChannelID) {
+		response, err := provider.client.ControlVideo(ctx, attempt.ChannelID, attempt.JobID+":cancel", attempt.JobID, "cancel", attempt.ProviderJobID)
+		if err != nil {
+			return joboperation.Observation{}, pluginProviderError(err)
+		}
+		return videoObservation(response.Observation, attempt.JobID, attempt.ProviderJobID, "cancel")
+	}
 	response, err := provider.client.ControlAsync(ctx, attempt.ChannelID, attempt.JobID+":cancel", attempt.JobID, "cancel", attempt.ProviderJobID)
 	if err != nil {
 		return joboperation.Observation{}, pluginProviderError(err)

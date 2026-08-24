@@ -24,12 +24,13 @@ var (
 )
 
 type Manifest struct {
-	SchemaVersion        string    `json:"schema_version"`
-	ID                   string    `json:"id"`
-	Version              string    `json:"version"`
-	GatewayCompatibility string    `json:"gateway_compatibility"`
-	Transport            Transport `json:"transport"`
-	Models               []Model   `json:"models"`
+	SchemaVersion        string       `json:"schema_version"`
+	ID                   string       `json:"id"`
+	Version              string       `json:"version"`
+	GatewayCompatibility string       `json:"gateway_compatibility"`
+	Transport            Transport    `json:"transport"`
+	Models               []Model      `json:"models"`
+	VideoModels          []VideoModel `json:"video_models,omitempty"`
 }
 type Transport struct {
 	Kind          string `json:"kind"`
@@ -51,6 +52,26 @@ type Capabilities struct {
 	MediaType     string   `json:"media_type"`
 	Output        []string `json:"output"`
 	MaximumImages int      `json:"maximum_images"`
+}
+type VideoModel struct {
+	ID           string            `json:"id"`
+	Protocols    []string          `json:"protocols"`
+	Operations   []string          `json:"operations"`
+	Capabilities VideoCapabilities `json:"capabilities"`
+	Async        VideoAsync        `json:"async"`
+}
+type VideoAsync struct {
+	Contract string `json:"contract"`
+	Callback bool   `json:"callback"`
+}
+type VideoCapabilities struct {
+	MediaType              string   `json:"media_type"`
+	Output                 []string `json:"output"`
+	TextToVideo            bool     `json:"text_to_video"`
+	ImageToVideo           bool     `json:"image_to_video"`
+	Audio                  bool     `json:"audio"`
+	MaximumDurationSeconds int      `json:"maximum_duration_seconds"`
+	Ratios                 []string `json:"ratios"`
 }
 type Validated struct {
 	Manifest  Manifest
@@ -82,7 +103,7 @@ func Parse(body []byte, gatewayVersion string) (Validated, error) {
 }
 
 func validate(value Manifest, gatewayVersion string) error {
-	if value.SchemaVersion != SchemaVersion || !validID(value.ID, 128) || !versionPattern.MatchString(value.Version) || !compatible(value.GatewayCompatibility, gatewayVersion) || value.Transport.Kind != "http-sidecar" || !validID(value.Transport.EndpointRef, 128) || !validID(value.Transport.AuthSecretRef, 128) || len(value.Models) < 1 || len(value.Models) > 128 {
+	if value.SchemaVersion != SchemaVersion || !validID(value.ID, 128) || !versionPattern.MatchString(value.Version) || !compatible(value.GatewayCompatibility, gatewayVersion) || value.Transport.Kind != "http-sidecar" || !validID(value.Transport.EndpointRef, 128) || !validID(value.Transport.AuthSecretRef, 128) || len(value.Models)+len(value.VideoModels) < 1 || len(value.Models) > 128 || len(value.VideoModels) > 128 || len(value.Models) > 0 && len(value.VideoModels) > 0 {
 		return ErrInvalid
 	}
 	models := map[string]bool{}
@@ -109,7 +130,29 @@ func validate(value Manifest, gatewayVersion string) error {
 			protocols[protocol] = true
 		}
 	}
+	for _, model := range value.VideoModels {
+		if !validID(model.ID, 200) || models[model.ID] || len(model.Protocols) != 1 || model.Protocols[0] != "runway" || len(model.Operations) != 1 || model.Operations[0] != "video.generate" || model.Async.Contract != "video/v1" || model.Capabilities.MediaType != "application/json" || len(model.Capabilities.Output) != 1 || model.Capabilities.Output[0] != "url" || !model.Capabilities.TextToVideo && !model.Capabilities.ImageToVideo || model.Capabilities.MaximumDurationSeconds < 1 || model.Capabilities.MaximumDurationSeconds > 600 || len(model.Capabilities.Ratios) < 1 || len(model.Capabilities.Ratios) > 16 || !validRatios(model.Capabilities.Ratios) {
+			return ErrInvalid
+		}
+		models[model.ID] = true
+	}
 	return nil
+}
+func validRatios(values []string) bool {
+	seen := map[string]bool{}
+	for _, value := range values {
+		left, right, ok := strings.Cut(value, ":")
+		width, leftErr := strconv.Atoi(left)
+		height, rightErr := strconv.Atoi(right)
+		if !ok || leftErr != nil || rightErr != nil || width < 1 || width > 8192 || height < 1 || height > 8192 || strconv.Itoa(width) != left || strconv.Itoa(height) != right {
+			return false
+		}
+		if seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
 }
 func validID(value string, maximum int) bool {
 	return len(value) > 0 && len(value) <= maximum && idPattern.MatchString(value) && strings.TrimSpace(value) == value
@@ -161,6 +204,9 @@ func IsCompatible(expression, current string) bool { return compatible(expressio
 // ExecutionContract returns the single sidecar contract selected by a valid
 // manifest. A manifest cannot mix synchronous and asynchronous models.
 func ExecutionContract(value Validated) string {
+	if len(value.Manifest.VideoModels) > 0 {
+		return value.Manifest.VideoModels[0].Async.Contract
+	}
 	if len(value.Manifest.Models) == 0 {
 		return ""
 	}

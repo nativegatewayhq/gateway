@@ -14,6 +14,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
+	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 	registryv1 "github.com/nativegatewayhq/gateway/plugin-sdk/registry/v1"
 )
@@ -38,6 +39,9 @@ type Binding struct {
 	MaximumImages                                                int
 	Output                                                       string
 	Async, Callback                                              bool
+	Video, TextToVideo, ImageToVideo, Audio                      bool
+	MaximumDurationSeconds                                       int
+	Ratios                                                       map[string]struct{}
 	ResultOrigins                                                map[string]struct{}
 	RegistrySequence                                             uint64
 	RegistryIndexDigest, RegistryEnvelopeDigest, AdmissionDigest [32]byte
@@ -52,6 +56,7 @@ type RegistryIndexEvidence struct {
 type Registry struct {
 	bindings      map[string]Binding
 	routes        []imageoperation.ModelRoute
+	videoRoutes   []videooperation.Route
 	config        Config
 	indexEvidence *RegistryIndexEvidence
 }
@@ -146,6 +151,39 @@ func newRegistry(validated []manifest.Validated, config Config, snapshot *regist
 				result.routes = append(result.routes, imageoperation.ModelRoute{Protocol: protocol, Model: model.ID, Owner: item.Manifest.ID, Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Fixed, FixedCandidateID: candidateID, Candidates: []imageoperation.ChannelCandidate{{ID: candidateID, Provider: providercredentials.Plugin, ProviderModel: model.ID, ChannelID: channelID, Enabled: true}}, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: int64(model.Capabilities.MaximumImages), RequestExtractor: protocol + "-plugin-image-count-v1", ResultExtractor: "plugin-image-output-v1"}})
 			}
 		}
+		for _, model := range item.Manifest.VideoModels {
+			modelKey := "runway\x00" + model.ID
+			if seenModels[modelKey] {
+				return nil, ErrInvalidConfiguration
+			}
+			seenModels[modelKey] = true
+			if len(resultOrigins) == 0 {
+				return nil, ErrInvalidConfiguration
+			}
+			channelMaterial := item.Manifest.ID + "\x00" + item.Manifest.Version + "\x00" + model.ID + "\x00runway\x00" + hex.EncodeToString(item.Digest[:])
+			if snapshot != nil {
+				channelMaterial += "\x00" + hex.EncodeToString(admissionDigest[:])
+			}
+			digest := sha256.Sum256([]byte(channelMaterial))
+			channelID := "channel_" + hex.EncodeToString(digest[:16])
+			candidateID := "candidate_plugin_" + hex.EncodeToString(digest[:8])
+			ratios := make(map[string]struct{}, len(model.Capabilities.Ratios))
+			for _, ratio := range model.Capabilities.Ratios {
+				ratios[ratio] = struct{}{}
+			}
+			binding := Binding{PluginID: item.Manifest.ID, Version: item.Manifest.Version, Model: model.ID, Protocol: "runway", ChannelID: channelID, CandidateID: candidateID, ManifestDigest: item.Digest, Origin: origin, BearerToken: bearerToken, Output: "url", Async: true, Callback: model.Async.Callback, Video: true, TextToVideo: model.Capabilities.TextToVideo, ImageToVideo: model.Capabilities.ImageToVideo, Audio: model.Capabilities.Audio, MaximumDurationSeconds: model.Capabilities.MaximumDurationSeconds, Ratios: ratios, ResultOrigins: resultOrigins}
+			if snapshot != nil {
+				binding.RegistrySequence = result.indexEvidence.Sequence
+				binding.RegistryIndexDigest = result.indexEvidence.IndexDigest
+				binding.RegistryEnvelopeDigest = result.indexEvidence.EnvelopeDigest
+				binding.AdmissionDigest = admissionDigest
+			}
+			if _, duplicate := result.bindings[channelID]; duplicate {
+				return nil, ErrInvalidConfiguration
+			}
+			result.bindings[channelID] = binding
+			result.videoRoutes = append(result.videoRoutes, videooperation.Route{Model: model.ID, ProviderModel: model.ID, Provider: providercredentials.Plugin, ChannelID: channelID, TextToVideo: model.Capabilities.TextToVideo, ImageToVideo: model.Capabilities.ImageToVideo})
+		}
 	}
 	sort.Slice(result.routes, func(i, j int) bool {
 		if result.routes[i].Protocol == result.routes[j].Protocol {
@@ -154,6 +192,16 @@ func newRegistry(validated []manifest.Validated, config Config, snapshot *regist
 		return result.routes[i].Protocol < result.routes[j].Protocol
 	})
 	return result, nil
+}
+
+func (registry *Registry) VideoRoutes() []videooperation.Route {
+	if registry == nil {
+		return nil
+	}
+	return append([]videooperation.Route(nil), registry.videoRoutes...)
+}
+func (registry *Registry) SupportsVideo() bool {
+	return registry != nil && len(registry.videoRoutes) > 0
 }
 
 func (registry *Registry) IndexEvidence() (RegistryIndexEvidence, bool) {
@@ -270,6 +318,7 @@ func cloneBinding(binding Binding) Binding {
 		binding.Origin = &origin
 	}
 	binding.ResultOrigins = maps.Clone(binding.ResultOrigins)
+	binding.Ratios = maps.Clone(binding.Ratios)
 	return binding
 }
 

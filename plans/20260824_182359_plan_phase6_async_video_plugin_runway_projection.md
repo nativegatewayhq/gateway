@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-066
 title: Phase 6 Async Video Plugin Runtime, Runway Native Projection, and Managed Delivery
-status: accepted
+status: completed
 created_at: 2026-08-24T18:23:59+09:00
-updated_at: 2026-08-24T18:23:59+09:00
+updated_at: 2026-08-24T19:00:19+09:00
 owners:
   - gateway
 initiative: phase-6-async-video-plugin-runtime
@@ -247,17 +247,17 @@ go run ./cmd/gateway-plugin-conformance -profile video-v1 ...
 
 ## 완료 조건
 
-- [ ] 기존 sync/async image manifest digest와 runtime/conformance profile이 변경되지 않음
-- [ ] 외부 Adapter가 public video SDK만으로 text/image submit, poll, cancel과 signed callback을 구현함
-- [ ] plugin-backed Runway native API가 Gateway Job ID와 terminal native task 결과로 수렴함
-- [ ] source asset과 Provider ref가 tenant/channel/capability 경계를 벗어나지 않음
-- [ ] callback/poll/cancel/restart가 post-submit redispatch나 duplicate effect 없이 수렴함
-- [ ] partial credit/failure/cancel/unknown usage가 Wallet/Ledger 정책대로 정확히 한 번 정산됨
-- [ ] managed video 저장과 immutable manifest/Registry/channel/Job/charge evidence가 보존됨
-- [ ] video conformance report, fixtures, CLI profile과 standalone template가 제공됨
-- [ ] secret/ref/asset/content가 log·telemetry·report·DB 오류에 노출되지 않음
-- [ ] built-in Runway, image plugin과 공식 SDK 회귀가 없음
-- [ ] unit/race/integration/SDK/public-module 검사가 통과함
+- [x] 기존 sync/async image manifest digest와 runtime/conformance profile이 변경되지 않음
+- [x] 외부 Adapter가 public video SDK만으로 text/image submit, poll, cancel과 signed callback을 구현함
+- [x] plugin-backed Runway native API가 Gateway Job ID와 terminal native task 결과로 수렴함
+- [x] source asset과 Provider ref가 tenant/channel/capability 경계를 벗어나지 않음
+- [x] callback/poll/cancel/restart가 post-submit redispatch나 duplicate effect 없이 수렴함
+- [x] partial credit/failure/cancel/unknown usage가 Wallet/Ledger 정책대로 정확히 한 번 정산됨
+- [x] managed video 저장과 immutable manifest/Registry/channel/Job/charge evidence가 보존됨
+- [x] video conformance report, fixtures, CLI profile과 standalone template가 제공됨
+- [x] secret/ref/asset/content가 log·telemetry·report·DB 오류에 노출되지 않음
+- [x] built-in Runway, image plugin과 공식 SDK 회귀가 없음
+- [x] unit/race/integration/SDK/public-module 검사가 통과함
 - [ ] README, CONTRIBUTING, examples, Makefile와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거

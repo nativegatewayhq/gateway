@@ -19,6 +19,9 @@ The Gateway repository is authoritative for these contracts:
 - `plugin-sdk/async/v1`: strict submit/poll/cancel/result and signed callback contract
 - `plugin-sdk/conformance/async/v1`: stable secret-safe async admission report and runner
 - `examples/plugin/go-async-sidecar-template`: isolated deterministic async reference module
+- `plugin-sdk/video/v1`: isolated Runway-native video submit/poll/cancel/result and signed callback contract
+- `plugin-sdk/conformance/video/v1`: stable video admission report and black-box runner
+- `examples/plugin/go-video-sidecar-template`: standalone deterministic video Adapter module
 
 Repository-local follow-up plans should consume, not duplicate, this contract:
 
@@ -43,3 +46,10 @@ Cloud injects the callback HMAC independently from the outbound bearer. A
 submitted Job must drain through its persisted channel/ref during rollback;
 it must never be redispatched or released merely because callback delivery was
 missed.
+
+Initiative `phase-6-async-video-plugin-runtime` applies the same durable Job,
+callback replay, exact-once settlement, and signed Registry boundaries to the
+separate `video/v1` profile. Gateway retains Runway native routes, source asset
+authorization, provider-credit evidence, and managed video collection. Cloud,
+Registry, and conformance consumers must select the profile by manifest contract
+and must never reinterpret video envelopes as image async envelopes.

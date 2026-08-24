@@ -97,6 +97,22 @@ func TestManagerPersistsAndReplaysManagedNativeOutput(t *testing.T) {
 	}
 }
 
+func TestManagerAcceptsPluginBackedRunwayOutput(t *testing.T) {
+	collector := &collectorFake{}
+	objects := &objectStoreFake{}
+	assets := &assetRepositoryFake{assets: map[int]Asset{}}
+	manager, err := NewManager(testConfig(), collector, objects, assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"id":"job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"SUCCEEDED","output":["https://runway.example/output.mp4"]}`)
+	job := joboperation.Job{ID: "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Protocol: "runway", Provider: "plugin", ChannelID: "channel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: joboperation.Succeeded, Snapshot: joboperation.Snapshot{Status: 200, Body: body}}
+	result, err := manager.Transform(context.Background(), job)
+	if err != nil || !strings.Contains(string(result.Body), "https://cdn.example/videos/plugin/") || assets.assets[0].Provider != "plugin" {
+		t.Fatalf("result=%s asset=%#v err=%v", result.Body, assets.assets[0], err)
+	}
+}
+
 func testConfig() Config {
 	return Config{Mode: Managed, Endpoint: "http://127.0.0.1:9000", Region: "auto", Bucket: "videos", AccessKeyID: "access", SecretAccessKey: "secret", CDNBaseURL: "https://cdn.example", MaximumVideos: 4, MaximumConcurrentDownloads: 2, MaximumVideoBytes: 1024, MaximumTotalBytes: 4096, FetchTimeout: time.Second, UploadTimeout: time.Second, FetchOrigins: map[string][]string{"runway": {"https://runway.example"}}}
 }

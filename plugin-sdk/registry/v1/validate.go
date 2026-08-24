@@ -12,6 +12,7 @@ import (
 
 	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
+	videoconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/video/v1"
 )
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
@@ -96,7 +97,8 @@ func validateStatement(value Statement) error {
 func validateAdmission(value Admission) error {
 	syncProfile := value.RuntimeSchema == RuntimeSchema && value.RuntimeSDK == RuntimeSDK && value.Conformance.SchemaVersion == conformance.ReportSchema && value.Conformance.RequiredChecksDigest == conformance.RequiredChecksDigest()
 	asyncProfile := value.RuntimeSchema == AsyncRuntimeSchema && value.RuntimeSDK == AsyncRuntimeSDK && value.Conformance.SchemaVersion == asyncconformance.ReportSchema && value.Conformance.RequiredChecksDigest == asyncconformance.RequiredChecksDigest()
-	if !validID(value.PluginID, 128) || !versionPattern.MatchString(value.PluginVersion) || !sha256Pattern.MatchString(value.ManifestDigest) || (!syncProfile && !asyncProfile) || !validCompatibility(value.GatewayCompatibility) || !validPlatform(value.Platform) || validateDescriptor(value.Artifact, "artifact") != nil || validateDescriptor(value.SBOM, "sbom") != nil || validateDescriptor(value.Provenance, "provenance") != nil {
+	videoProfile := value.RuntimeSchema == VideoRuntimeSchema && value.RuntimeSDK == VideoRuntimeSDK && value.Conformance.SchemaVersion == videoconformance.ReportSchema && value.Conformance.RequiredChecksDigest == videoconformance.RequiredChecksDigest()
+	if !validID(value.PluginID, 128) || !versionPattern.MatchString(value.PluginVersion) || !sha256Pattern.MatchString(value.ManifestDigest) || (!syncProfile && !asyncProfile && !videoProfile) || !validCompatibility(value.GatewayCompatibility) || !validPlatform(value.Platform) || validateDescriptor(value.Artifact, "artifact") != nil || validateDescriptor(value.SBOM, "sbom") != nil || validateDescriptor(value.Provenance, "provenance") != nil {
 		return ErrInvalid
 	}
 	if value.Conformance.Outcome != "pass" || !sha256Pattern.MatchString(value.Conformance.ReportDigest) {

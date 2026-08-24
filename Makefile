@@ -27,9 +27,11 @@ test:
 public-sdk-test:
 	cd examples/plugin/go-sidecar-template && GOWORK=off go test ./...
 	cd examples/plugin/go-async-sidecar-template && GOWORK=off go test ./...
+	cd examples/plugin/go-video-sidecar-template && GOWORK=off go test ./...
 	test -z "$$(cd examples/plugin/go-sidecar-template && GOWORK=off go list -deps ./... | grep 'github.com/nativegatewayhq/gateway/internal/' || true)"
 	test -z "$$(cd examples/plugin/go-sidecar-template && GOWORK=off go list -deps github.com/nativegatewayhq/gateway/plugin-sdk/registry/v1 | grep 'github.com/nativegatewayhq/gateway/internal/' || true)"
 	test -z "$$(cd examples/plugin/go-async-sidecar-template && GOWORK=off go list -deps ./... | grep 'github.com/nativegatewayhq/gateway/internal/' || true)"
+	test -z "$$(cd examples/plugin/go-video-sidecar-template && GOWORK=off go list -deps ./... | grep 'github.com/nativegatewayhq/gateway/internal/' || true)"
 
 integration-test:
 	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi

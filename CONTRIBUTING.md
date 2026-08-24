@@ -146,10 +146,11 @@ Pull Request에는 다음 정보를 포함한다.
 ## Provider Adapter 기여
 
 외부 HTTP sidecar Adapter는 Gateway의 `internal/` package를 import하지 않고
-동기 Adapter는 `plugin-sdk/runtime/v1`, 비동기 Adapter는
-`plugin-sdk/async/v1` 공개 wire package만 사용한다. 시작점은 각각
+동기 Adapter는 `plugin-sdk/runtime/v1`, 비동기 이미지 Adapter는
+`plugin-sdk/async/v1`, 비동기 영상 Adapter는 `plugin-sdk/video/v1` 공개 wire package만 사용한다. 시작점은 각각
 [`examples/plugin/go-sidecar-template`](./examples/plugin/go-sidecar-template)과
-[`examples/plugin/go-async-sidecar-template`](./examples/plugin/go-async-sidecar-template)이다.
+[`examples/plugin/go-async-sidecar-template`](./examples/plugin/go-async-sidecar-template),
+[`examples/plugin/go-video-sidecar-template`](./examples/plugin/go-video-sidecar-template)이다.
 
 Adapter 변경 PR과 외부 저장소 CI에서는 다음을 실행한다.
 
@@ -158,6 +159,7 @@ GOWORK=off go test ./...
 go run ./cmd/gateway-plugin-validator -manifest-dir /absolute/manifests
 go run ./cmd/gateway-plugin-conformance ...
 go run ./cmd/gateway-plugin-conformance -profile async-v1 ...
+go run ./cmd/gateway-plugin-conformance -profile video-v1 ...
 ```
 
 Conformance는 실제 유료 Provider 호출이 아닌 전용 test-mode contract를

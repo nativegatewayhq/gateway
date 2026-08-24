@@ -12,6 +12,8 @@ const validManifest = `{"schema_version":"nativegateway.provider/v1","id":"provi
 
 const validAsyncManifest = `{"schema_version":"nativegateway.provider/v1","id":"provider.async-example","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"async-sidecar","auth_secret_ref":"async-token"},"models":[{"id":"async-image-v1","protocols":["fal","replicate"],"operations":["image.generate"],"capabilities":{"media_type":"application/json","output":["url"],"maximum_images":4},"async":{"contract":"async/v1","callback":true}}]}`
 
+const validVideoManifest = `{"schema_version":"nativegateway.provider/v1","id":"provider.video-example","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"video-sidecar","auth_secret_ref":"video-token"},"models":[],"video_models":[{"id":"example-video-v1","protocols":["runway"],"operations":["video.generate"],"capabilities":{"media_type":"application/json","output":["url"],"text_to_video":true,"image_to_video":true,"audio":false,"maximum_duration_seconds":60,"ratios":["16:9","9:16"]},"async":{"contract":"video/v1","callback":true}}]}`
+
 func TestParseCanonicalDigestAndValidation(t *testing.T) {
 	first, err := Parse([]byte(validManifest), "0.1.0")
 	if err != nil {
@@ -31,6 +33,22 @@ func TestParseCanonicalDigestAndValidation(t *testing.T) {
 		}
 		if _, err = Parse([]byte(value), version); err == nil {
 			t.Fatalf("invalid accepted: %.80s", value)
+		}
+	}
+}
+
+func TestParseVideoCapabilityPreservesImageDigests(t *testing.T) {
+	video, err := Parse([]byte(validVideoManifest), "0.1.0")
+	if err != nil || ExecutionContract(video) != "video/v1" || len(video.Manifest.VideoModels) != 1 {
+		t.Fatalf("video=%#v err=%v", video.Manifest, err)
+	}
+	syncValue, _ := Parse([]byte(validManifest), "0.1.0")
+	if hex.EncodeToString(syncValue.Digest[:]) != "b2210aa93268add9e0fafd5e7735fd82b3b5db33bcd7a63e1bbeb74d7975c1a9" {
+		t.Fatal("sync digest changed")
+	}
+	for _, invalid := range []string{strings.Replace(validVideoManifest, `"contract":"video/v1"`, `"contract":"async/v1"`, 1), strings.Replace(validVideoManifest, `"protocols":["runway"]`, `"protocols":["replicate"]`, 1), strings.Replace(validVideoManifest, `"text_to_video":true,"image_to_video":true`, `"text_to_video":false,"image_to_video":false`, 1), strings.Replace(validVideoManifest, `"ratios":["16:9","9:16"]`, `"ratios":["16:9","16:9"]`, 1), strings.Replace(validVideoManifest, `"models":[]`, `"models":[`+validManifest[strings.Index(validManifest, `{"id":"example-image-v1"`):len(validManifest)-2]+`]`, 1)} {
+		if _, err = Parse([]byte(invalid), "0.1.0"); err == nil {
+			t.Fatalf("invalid video accepted: %.120s", invalid)
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
+	videoconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/video/v1"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 )
 
@@ -71,11 +72,24 @@ func VerifyAdmission(envelope Envelope, trust TrustPolicy, signedAt time.Time, e
 	expectedSchema := RuntimeSchema
 	if expectedRuntime == AsyncRuntimeSDK {
 		expectedSchema = AsyncRuntimeSchema
+	} else if expectedRuntime == VideoRuntimeSDK {
+		expectedSchema = VideoRuntimeSchema
 	}
 	if err != nil || !bytes.Equal(canonical, payload) || predicate.PluginID != expected.PluginID || predicate.PluginVersion != expected.PluginVersion || predicate.Platform != expected.Platform || predicate.ManifestDigest != "sha256:"+expected.ManifestDigestHex() || predicate.GatewayCompatibility != expected.Manifest.Manifest.GatewayCompatibility || predicate.RuntimeSDK != expectedRuntime || predicate.RuntimeSchema != expectedSchema || !manifest.IsCompatible(predicate.GatewayCompatibility, expected.GatewayVersion) {
 		return VerifiedAdmission{}, ErrInvalid
 	}
 	return VerifiedAdmission{Statement: statement, EnvelopeDigest: expected.EnvelopeDigest, PayloadDigest: Digest(payload)}, nil
+}
+
+func VerifyVideoConformanceReport(admission VerifiedAdmission, report videoconformance.Report) error {
+	if admission.Statement.Predicate.Conformance.SchemaVersion != videoconformance.ReportSchema || admission.Statement.Predicate.RuntimeSDK != VideoRuntimeSDK || report.PluginID != admission.Statement.Predicate.PluginID || report.PluginVersion != admission.Statement.Predicate.PluginVersion || "sha256:"+report.ManifestDigest != admission.Statement.Predicate.ManifestDigest || report.Outcome != "pass" {
+		return ErrInvalid
+	}
+	body, err := videoconformance.CanonicalReport(report)
+	if err != nil || Digest(body) != admission.Statement.Predicate.Conformance.ReportDigest || videoconformance.RequiredChecksDigest() != admission.Statement.Predicate.Conformance.RequiredChecksDigest {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func VerifyAsyncConformanceReport(admission VerifiedAdmission, report asyncconformance.Report) error {

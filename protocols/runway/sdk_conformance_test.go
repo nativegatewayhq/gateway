@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	joboperation "github.com/nativegatewayhq/gateway/operations/job"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 	providerrunway "github.com/nativegatewayhq/gateway/providers/runway"
@@ -29,7 +30,7 @@ func TestOfficialRunwaySDKsUseOnlyBaseURLAndKey(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer storage.Close()
-	models, _ := videooperation.NewRegistry([]string{"gen4_turbo"})
+	models, _ := videooperation.NewRegistryWithCapabilitiesAndAdditional(nil, nil, []videooperation.Route{{Model: "gen4_turbo", ProviderModel: "plugin-video-v1", Provider: providercredentials.Plugin, ChannelID: "channel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", TextToVideo: true, ImageToVideo: true}})
 	principal := apikey.Principal{OrganizationID: "org", ProjectID: "project", APIKeyID: "key", ModelAccessMode: apikey.ModelAccessAll}
 	service := &jobsStub{job: joboperation.Job{ID: "job_0123456789abcdef0123456789abcdef", Protocol: "runway", Model: "gen4_turbo", Status: joboperation.Processing, CreatedAt: time.Now().UTC()}}
 	handler := NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authStub{principal}, models, service, 1<<20)
@@ -70,6 +71,9 @@ asyncio.run(main())`
 	}
 	if service.submitted != 5 {
 		t.Fatalf("provider submissions=%d", service.submitted)
+	}
+	if service.request.Provider != string(providercredentials.Plugin) || service.request.ChannelID != "channel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("official SDK did not select plugin route: %#v", service.request)
 	}
 	if uploads != 3 {
 		t.Fatalf("direct uploads=%d", uploads)
