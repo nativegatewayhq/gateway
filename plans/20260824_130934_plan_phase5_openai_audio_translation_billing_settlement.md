@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-059
 title: Phase 5 OpenAI Audio Translation Duration Pricing and Settlement
-status: accepted
+status: completed
 created_at: 2026-08-24T13:09:34+09:00
-updated_at: 2026-08-24T13:09:34+09:00
+updated_at: 2026-08-24T13:33:09+09:00
 owners:
   - gateway
 initiative: phase-5-openai-audio-translation-billing-settlement
@@ -228,23 +228,27 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] duration price와 maximum reservation bound가 immutable하게 publication됨
-- [ ] native `verbose_json.duration`만 actual translation quantity와 비용으로 인정됨
-- [ ] dispatch 전에 Wallet·quota·spend cap이 한 transaction에서 예약됨
-- [ ] valid duration이 exactly-once Capture되고 예약 차액이 반환됨
-- [ ] known non-2xx는 Release되고 uncertain/invalid/missing duration은 Reconciliation됨
-- [ ] over-bound duration이 추가 인출 없이 manual review로 수렴함
-- [ ] duplicate idempotency 요청이 Provider·Ledger를 재실행하지 않음
-- [ ] non-verbose managed format은 pre-dispatch fail closed되고 BYOK 호환은 유지됨
-- [ ] audio/prompt/filename/result/credential이 DB·log·telemetry에 노출되지 않음
-- [ ] translation result body를 저장하거나 replay하지 않음
-- [ ] readiness, models visibility, CLI와 worker가 active translation price를 반영함
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README, migration과 멀티레포 handoff가 갱신됨
+- [x] duration price와 maximum reservation bound가 immutable하게 publication됨
+- [x] native `verbose_json.duration`만 actual translation quantity와 비용으로 인정됨
+- [x] dispatch 전에 Wallet·quota·spend cap이 한 transaction에서 예약됨
+- [x] valid duration이 exactly-once Capture되고 예약 차액이 반환됨
+- [x] known non-2xx는 Release되고 uncertain/invalid/missing duration은 Reconciliation됨
+- [x] over-bound duration이 추가 인출 없이 manual review로 수렴함
+- [x] duplicate idempotency 요청이 Provider·Ledger를 재실행하지 않음
+- [x] non-verbose managed format은 pre-dispatch fail closed되고 BYOK 호환은 유지됨
+- [x] audio/prompt/filename/result/credential이 DB·log·telemetry에 노출되지 않음
+- [x] translation result body를 저장하거나 replay하지 않음
+- [x] readiness, models visibility, CLI와 worker가 active translation price를 반영함
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README, migration과 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과: gofmt, vet, race, 전체 unit, build.
+- PostgreSQL `gateway_plan059`와 Redis DB 15에서 `GOFLAGS=-p=1 make integration-test` 전체 통과.
+- `go test -tags=sdkconformance ./protocols/openai -count=1` 통과: 공식 OpenAI Python·JavaScript managed `verbose_json` translation 포함.
+- translation pricing publication/append-only, concurrent reservation, exactly-once settlement, Release/Reconciliation와 worker manual convergence 통합 테스트 통과.
+- native duration duplicate-safe extraction, non-verbose pre-dispatch 차단, fault no-redispatch, `/v1/models` active-price visibility 테스트 통과.
 
 ## Rollback 계획
 

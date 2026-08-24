@@ -13,12 +13,40 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nativegatewayhq/gateway/internal/audiobilling"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 )
 
 type translationExecutorFunc func(context.Context, openaiProvider.TranslationRequest) (*http.Response, error)
+
+type translationBillingStub struct {
+	beginCalls            int
+	pendingAfterFirst     bool
+	complete              *audiobilling.TranslationEvidence
+	released, reconciling string
+}
+
+func (stub *translationBillingStub) Begin(_ context.Context, _ audiobilling.TranslationBeginRequest) (audiobilling.TranslationCharge, error) {
+	stub.beginCalls++
+	if stub.pendingAfterFirst && stub.beginCalls > 1 {
+		return audiobilling.TranslationCharge{}, audiobilling.ErrPending
+	}
+	return audiobilling.TranslationCharge{ID: "altc_00000000000000000000000000000001"}, nil
+}
+func (stub *translationBillingStub) Complete(_ context.Context, _ string, evidence audiobilling.TranslationEvidence) (audiobilling.TranslationCharge, error) {
+	stub.complete = &evidence
+	return audiobilling.TranslationCharge{State: "CAPTURED"}, nil
+}
+func (stub *translationBillingStub) Release(_ context.Context, _ string, reason string) (audiobilling.TranslationCharge, error) {
+	stub.released = reason
+	return audiobilling.TranslationCharge{State: "RELEASED"}, nil
+}
+func (stub *translationBillingStub) MarkReconciling(_ context.Context, _ string, reason string, _ *audiobilling.TranslationEvidence) error {
+	stub.reconciling = reason
+	return nil
+}
 
 func (function translationExecutorFunc) Create(ctx context.Context, request openaiProvider.TranslationRequest) (*http.Response, error) {
 	return function(ctx, request)
@@ -164,5 +192,100 @@ func TestTranslationResponseLimitFailsClosed(t *testing.T) {
 	handler.ServeHTTP(response, translationRequest(t, []struct{ name, filename, value string }{{"model", "", "translation-public"}, {"file", "voice.wav", "audio"}}))
 	if response.Code != 502 || strings.Contains(response.Body.String(), strings.Repeat("x", 10)) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestBillableTranslationCapturesNativeVerboseDuration(t *testing.T) {
+	billing := &translationBillingStub{}
+	providerBody := `{"language":"english","duration":60.001,"text":"private result","segments":[]}`
+	handler := NewBillableTranslationHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), translationRegistry(t), translationExecutorFunc(func(context.Context, openaiProvider.TranslationRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(providerBody))}, nil
+	}), providerhealth.NoopGate{}, 4096, 2048, 1024, 4096, 1, billing)
+	request := translationRequest(t, []struct{ name, filename, value string }{{"model", "", "translation-public"}, {"response_format", "", "verbose_json"}, {"file", "voice.wav", "audio"}})
+	request.Header.Set("Idempotency-Key", "managed-translation")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || response.Body.String() != providerBody || billing.complete == nil || billing.complete.DurationMilliseconds != 60_001 {
+		t.Fatalf("status=%d body=%s evidence=%+v", response.Code, response.Body.String(), billing.complete)
+	}
+}
+
+func TestBillableTranslationRejectsUnbillableFormatsBeforeDispatch(t *testing.T) {
+	for _, format := range []string{"", "json", "text", "srt", "vtt"} {
+		t.Run("format_"+format, func(t *testing.T) {
+			calls := 0
+			handler := NewBillableTranslationHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), translationRegistry(t), translationExecutorFunc(func(context.Context, openaiProvider.TranslationRequest) (*http.Response, error) {
+				calls++
+				return nil, nil
+			}), providerhealth.NoopGate{}, 4096, 2048, 1024, 4096, 1, &translationBillingStub{})
+			fields := []struct{ name, filename, value string }{{"model", "", "translation-public"}, {"file", "voice.wav", "audio"}}
+			if format != "" {
+				fields = append(fields, struct{ name, filename, value string }{"response_format", "", format})
+			}
+			request := translationRequest(t, fields)
+			request.Header.Set("Idempotency-Key", "managed-format")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != 400 || calls != 0 {
+				t.Fatalf("status=%d calls=%d body=%s", response.Code, calls, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestBillableTranslationKnownFailureAndFaultStateMachine(t *testing.T) {
+	t.Run("known non-2xx releases", func(t *testing.T) {
+		billing := &translationBillingStub{}
+		handler := NewBillableTranslationHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), translationRegistry(t), translationExecutorFunc(func(context.Context, openaiProvider.TranslationRequest) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"limited"}`))}, nil
+		}), providerhealth.NoopGate{}, 4096, 2048, 1024, 4096, 1, billing)
+		request := translationRequest(t, []struct{ name, filename, value string }{{"model", "", "translation-public"}, {"response_format", "", "verbose_json"}, {"file", "a.wav", "audio"}})
+		request.Header.Set("Idempotency-Key", "known-failure")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != 429 || billing.released != "provider_non_2xx" {
+			t.Fatalf("status=%d released=%s", response.Code, billing.released)
+		}
+	})
+	for _, test := range []struct {
+		name string
+		body string
+		err  error
+	}{{"missing duration", `{"text":"private"}`, nil}, {"timeout", "", openaiProvider.ErrTranslationTimeout}} {
+		t.Run(test.name, func(t *testing.T) {
+			billing := &translationBillingStub{}
+			calls := 0
+			handler := NewBillableTranslationHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), translationRegistry(t), translationExecutorFunc(func(context.Context, openaiProvider.TranslationRequest) (*http.Response, error) {
+				calls++
+				if test.err != nil {
+					return nil, test.err
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(test.body))}, nil
+			}), providerhealth.NoopGate{}, 4096, 2048, 1024, 4096, 1, billing)
+			request := translationRequest(t, []struct{ name, filename, value string }{{"model", "", "translation-public"}, {"response_format", "", "verbose_json"}, {"file", "a.wav", "audio"}})
+			request.Header.Set("Idempotency-Key", "fault-state")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if calls != 1 || billing.reconciling == "" || response.Code < 499 {
+				t.Fatalf("status=%d calls=%d reconcile=%s", response.Code, calls, billing.reconciling)
+			}
+		})
+	}
+}
+
+func TestBillableTranslationDuplicateDoesNotRedispatch(t *testing.T) {
+	billing := &translationBillingStub{pendingAfterFirst: true}
+	calls := 0
+	handler := NewBillableTranslationHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), translationRegistry(t), translationExecutorFunc(func(context.Context, openaiProvider.TranslationRequest) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"duration":1,"text":"private"}`))}, nil
+	}), providerhealth.NoopGate{}, 4096, 2048, 1024, 4096, 1, billing)
+	for range 2 {
+		request := translationRequest(t, []struct{ name, filename, value string }{{"model", "", "translation-public"}, {"response_format", "", "verbose_json"}, {"file", "a.wav", "audio"}})
+		request.Header.Set("Idempotency-Key", "duplicate-translation")
+		handler.ServeHTTP(httptest.NewRecorder(), request)
+	}
+	if calls != 1 || billing.beginCalls != 2 {
+		t.Fatalf("calls=%d begin=%d", calls, billing.beginCalls)
 	}
 }

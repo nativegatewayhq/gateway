@@ -416,11 +416,11 @@ func validDimension(protocol, operation, model string) bool {
 	if protocol == "" && operation == "" && model == "" {
 		return true
 	}
-	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit" || operation == "chat.completions" || operation == "responses.create" || operation == "audio.speech" || operation == "audio.transcription")) || (protocol == "gemini" && (operation == "image.generate" || operation == "chat.completions")) || (protocol == "anthropic" && operation == "messages.create") || ((protocol == "replicate" || protocol == "fal") && operation == "image.generate") || (protocol == "runway" && operation == "video.generate")) && validText(model, 200)
+	return ((protocol == "openai" && (operation == "image.generate" || operation == "image.edit" || operation == "chat.completions" || operation == "responses.create" || operation == "audio.speech" || operation == "audio.transcription" || operation == "audio.translation")) || (protocol == "gemini" && (operation == "image.generate" || operation == "chat.completions")) || (protocol == "anthropic" && operation == "messages.create") || ((protocol == "replicate" || protocol == "fal") && operation == "image.generate") || (protocol == "runway" && operation == "video.generate")) && validText(model, 200)
 }
 
 func validChargeID(value string) bool {
-	return validID(value, "charge_") || validID(value, "chc_") || validID(value, "asc_") || validID(value, "atc_")
+	return validID(value, "charge_") || validID(value, "chc_") || validID(value, "asc_") || validID(value, "atc_") || validID(value, "altc_")
 }
 
 func bounds(value time.Time, period Period) (time.Time, time.Time) {

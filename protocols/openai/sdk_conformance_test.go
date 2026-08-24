@@ -191,6 +191,37 @@ assert r.text == "gateway managed transcript"`
 	}
 }
 
+func TestOfficialOpenAITranslationSDKsPreserveManagedDurationSettlement(t *testing.T) {
+	registry, _ := audiooperation.NewTranslationRegistry([]string{"translation-public"}, map[string]string{"translation-public": "whisper-1"}, map[string]audiooperation.TranslationCapabilities{"translation-public": {ResponseFormats: []string{"verbose_json"}}})
+	billing := &translationBillingStub{}
+	calls := 0
+	handler := NewBillableTranslationHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, translationExecutorFunc(func(context.Context, openaiProvider.TranslationRequest) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"language":"english","duration":3.0001,"text":"gateway managed translation","segments":[]}`))}, nil
+	}), providerhealth.NoopGate{}, 4096, 1024, 1024, 4096, 2, billing)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+r=c.audio.translations.create(model="translation-public",file=("sample.wav",b"sdk-audio","audio/wav"),response_format="verbose_json",extra_headers={"Idempotency-Key":"python-managed-translation"})
+assert r.text == "gateway managed translation"
+assert r.duration == 3.0001`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python managed Translation SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;const {toFile}=require("openai");(async()=>{const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});const file=await toFile(Buffer.from("sdk-audio"),"sample.wav",{type:"audio/wav"});const r=await c.audio.translations.create({model:"translation-public",file,response_format:"verbose_json"},{headers:{"Idempotency-Key":"javascript-managed-translation"}});if(r.text!=="gateway managed translation"||r.duration!==3.0001)process.exit(2)})().catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript managed Translation SDK: %v: %s", err, output)
+	}
+	if calls != 2 || billing.complete == nil || billing.complete.DurationMilliseconds != 3001 {
+		t.Fatalf("calls=%d evidence=%+v", calls, billing.complete)
+	}
+}
+
 func TestOfficialOpenAISDKsUseOnlyBaseURLAndKey(t *testing.T) {
 	handler := chatHandler(t, authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), chatExecutorFunc(func(context.Context, openaiProvider.ChatRequest) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chatcmpl_sdk","object":"chat.completion","created":1,"model":"gpt-4.1","choices":[{"index":0,"message":{"role":"assistant","content":"gateway ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))}, nil
