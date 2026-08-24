@@ -204,6 +204,7 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260824-062` | completed | [Phase 6 Provider Manifest and HTTP Sidecar Plugin Foundation](./20260824_145849_plan_phase6_provider_manifest_http_plugin_foundation.md) | `phase-6-provider-plugin-foundation` |
 | `gateway-20260824-063` | completed | [Phase 6 Public Plugin Adapter SDK, Conformance Kit, and Template](./20260824_155201_plan_phase6_plugin_adapter_sdk_conformance_template.md) | `phase-6-plugin-adapter-sdk-conformance` |
 | `gateway-20260824-064` | completed | [Phase 6 Signed Official Adapter Registry and Supply-chain Verification](./20260824_163534_plan_phase6_signed_adapter_registry_supply_chain.md) | `phase-6-signed-adapter-registry` |
-| `gateway-20260824-065` | accepted | [Phase 6 Public Async Plugin Runtime, Signed Callback, and Conformance](./20260824_172646_plan_phase6_async_plugin_runtime_callback_conformance.md) | `phase-6-async-plugin-runtime` |
+| `gateway-20260824-065` | completed | [Phase 6 Public Async Plugin Runtime, Signed Callback, and Conformance](./20260824_172646_plan_phase6_async_plugin_runtime_callback_conformance.md) | `phase-6-async-plugin-runtime` |
+| `gateway-20260824-066` | accepted | [Phase 6 Async Video Plugin Runtime, Runway Native Projection, and Managed Delivery](./20260824_182359_plan_phase6_async_video_plugin_runway_projection.md) | `phase-6-async-video-plugin-runtime` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.
