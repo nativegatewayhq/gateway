@@ -1,9 +1,9 @@
 ---
 id: gateway-20260823-056
 title: Phase 5 OpenAI Audio Transcriptions Native Multipart Foundation
-status: accepted
+status: completed
 created_at: 2026-08-23T07:00:00+09:00
-updated_at: 2026-08-23T07:00:00+09:00
+updated_at: 2026-08-24T11:38:35+09:00
 owners:
   - gateway
 initiative: phase-5-openai-audio-transcriptions-foundation
@@ -215,21 +215,28 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] 공식 Python·JavaScript SDK에서 Key와 Base URL만 바꿔 transcription 성공
-- [ ] multipart가 전체 메모리 적재 없이 bounded spool됨
-- [ ] file/model/field duplicate와 모든 선언 제한이 fail closed됨
-- [ ] Provider credential 교체와 fixed OpenAI origin이 보장됨
-- [ ] native JSON/text 및 capability-enabled SSE 응답이 보존됨
-- [ ] timeout/reset/panic/client disconnect가 Provider 재호출을 만들지 않음
-- [ ] 모든 임시 파일이 성공·실패·cancel에서 제거됨
-- [ ] audio/prompt/filename/transcript/credential이 로그와 telemetry에 노출되지 않음
-- [ ] Billing-required transcription enablement가 fail closed됨
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README와 멀티레포 handoff가 갱신됨
+- [x] 공식 Python·JavaScript SDK에서 Key와 Base URL만 바꿔 transcription 성공
+- [x] multipart가 전체 메모리 적재 없이 bounded spool됨
+- [x] file/model/field duplicate와 모든 선언 제한이 fail closed됨
+- [x] Provider credential 교체와 fixed OpenAI origin이 보장됨
+- [x] native JSON/text 및 capability-enabled SSE 응답이 보존됨
+- [x] timeout/reset/panic/client disconnect가 Provider 재호출을 만들지 않음
+- [x] 모든 임시 파일이 성공·실패·cancel에서 제거됨
+- [x] audio/prompt/filename/transcript/credential이 로그와 telemetry에 노출되지 않음
+- [x] Billing-required transcription enablement가 fail closed됨
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/gateway-go-cache make check`
+- `GOCACHE=/private/tmp/gateway-go-cache GOFLAGS=-p=1 TEST_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway_plan056?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/11' make integration-test`
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/openai -count=1`
+- 격리 DB `gateway_plan056`, Redis DB 11에서 migration 50과 전체 통합 회귀 검증
+- OpenAI Python SDK `3.3.1`, JavaScript SDK `7.5.0`에서 Key와 Base URL만 변경한 multipart transcription 검증
+- request/file/field/part/header/response/concurrency 제한, memory-to-file spool, fixed origin과 credential replacement 검증
+- timeout/reset/panic/cancel/client write failure가 정확히 한 번만 dispatch되고 모든 input/outbound temporary file이 제거됨을 검증
+- Cloud에는 model/capability 및 upload/timeout 설정, Dashboard에는 BYOK-only capability 표시, Conformance에는 Python·JavaScript multipart와 JSON/text/SSE/cancel/oversize fixture 계약을 `affected_repos` handoff로 남겼다.
 
 ## Rollback 계획
 

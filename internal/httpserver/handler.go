@@ -17,20 +17,21 @@ import (
 type ReadyFunc func(context.Context) error
 
 type Routes struct {
-	Gemini           http.Handler
-	OpenAIImages     http.Handler
-	OpenAIImageEdits http.Handler
-	OpenAIModels     http.Handler
-	OpenAIChat       http.Handler
-	OpenAIResponses  http.Handler
-	OpenAISpeech     http.Handler
-	Anthropic        http.Handler
-	Replicate        http.Handler
-	ReplicateWebhook http.Handler
-	Fal              http.Handler
-	FalWebhook       http.Handler
-	Runway           http.Handler
-	Management       http.Handler
+	Gemini               http.Handler
+	OpenAIImages         http.Handler
+	OpenAIImageEdits     http.Handler
+	OpenAIModels         http.Handler
+	OpenAIChat           http.Handler
+	OpenAIResponses      http.Handler
+	OpenAISpeech         http.Handler
+	OpenAITranscriptions http.Handler
+	Anthropic            http.Handler
+	Replicate            http.Handler
+	ReplicateWebhook     http.Handler
+	Fal                  http.Handler
+	FalWebhook           http.Handler
+	Runway               http.Handler
+	Management           http.Handler
 }
 
 // NewHandler builds the Gateway-owned and accepted provider-native routes.
@@ -66,6 +67,9 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	}
 	if len(routeSets) > 0 && routeSets[0].OpenAISpeech != nil {
 		mux.Handle("/v1/audio/speech", routeSets[0].OpenAISpeech)
+	}
+	if len(routeSets) > 0 && routeSets[0].OpenAITranscriptions != nil {
+		mux.Handle("/v1/audio/transcriptions", routeSets[0].OpenAITranscriptions)
 	}
 	if len(routeSets) > 0 && routeSets[0].Anthropic != nil {
 		mux.Handle("/v1/messages", routeSets[0].Anthropic)

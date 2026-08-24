@@ -6,6 +6,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,6 +49,55 @@ assert r.read() == b"gateway-audio-ok"`
 	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("JavaScript Speech SDK: %v: %s", err, output)
+	}
+}
+
+func TestOfficialOpenAITranscriptionSDKsUseOnlyBaseURLAndKey(t *testing.T) {
+	registry, _ := audiooperation.NewTranscriptionRegistry([]string{"gpt-4o-transcribe"}, map[string]audiooperation.TranscriptionCapabilities{"gpt-4o-transcribe": {ResponseFormats: []string{"json"}}})
+	calls := 0
+	handler := NewTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, transcriptionExecutorFunc(func(_ context.Context, request openaiProvider.TranscriptionRequest) (*http.Response, error) {
+		calls++
+		media, params, err := mime.ParseMediaType(request.ContentType)
+		if err != nil || media != "multipart/form-data" {
+			t.Fatalf("content type=%s err=%v", request.ContentType, err)
+		}
+		reader := multipart.NewReader(request.Body, params["boundary"])
+		got := map[string]string{}
+		for {
+			part, e := reader.NextPart()
+			if e == io.EOF {
+				break
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			body, _ := io.ReadAll(part)
+			got[part.FormName()] = string(body)
+		}
+		if got["model"] != "gpt-4o-transcribe" || got["file"] != "sdk-audio" {
+			t.Fatalf("request=%v", got)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"text":"gateway transcript"}`))}, nil
+	}), providerhealth.NoopGate{}, 4096, 1024, 1024, 4096, 2)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+r=c.audio.transcriptions.create(model="gpt-4o-transcribe",file=("sample.wav",b"sdk-audio","audio/wav"))
+assert r.text == "gateway transcript"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python Transcription SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;const {toFile}=require("openai");(async()=>{const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});const file=await toFile(Buffer.from("sdk-audio"),"sample.wav",{type:"audio/wav"});const r=await c.audio.transcriptions.create({model:"gpt-4o-transcribe",file});if(r.text!=="gateway transcript")process.exit(2)})().catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript Transcription SDK: %v: %s", err, output)
+	}
+	if calls != 2 {
+		t.Fatalf("provider calls=%d", calls)
 	}
 }
 

@@ -183,6 +183,20 @@ func TestModelsHandlerIncludesAuthorizedConfiguredSpeech(t *testing.T) {
 	}
 }
 
+func TestModelsHandlerIncludesAuthorizedConfiguredTranscription(t *testing.T) {
+	transcriptions, _ := audiooperation.NewTranscriptionRegistry([]string{"gpt-4o-transcribe"}, nil)
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: audiooperation.Transcription, Model: "gpt-4o-transcribe"}}}
+	handler := NewModelsHandlerWithAllAudioOperations(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), nil, nil, nil, nil, nil, transcriptions, channelAvailability{"channel_00000000000000000000000000000001": true})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "gpt-4o-transcribe" {
+		t.Fatalf("list=%+v", list)
+	}
+}
+
 func modelsRequest(handler http.Handler, method string, authenticate bool) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, "/v1/models", nil)
 	if authenticate {

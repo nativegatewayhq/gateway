@@ -283,6 +283,11 @@ func run(stdout, stderr io.Writer) int {
 		logger.Error("gateway Audio Speech model registry initialization failed")
 		return 1
 	}
+	transcriptionModels, err := audiooperation.NewTranscriptionRegistry(cfg.OpenAITranscriptionModels, cfg.OpenAITranscriptionCapabilities)
+	if err != nil {
+		logger.Error("gateway Audio Transcription model registry initialization failed")
+		return 1
+	}
 	anthropicLimits := make(map[string]anthropicoperation.Limits, len(cfg.AnthropicMessagesModelLimits))
 	for model, limit := range cfg.AnthropicMessagesModelLimits {
 		anthropicLimits[model] = anthropicoperation.Limits{MaximumInputTokens: limit.MaximumInputTokens, MaximumOutputTokens: limit.MaximumOutputTokens}
@@ -296,6 +301,7 @@ func run(stdout, stderr io.Writer) int {
 	var openAIChatHandler http.Handler
 	var openAIResponsesHandler http.Handler
 	var openAISpeechHandler http.Handler
+	var openAITranscriptionHandler http.Handler
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
@@ -404,6 +410,11 @@ func run(stdout, stderr io.Writer) int {
 		handler.SetTelemetry(telemetryRuntime.Recorder)
 		openAISpeechHandler = handler
 	}
+	if len(cfg.OpenAITranscriptionModels) > 0 {
+		handler := openaiProtocol.NewTranscriptionHandler(logger, apiKeyAuthenticator, transcriptionModels, openaiProvider.NewTranscription(providerCredentialRegistry, cfg.TranscriptionTimeout, cfg.TranscriptionStreamIdleTimeout), healthGate, cfg.TranscriptionRequestBytes, cfg.TranscriptionFileBytes, cfg.TranscriptionFieldBytes, cfg.TranscriptionResponseBytes, cfg.TranscriptionSpoolLimit)
+		handler.SetTelemetry(telemetryRuntime.Recorder)
+		openAITranscriptionHandler = handler
+	}
 	if len(cfg.AnthropicMessagesModels) > 0 {
 		var handler *anthropicProtocol.Handler
 		if anthropicChargeBilling == nil {
@@ -437,7 +448,7 @@ func run(stdout, stderr io.Writer) int {
 	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
-	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAndAudio(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, providerCredentialRegistry)
+	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAudioOperations(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, transcriptionModels, providerCredentialRegistry)
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
@@ -623,25 +634,26 @@ func run(stdout, stderr io.Writer) int {
 		}()
 	}
 	err = app.Run(ctx, cfg, logger, app.Dependencies{
-		Ready:               ready,
-		ProviderCredentials: providerCredentialRegistry,
-		Gemini:              geminiHandler,
-		OpenAIImages:        openAIImagesHandler,
-		OpenAIImageEdits:    openAIImageEditsHandler,
-		OpenAIModels:        openAIModelsHandler,
-		OpenAIChat:          openAIChatHandler,
-		OpenAIResponses:     openAIResponsesHandler,
-		OpenAISpeech:        openAISpeechHandler,
-		Anthropic:           anthropicHandler,
-		Replicate:           replicateHandler,
-		ReplicateWebhook:    replicateWebhookHandler,
-		Fal:                 falHandler,
-		FalWebhook:          falWebhookHandler,
-		Runway:              runwayHandler,
-		Management:          managementHandler,
-		ClientIPResolver:    clientIPResolver,
-		Telemetry:           telemetryRuntime.Recorder,
-		TracePropagator:     telemetryRuntime.Propagator,
+		Ready:                ready,
+		ProviderCredentials:  providerCredentialRegistry,
+		Gemini:               geminiHandler,
+		OpenAIImages:         openAIImagesHandler,
+		OpenAIImageEdits:     openAIImageEditsHandler,
+		OpenAIModels:         openAIModelsHandler,
+		OpenAIChat:           openAIChatHandler,
+		OpenAIResponses:      openAIResponsesHandler,
+		OpenAISpeech:         openAISpeechHandler,
+		OpenAITranscriptions: openAITranscriptionHandler,
+		Anthropic:            anthropicHandler,
+		Replicate:            replicateHandler,
+		ReplicateWebhook:     replicateWebhookHandler,
+		Fal:                  falHandler,
+		FalWebhook:           falWebhookHandler,
+		Runway:               runwayHandler,
+		Management:           managementHandler,
+		ClientIPResolver:     clientIPResolver,
+		Telemetry:            telemetryRuntime.Recorder,
+		TracePropagator:      telemetryRuntime.Propagator,
 	})
 	cancelWorker()
 	<-workerDone

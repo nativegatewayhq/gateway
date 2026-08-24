@@ -20,41 +20,46 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	"github.com/nativegatewayhq/gateway/internal/videostorage"
+	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 )
 
 const (
-	defaultHTTPAddr            = ":8080"
-	defaultLogLevel            = "info"
-	defaultShutdownTimeout     = 10 * time.Second
-	defaultGoogleTimeout       = 2 * time.Minute
-	maxGoogleTimeout           = 10 * time.Minute
-	defaultGeminiBodyBytes     = int64(32 * 1024 * 1024)
-	defaultImagesTimeout       = 2 * time.Minute
-	maxImagesTimeout           = 10 * time.Minute
-	defaultImagesBodyBytes     = int64(1024 * 1024)
-	defaultChatBodyBytes       = int64(8 * 1024 * 1024)
-	defaultImageEditsBodyBytes = int64(64 * 1024 * 1024)
-	defaultReplayBodyBytes     = int64(32 * 1024 * 1024)
-	defaultReconcileInterval   = 5 * time.Second
-	defaultReconcileLease      = 30 * time.Second
-	defaultReconcileBackoff    = 5 * time.Second
-	defaultReconcileMaxBackoff = time.Hour
-	defaultRateLimitTimeout    = 100 * time.Millisecond
-	defaultReplicateTimeout    = 2 * time.Minute
-	defaultReplicateBodyBytes  = int64(1024 * 1024)
-	defaultWebhookTolerance    = 5 * time.Minute
-	defaultWebhookBindingTTL   = 7 * 24 * time.Hour
-	defaultFalTimeout          = 2 * time.Minute
-	defaultFalBodyBytes        = int64(1024 * 1024)
-	defaultFalJWKSURL          = "https://rest.fal.ai/.well-known/jwks.json"
-	defaultFalJWKSTimeout      = 5 * time.Second
-	defaultFalJWKSCacheTTL     = 24 * time.Hour
-	defaultFalJWKSRefresh      = time.Minute
-	defaultRunwayTimeout       = 2 * time.Minute
-	defaultRunwayBodyBytes     = int64(8 * 1024 * 1024)
-	defaultSpeechRequestBytes  = int64(1024 * 1024)
-	defaultSpeechResponseBytes = int64(256 * 1024 * 1024)
+	defaultHTTPAddr                   = ":8080"
+	defaultLogLevel                   = "info"
+	defaultShutdownTimeout            = 10 * time.Second
+	defaultGoogleTimeout              = 2 * time.Minute
+	maxGoogleTimeout                  = 10 * time.Minute
+	defaultGeminiBodyBytes            = int64(32 * 1024 * 1024)
+	defaultImagesTimeout              = 2 * time.Minute
+	maxImagesTimeout                  = 10 * time.Minute
+	defaultImagesBodyBytes            = int64(1024 * 1024)
+	defaultChatBodyBytes              = int64(8 * 1024 * 1024)
+	defaultImageEditsBodyBytes        = int64(64 * 1024 * 1024)
+	defaultReplayBodyBytes            = int64(32 * 1024 * 1024)
+	defaultReconcileInterval          = 5 * time.Second
+	defaultReconcileLease             = 30 * time.Second
+	defaultReconcileBackoff           = 5 * time.Second
+	defaultReconcileMaxBackoff        = time.Hour
+	defaultRateLimitTimeout           = 100 * time.Millisecond
+	defaultReplicateTimeout           = 2 * time.Minute
+	defaultReplicateBodyBytes         = int64(1024 * 1024)
+	defaultWebhookTolerance           = 5 * time.Minute
+	defaultWebhookBindingTTL          = 7 * 24 * time.Hour
+	defaultFalTimeout                 = 2 * time.Minute
+	defaultFalBodyBytes               = int64(1024 * 1024)
+	defaultFalJWKSURL                 = "https://rest.fal.ai/.well-known/jwks.json"
+	defaultFalJWKSTimeout             = 5 * time.Second
+	defaultFalJWKSCacheTTL            = 24 * time.Hour
+	defaultFalJWKSRefresh             = time.Minute
+	defaultRunwayTimeout              = 2 * time.Minute
+	defaultRunwayBodyBytes            = int64(8 * 1024 * 1024)
+	defaultSpeechRequestBytes         = int64(1024 * 1024)
+	defaultSpeechResponseBytes        = int64(256 * 1024 * 1024)
+	defaultTranscriptionRequestBytes  = int64(64 * 1024 * 1024)
+	defaultTranscriptionFileBytes     = int64(60 * 1024 * 1024)
+	defaultTranscriptionFieldBytes    = int64(64 * 1024)
+	defaultTranscriptionResponseBytes = int64(32 * 1024 * 1024)
 )
 
 // LookupEnv matches os.LookupEnv and makes environment loading testable.
@@ -85,90 +90,99 @@ const (
 // Config contains non-provider process settings. Provider credentials remain
 // in their opaque registry and are never exposed through this structure.
 type Config struct {
-	HTTPAddr                       string
-	LogLevel                       slog.Level
-	ShutdownTimeout                time.Duration
-	DatabaseURL                    string
-	GoogleTimeout                  time.Duration
-	GeminiStreamIdleTimeout        time.Duration
-	GeminiBodyBytes                int64
-	GeminiLLMModels                []string
-	GeminiLLMModelLimits           map[string]ChatModelLimit
-	ImagesTimeout                  time.Duration
-	ImagesBodyBytes                int64
-	ChatTimeout                    time.Duration
-	ChatStreamIdleTimeout          time.Duration
-	ChatBodyBytes                  int64
-	OpenAIChatModels               []string
-	OpenAIChatModelLimits          map[string]ChatModelLimit
-	OpenAIChatRoutes               []ChatRoute
-	OpenAIResponsesModels          []string
-	OpenAIResponsesModelLimits     map[string]ChatModelLimit
-	OpenAIResponsesRoutes          []ResponsesRoute
-	OpenAISpeechModels             []string
-	SpeechTimeout                  time.Duration
-	SpeechStreamIdleTimeout        time.Duration
-	SpeechRequestBytes             int64
-	SpeechResponseBytes            int64
-	ResponsesTimeout               time.Duration
-	ResponsesStreamIdleTimeout     time.Duration
-	ResponsesBodyBytes             int64
-	AnthropicTimeout               time.Duration
-	AnthropicStreamIdleTimeout     time.Duration
-	AnthropicBodyBytes             int64
-	AnthropicMessagesModels        []string
-	AnthropicMessagesModelLimits   map[string]ChatModelLimit
-	ImageEditsBodyBytes            int64
-	ImageEditSpoolLimit            int
-	BillingMode                    BillingMode
-	MinimumMarginBPS               int64
-	ReplayBodyBytes                int64
-	ReconcileInterval              time.Duration
-	ReconcileLease                 time.Duration
-	ReconcileBackoff               time.Duration
-	ReconcileMaxBackoff            time.Duration
-	ReconcileBatchSize             int
-	ReconcileMaxAttempts           int
-	RateLimitMode                  RateLimitMode
-	RedisURL                       string
-	RateLimitTimeout               time.Duration
-	ProviderHealthMode             ProviderHealthMode
-	ProviderHealth                 providerhealth.Config
-	ImageStorage                   imagestorage.Config
-	VideoStorage                   videostorage.Config
-	Telemetry                      telemetry.Config
-	TrustedProxyPrefixes           []netip.Prefix
-	ReplicateEnabled               bool
-	ReplicateEndpoint              string
-	ReplicateModels                []string
-	ReplicateTimeout               time.Duration
-	ReplicateBodyBytes             int64
-	ReplicateWebhookMode           ReplicateWebhookMode
-	ReplicateWebhookSecrets        []string
-	ReplicateWebhookCallbackSecret []byte
-	ReplicateWebhookTolerance      time.Duration
-	ReplicateWebhookBindingTTL     time.Duration
-	FalEnabled                     bool
-	FalEndpoint                    string
-	FalModels                      []string
-	FalTimeout                     time.Duration
-	FalBodyBytes                   int64
-	FalWebhookMode                 FalWebhookMode
-	FalWebhookCallbackSecret       []byte
-	FalWebhookBindingTTL           time.Duration
-	FalJWKSURL                     string
-	FalJWKSTimeout                 time.Duration
-	FalJWKSCacheTTL                time.Duration
-	FalJWKSRefreshCooldown         time.Duration
-	RunwayEnabled                  bool
-	RunwayModels                   []string
-	RunwayModelCapabilities        map[string]videooperation.ModelCapability
-	RunwayTimeout                  time.Duration
-	RunwayBodyBytes                int64
-	RunwayPollInterval             time.Duration
-	PublicBaseURL                  string
-	JobManagementMode              JobManagementMode
-	JobManagementCursorSecrets     [][]byte
+	HTTPAddr                        string
+	LogLevel                        slog.Level
+	ShutdownTimeout                 time.Duration
+	DatabaseURL                     string
+	GoogleTimeout                   time.Duration
+	GeminiStreamIdleTimeout         time.Duration
+	GeminiBodyBytes                 int64
+	GeminiLLMModels                 []string
+	GeminiLLMModelLimits            map[string]ChatModelLimit
+	ImagesTimeout                   time.Duration
+	ImagesBodyBytes                 int64
+	ChatTimeout                     time.Duration
+	ChatStreamIdleTimeout           time.Duration
+	ChatBodyBytes                   int64
+	OpenAIChatModels                []string
+	OpenAIChatModelLimits           map[string]ChatModelLimit
+	OpenAIChatRoutes                []ChatRoute
+	OpenAIResponsesModels           []string
+	OpenAIResponsesModelLimits      map[string]ChatModelLimit
+	OpenAIResponsesRoutes           []ResponsesRoute
+	OpenAISpeechModels              []string
+	SpeechTimeout                   time.Duration
+	SpeechStreamIdleTimeout         time.Duration
+	SpeechRequestBytes              int64
+	SpeechResponseBytes             int64
+	OpenAITranscriptionModels       []string
+	OpenAITranscriptionCapabilities map[string]audiooperation.TranscriptionCapabilities
+	TranscriptionTimeout            time.Duration
+	TranscriptionStreamIdleTimeout  time.Duration
+	TranscriptionRequestBytes       int64
+	TranscriptionFileBytes          int64
+	TranscriptionFieldBytes         int64
+	TranscriptionResponseBytes      int64
+	TranscriptionSpoolLimit         int
+	ResponsesTimeout                time.Duration
+	ResponsesStreamIdleTimeout      time.Duration
+	ResponsesBodyBytes              int64
+	AnthropicTimeout                time.Duration
+	AnthropicStreamIdleTimeout      time.Duration
+	AnthropicBodyBytes              int64
+	AnthropicMessagesModels         []string
+	AnthropicMessagesModelLimits    map[string]ChatModelLimit
+	ImageEditsBodyBytes             int64
+	ImageEditSpoolLimit             int
+	BillingMode                     BillingMode
+	MinimumMarginBPS                int64
+	ReplayBodyBytes                 int64
+	ReconcileInterval               time.Duration
+	ReconcileLease                  time.Duration
+	ReconcileBackoff                time.Duration
+	ReconcileMaxBackoff             time.Duration
+	ReconcileBatchSize              int
+	ReconcileMaxAttempts            int
+	RateLimitMode                   RateLimitMode
+	RedisURL                        string
+	RateLimitTimeout                time.Duration
+	ProviderHealthMode              ProviderHealthMode
+	ProviderHealth                  providerhealth.Config
+	ImageStorage                    imagestorage.Config
+	VideoStorage                    videostorage.Config
+	Telemetry                       telemetry.Config
+	TrustedProxyPrefixes            []netip.Prefix
+	ReplicateEnabled                bool
+	ReplicateEndpoint               string
+	ReplicateModels                 []string
+	ReplicateTimeout                time.Duration
+	ReplicateBodyBytes              int64
+	ReplicateWebhookMode            ReplicateWebhookMode
+	ReplicateWebhookSecrets         []string
+	ReplicateWebhookCallbackSecret  []byte
+	ReplicateWebhookTolerance       time.Duration
+	ReplicateWebhookBindingTTL      time.Duration
+	FalEnabled                      bool
+	FalEndpoint                     string
+	FalModels                       []string
+	FalTimeout                      time.Duration
+	FalBodyBytes                    int64
+	FalWebhookMode                  FalWebhookMode
+	FalWebhookCallbackSecret        []byte
+	FalWebhookBindingTTL            time.Duration
+	FalJWKSURL                      string
+	FalJWKSTimeout                  time.Duration
+	FalJWKSCacheTTL                 time.Duration
+	FalJWKSRefreshCooldown          time.Duration
+	RunwayEnabled                   bool
+	RunwayModels                    []string
+	RunwayModelCapabilities         map[string]videooperation.ModelCapability
+	RunwayTimeout                   time.Duration
+	RunwayBodyBytes                 int64
+	RunwayPollInterval              time.Duration
+	PublicBaseURL                   string
+	JobManagementMode               JobManagementMode
+	JobManagementCursorSecrets      [][]byte
 }
 type ChatModelLimit struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 type ChatRoute struct {
@@ -223,67 +237,75 @@ type ResponsesCandidate struct {
 // the server starts. Errors name the setting but never echo its value.
 func Load(lookup LookupEnv) (Config, error) {
 	cfg := Config{
-		HTTPAddr:                     defaultHTTPAddr,
-		LogLevel:                     slog.LevelInfo,
-		ShutdownTimeout:              defaultShutdownTimeout,
-		GoogleTimeout:                defaultGoogleTimeout,
-		GeminiStreamIdleTimeout:      30 * time.Second,
-		GeminiBodyBytes:              defaultGeminiBodyBytes,
-		ImagesTimeout:                defaultImagesTimeout,
-		ImagesBodyBytes:              defaultImagesBodyBytes,
-		ChatTimeout:                  defaultImagesTimeout,
-		ChatStreamIdleTimeout:        30 * time.Second,
-		ChatBodyBytes:                defaultChatBodyBytes,
-		OpenAIChatModelLimits:        map[string]ChatModelLimit{},
-		GeminiLLMModelLimits:         map[string]ChatModelLimit{},
-		OpenAIResponsesModelLimits:   map[string]ChatModelLimit{},
-		ResponsesTimeout:             defaultImagesTimeout,
-		ResponsesStreamIdleTimeout:   30 * time.Second,
-		ResponsesBodyBytes:           defaultChatBodyBytes,
-		SpeechTimeout:                defaultImagesTimeout,
-		SpeechStreamIdleTimeout:      30 * time.Second,
-		SpeechRequestBytes:           defaultSpeechRequestBytes,
-		SpeechResponseBytes:          defaultSpeechResponseBytes,
-		AnthropicTimeout:             defaultImagesTimeout,
-		AnthropicStreamIdleTimeout:   30 * time.Second,
-		AnthropicBodyBytes:           defaultChatBodyBytes,
-		AnthropicMessagesModelLimits: map[string]ChatModelLimit{},
-		ImageEditsBodyBytes:          defaultImageEditsBodyBytes,
-		ImageEditSpoolLimit:          8,
-		BillingMode:                  BillingDisabled,
-		ReplayBodyBytes:              defaultReplayBodyBytes,
-		ReconcileInterval:            defaultReconcileInterval,
-		ReconcileLease:               defaultReconcileLease,
-		ReconcileBackoff:             defaultReconcileBackoff,
-		ReconcileMaxBackoff:          defaultReconcileMaxBackoff,
-		ReconcileBatchSize:           10,
-		ReconcileMaxAttempts:         5,
-		RateLimitMode:                RateLimitDisabled,
-		RateLimitTimeout:             defaultRateLimitTimeout,
-		ProviderHealthMode:           ProviderHealthDisabled,
-		ProviderHealth:               providerhealth.DefaultConfig(),
-		ImageStorage:                 imagestorage.DefaultConfig(),
-		VideoStorage:                 videostorage.DefaultConfig(),
-		Telemetry:                    telemetry.DefaultConfig(),
-		ReplicateEndpoint:            "https://api.replicate.com",
-		ReplicateTimeout:             defaultReplicateTimeout,
-		ReplicateBodyBytes:           defaultReplicateBodyBytes,
-		ReplicateWebhookMode:         ReplicateWebhookDisabled,
-		ReplicateWebhookTolerance:    defaultWebhookTolerance,
-		ReplicateWebhookBindingTTL:   defaultWebhookBindingTTL,
-		FalEndpoint:                  "https://queue.fal.run",
-		FalTimeout:                   defaultFalTimeout,
-		FalBodyBytes:                 defaultFalBodyBytes,
-		FalWebhookMode:               FalWebhookDisabled,
-		FalWebhookBindingTTL:         defaultWebhookBindingTTL,
-		FalJWKSURL:                   defaultFalJWKSURL,
-		FalJWKSTimeout:               defaultFalJWKSTimeout,
-		FalJWKSCacheTTL:              defaultFalJWKSCacheTTL,
-		FalJWKSRefreshCooldown:       defaultFalJWKSRefresh,
-		RunwayTimeout:                defaultRunwayTimeout,
-		RunwayBodyBytes:              defaultRunwayBodyBytes,
-		RunwayPollInterval:           5 * time.Second,
-		JobManagementMode:            JobManagementDisabled,
+		HTTPAddr:                        defaultHTTPAddr,
+		LogLevel:                        slog.LevelInfo,
+		ShutdownTimeout:                 defaultShutdownTimeout,
+		GoogleTimeout:                   defaultGoogleTimeout,
+		GeminiStreamIdleTimeout:         30 * time.Second,
+		GeminiBodyBytes:                 defaultGeminiBodyBytes,
+		ImagesTimeout:                   defaultImagesTimeout,
+		ImagesBodyBytes:                 defaultImagesBodyBytes,
+		ChatTimeout:                     defaultImagesTimeout,
+		ChatStreamIdleTimeout:           30 * time.Second,
+		ChatBodyBytes:                   defaultChatBodyBytes,
+		OpenAIChatModelLimits:           map[string]ChatModelLimit{},
+		GeminiLLMModelLimits:            map[string]ChatModelLimit{},
+		OpenAIResponsesModelLimits:      map[string]ChatModelLimit{},
+		ResponsesTimeout:                defaultImagesTimeout,
+		ResponsesStreamIdleTimeout:      30 * time.Second,
+		ResponsesBodyBytes:              defaultChatBodyBytes,
+		SpeechTimeout:                   defaultImagesTimeout,
+		SpeechStreamIdleTimeout:         30 * time.Second,
+		SpeechRequestBytes:              defaultSpeechRequestBytes,
+		SpeechResponseBytes:             defaultSpeechResponseBytes,
+		OpenAITranscriptionCapabilities: map[string]audiooperation.TranscriptionCapabilities{},
+		TranscriptionTimeout:            defaultImagesTimeout,
+		TranscriptionStreamIdleTimeout:  30 * time.Second,
+		TranscriptionRequestBytes:       defaultTranscriptionRequestBytes,
+		TranscriptionFileBytes:          defaultTranscriptionFileBytes,
+		TranscriptionFieldBytes:         defaultTranscriptionFieldBytes,
+		TranscriptionResponseBytes:      defaultTranscriptionResponseBytes,
+		TranscriptionSpoolLimit:         8,
+		AnthropicTimeout:                defaultImagesTimeout,
+		AnthropicStreamIdleTimeout:      30 * time.Second,
+		AnthropicBodyBytes:              defaultChatBodyBytes,
+		AnthropicMessagesModelLimits:    map[string]ChatModelLimit{},
+		ImageEditsBodyBytes:             defaultImageEditsBodyBytes,
+		ImageEditSpoolLimit:             8,
+		BillingMode:                     BillingDisabled,
+		ReplayBodyBytes:                 defaultReplayBodyBytes,
+		ReconcileInterval:               defaultReconcileInterval,
+		ReconcileLease:                  defaultReconcileLease,
+		ReconcileBackoff:                defaultReconcileBackoff,
+		ReconcileMaxBackoff:             defaultReconcileMaxBackoff,
+		ReconcileBatchSize:              10,
+		ReconcileMaxAttempts:            5,
+		RateLimitMode:                   RateLimitDisabled,
+		RateLimitTimeout:                defaultRateLimitTimeout,
+		ProviderHealthMode:              ProviderHealthDisabled,
+		ProviderHealth:                  providerhealth.DefaultConfig(),
+		ImageStorage:                    imagestorage.DefaultConfig(),
+		VideoStorage:                    videostorage.DefaultConfig(),
+		Telemetry:                       telemetry.DefaultConfig(),
+		ReplicateEndpoint:               "https://api.replicate.com",
+		ReplicateTimeout:                defaultReplicateTimeout,
+		ReplicateBodyBytes:              defaultReplicateBodyBytes,
+		ReplicateWebhookMode:            ReplicateWebhookDisabled,
+		ReplicateWebhookTolerance:       defaultWebhookTolerance,
+		ReplicateWebhookBindingTTL:      defaultWebhookBindingTTL,
+		FalEndpoint:                     "https://queue.fal.run",
+		FalTimeout:                      defaultFalTimeout,
+		FalBodyBytes:                    defaultFalBodyBytes,
+		FalWebhookMode:                  FalWebhookDisabled,
+		FalWebhookBindingTTL:            defaultWebhookBindingTTL,
+		FalJWKSURL:                      defaultFalJWKSURL,
+		FalJWKSTimeout:                  defaultFalJWKSTimeout,
+		FalJWKSCacheTTL:                 defaultFalJWKSCacheTTL,
+		FalJWKSRefreshCooldown:          defaultFalJWKSRefresh,
+		RunwayTimeout:                   defaultRunwayTimeout,
+		RunwayBodyBytes:                 defaultRunwayBodyBytes,
+		RunwayPollInterval:              5 * time.Second,
+		JobManagementMode:               JobManagementDisabled,
 	}
 
 	if value, ok := lookup("GATEWAY_HTTP_ADDR"); ok {
@@ -522,6 +544,54 @@ func Load(lookup LookupEnv) (Config, error) {
 			}
 			*target = limit
 		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSCRIPTION_MODELS"); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			model := strings.TrimSpace(part)
+			if model == "" || len(model) > 200 || seen[model] || strings.ContainsAny(model, "\r\n") {
+				return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MODELS: must contain unique valid model IDs")
+			}
+			seen[model] = true
+			cfg.OpenAITranscriptionModels = append(cfg.OpenAITranscriptionModels, model)
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON"); ok {
+		decoder := json.NewDecoder(strings.NewReader(value))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&cfg.OpenAITranscriptionCapabilities); err != nil || decoder.Decode(&struct{}{}) != io.EOF || len(cfg.OpenAITranscriptionCapabilities) > 128 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON: must be a bounded object")
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSCRIPTION_REQUEST_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_REQUEST_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.TranscriptionTimeout = duration
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSCRIPTION_STREAM_IDLE_TIMEOUT"); ok {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration <= 0 || duration > 10*time.Minute {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_STREAM_IDLE_TIMEOUT: must be a positive duration no greater than 10m")
+		}
+		cfg.TranscriptionStreamIdleTimeout = duration
+	}
+	for key, target := range map[string]*int64{"GATEWAY_OPENAI_TRANSCRIPTION_MAX_REQUEST_BODY_BYTES": &cfg.TranscriptionRequestBytes, "GATEWAY_OPENAI_TRANSCRIPTION_MAX_FILE_BYTES": &cfg.TranscriptionFileBytes, "GATEWAY_OPENAI_TRANSCRIPTION_MAX_FIELD_BYTES": &cfg.TranscriptionFieldBytes, "GATEWAY_OPENAI_TRANSCRIPTION_MAX_RESPONSE_BODY_BYTES": &cfg.TranscriptionResponseBytes} {
+		if value, ok := lookup(key); ok {
+			limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil || limit < 1 || limit > 512*1024*1024 {
+				return Config{}, fmt.Errorf("%s: must be a bounded positive integer", key)
+			}
+			*target = limit
+		}
+	}
+	if value, ok := lookup("GATEWAY_OPENAI_TRANSCRIPTION_MAX_CONCURRENT_SPOOLS"); ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit < 1 || limit > 128 {
+			return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MAX_CONCURRENT_SPOOLS: must be an integer between 1 and 128")
+		}
+		cfg.TranscriptionSpoolLimit = limit
 	}
 	if value, ok := lookup("GATEWAY_ANTHROPIC_REQUEST_TIMEOUT"); ok {
 		duration, err := time.ParseDuration(strings.TrimSpace(value))
@@ -778,6 +848,15 @@ func Load(lookup LookupEnv) (Config, error) {
 				return Config{}, fmt.Errorf("GATEWAY_OPENAI_RESPONSES_MODEL_LIMITS: every paid Responses model requires limits")
 			}
 		}
+	}
+	if cfg.TranscriptionFileBytes > cfg.TranscriptionRequestBytes {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MAX_FILE_BYTES: cannot exceed request body limit")
+	}
+	if _, err := audiooperation.NewTranscriptionRegistry(cfg.OpenAITranscriptionModels, cfg.OpenAITranscriptionCapabilities); err != nil {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON: invalid model capabilities")
+	}
+	if cfg.BillingMode == BillingRequired && len(cfg.OpenAITranscriptionModels) > 0 {
+		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MODELS: transcription billing is not implemented")
 	}
 	if cfg.BillingMode == BillingRequired && len(cfg.GeminiLLMModels) > 0 {
 		if len(cfg.GeminiLLMModelLimits) != len(cfg.GeminiLLMModels) {
