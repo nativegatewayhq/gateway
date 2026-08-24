@@ -3,6 +3,10 @@
 External Adapter authors should begin with the isolated
 [`go-sidecar-template`](./go-sidecar-template). It imports the public
 `plugin-sdk/runtime/v1` contract and does not import Gateway internals.
+Async image and video implementations start from
+[`go-async-sidecar-template`](./go-async-sidecar-template) and
+[`go-video-sidecar-template`](./go-video-sidecar-template); their public
+contracts and conformance profiles remain modality-separated.
 
 Validate the trusted manifest directory:
 
@@ -55,6 +59,9 @@ go run ./cmd/gateway-plugin-conformance \
   -auth-secret-env-json '{"example-sidecar-token":"EXAMPLE_PLUGIN_TOKEN"}' \
   -json
 ```
+
+For an asynchronous video manifest, select `-profile video-v1` and provide the
+purpose-specific callback key with `-callback-secret-env`.
 
 Exit code `0` means every check passed, `1` is a contract failure, and `2` is
 invalid local configuration. Runtime v1 is backward compatible within v1:

@@ -31,6 +31,16 @@ func validatedAsync(t *testing.T, id, protocol string, callback bool) manifest.V
 	return value
 }
 
+func validatedVideo(t *testing.T, id string, callback bool) manifest.Validated {
+	t.Helper()
+	body := []byte(`{"schema_version":"nativegateway.provider/v1","id":"` + id + `","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"sidecar","auth_secret_ref":"token"},"models":[],"video_models":[{"id":"example-video-v1","protocols":["runway"],"operations":["video.generate"],"capabilities":{"media_type":"application/json","output":["url"],"text_to_video":true,"image_to_video":true,"audio":true,"maximum_duration_seconds":60,"ratios":["16:9","9:16"]},"async":{"contract":"video/v1","callback":` + strconv.FormatBool(callback) + `}}]}`)
+	value, err := manifest.Parse(body, "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
 func testConfig() Config {
 	return Config{EndpointOrigins: map[string]string{"sidecar": "http://127.0.0.1:8080"}, AuthSecrets: map[string]string{"token": "secret"}, Timeout: time.Second, MaximumRequestBytes: 1 << 20, MaximumResponseBytes: 2 << 20, MaximumConcurrency: 2}
 }
@@ -68,6 +78,23 @@ func TestRegistryPublishesAsyncBindingWithoutSyncExecution(t *testing.T) {
 	client := NewClient(registry)
 	if _, err = client.Execute(context.Background(), binding.ChannelID, "request", "replicate", ImageInput{Prompt: "x", Images: 1}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("sync execution accepted async binding: %v", err)
+	}
+}
+
+func TestRegistryPublishesVideoRouteWithImmutableCapabilities(t *testing.T) {
+	cfg := testConfig()
+	cfg.ResultOrigins = map[string][]string{"provider.video-example": {"https://videos.example.com"}}
+	registry, err := NewRegistry([]manifest.Validated{validatedVideo(t, "provider.video-example", true)}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, binding := registry.VideoRoutes(), registry.Bindings()[0]
+	if len(routes) != 1 || !binding.Video || !binding.Callback || !binding.Audio || binding.MaximumDurationSeconds != 60 || !registry.SupportsVideo() {
+		t.Fatalf("routes=%#v binding=%#v", routes, binding)
+	}
+	binding.Ratios["1:1"] = struct{}{}
+	if _, exists := registry.Bindings()[0].Ratios["1:1"]; exists {
+		t.Fatal("video capability mutated")
 	}
 }
 

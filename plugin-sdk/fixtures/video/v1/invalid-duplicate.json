@@ -1,0 +1,1 @@
+{"schema_version":"nativegateway.plugin-video-control-request/v1","request_id":"one","request_id":"two","gateway_job_id":"job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plugin_id":"provider.video-example","plugin_version":"1.0.0","manifest_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action":"poll","provider_job_ref":"provider:video-1"}

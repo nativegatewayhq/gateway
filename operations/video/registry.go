@@ -46,6 +46,10 @@ type ModelCapability struct {
 }
 
 func NewRegistryWithCapabilities(models []string, capabilities map[string]ModelCapability) (*Registry, error) {
+	return NewRegistryWithCapabilitiesAndAdditional(models, capabilities, nil)
+}
+
+func NewRegistryWithCapabilitiesAndAdditional(models []string, capabilities map[string]ModelCapability, additional []Route) (*Registry, error) {
 	routes := make(map[string]Route, len(models))
 	usedCapabilities := 0
 	for _, model := range models {
@@ -73,6 +77,15 @@ func NewRegistryWithCapabilities(models []string, capabilities map[string]ModelC
 	}
 	if len(capabilities) > 0 && usedCapabilities != len(capabilities) {
 		return nil, ErrModelNotFound
+	}
+	for _, route := range additional {
+		if route.Model == "" || route.ProviderModel == "" || route.ChannelID == "" || route.Provider != providercredentials.Plugin || !route.TextToVideo && !route.ImageToVideo {
+			return nil, ErrModelNotFound
+		}
+		if _, exists := routes[route.Model]; exists {
+			return nil, ErrModelNotFound
+		}
+		routes[route.Model] = route
 	}
 	return &Registry{routes: routes}, nil
 }

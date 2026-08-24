@@ -44,6 +44,7 @@ type WebhookConfig struct {
 	BindingTTL     time.Duration
 	CallbackSecret []byte
 	EnabledChannel func(string) bool
+	PathPrefix     func(string) string
 }
 
 type ServiceConfig struct {
@@ -117,7 +118,14 @@ func (service *Service) Submit(ctx context.Context, request CreateRequest, paylo
 		if bindingErr != nil {
 			return service.handleSubmitError(ctx, created, attempt, predispatchFailure("webhook binding unavailable"))
 		}
-		callback := fmt.Sprintf("%s/internal/webhooks/%s/%s/%s", webhook.PublicBaseURL, created.Provider, created.ID, binding.Token)
+		prefix := "/internal/webhooks/" + created.Provider
+		if webhook.PathPrefix != nil {
+			prefix = strings.TrimSuffix(webhook.PathPrefix(created.ChannelID), "/")
+			if !strings.HasPrefix(prefix, "/internal/webhooks/") || strings.ContainsAny(prefix, "?#") {
+				return service.handleSubmitError(ctx, created, attempt, predispatchFailure("webhook path unavailable"))
+			}
+		}
+		callback := fmt.Sprintf("%s%s/%s/%s", webhook.PublicBaseURL, prefix, created.ID, binding.Token)
 		payload, err = injectable.WithWebhook(callback)
 		if err != nil {
 			return service.handleSubmitError(ctx, created, attempt, predispatchFailure("webhook payload unavailable"))

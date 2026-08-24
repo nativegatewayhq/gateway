@@ -46,7 +46,7 @@ func (repository *Repository) Get(ctx context.Context, jobID string, index int) 
 }
 
 func (repository *Repository) Begin(ctx context.Context, asset Asset) (Asset, error) {
-	if asset.ID == "" || asset.JobID == "" || asset.Provider != "runway" || asset.ChannelID == "" || asset.ObjectKey == "" || asset.ByteLength < 1 {
+	if asset.ID == "" || asset.JobID == "" || asset.Provider != "runway" && asset.Provider != "plugin" || asset.ChannelID == "" || asset.ObjectKey == "" || asset.ByteLength < 1 {
 		return Asset{}, ErrInvalid
 	}
 	_, err := repository.pool.Exec(ctx, `WITH inserted AS (

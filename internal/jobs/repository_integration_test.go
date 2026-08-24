@@ -372,6 +372,44 @@ func TestPluginWebhookCapabilityAndReplayUseDurableCAS(t *testing.T) {
 	}
 }
 
+func TestPluginVideoWebhookPersistsOneVerifiedPartialCreditEvidence(t *testing.T) {
+	repository, owner, request := jobRepositoryFixture(t)
+	request.Protocol, request.Operation, request.Provider, request.ChannelID = "runway", "video.generate", "plugin", "channel_00000000000000000000000000000004"
+	request.EstimatedUsage = &joboperation.Usage{Dimension: "provider_credit", Unit: "microcredit", Quantity: 2_000_000, Provenance: "request", ExtractorVersion: "runway-request-cost-v1", ResultExtractorVersion: "runway-task-cost-v1"}
+	ctx := context.Background()
+	created, _, err := repository.Create(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := repository.BeginSubmit(ctx, owner, created.ID, "plugin-video-submit", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := testWebhookCallbackSecret()
+	binding, err := repository.CreateWebhookBinding(ctx, created.ID, "plugin", request.ChannelID, secret, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRef := "plugin:video-1"
+	if _, err = repository.ConfirmSubmit(ctx, owner, attempt, providerRef, joboperation.Processing, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"id":"` + created.ID + `","status":"SUCCEEDED","output":["https://assets.example.com/video.mp4"]}`)
+	observation := joboperation.Observation{Status: joboperation.Succeeded, ProviderJobID: providerRef, Snapshot: joboperation.Snapshot{Status: 200, Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: body, SHA256: sha256.Sum256(body)}, Usage: &joboperation.Usage{Dimension: "provider_credit", Unit: "microcredit", Quantity: 750_000, Provenance: "webhook", ExtractorVersion: "runway-task-cost-v1"}}
+	delivery := WebhookObservation{JobID: created.ID, Provider: "plugin", DeliveryID: "delivery-video-" + request.RequestID, Token: binding.Token, ProviderJobID: providerRef, Observation: observation, CallbackSecret: secret}
+	terminal, replay, err := repository.ApplyWebhook(ctx, delivery)
+	if err != nil || replay || terminal.Status != joboperation.Succeeded || terminal.ActualUsage == nil || terminal.ActualUsage.Quantity != 750_000 {
+		t.Fatalf("terminal=%+v replay=%v err=%v", terminal, replay, err)
+	}
+	if _, replay, err = repository.ApplyWebhook(ctx, delivery); err != nil || !replay {
+		t.Fatalf("replay=%v err=%v", replay, err)
+	}
+	var evidence int
+	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM async_job_usage_evidence WHERE job_id=$1`, created.ID).Scan(&evidence); err != nil || evidence != 1 {
+		t.Fatalf("evidence=%d err=%v", evidence, err)
+	}
+}
+
 func TestWebhookAndPollRaceConvergesOnOneTerminalEvent(t *testing.T) {
 	repository, owner, request := jobRepositoryFixture(t)
 	request.Provider = "replicate"

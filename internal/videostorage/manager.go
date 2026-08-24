@@ -49,7 +49,7 @@ func (manager *Manager) Ready(ctx context.Context) error {
 }
 
 func (manager *Manager) Transform(ctx context.Context, job joboperation.Job) (joboperation.Snapshot, error) {
-	if job.Protocol != "runway" || job.Provider != "runway" || job.Status != joboperation.Succeeded || len(job.Snapshot.Body) == 0 {
+	if job.Protocol != "runway" || job.Provider != "runway" && job.Provider != "plugin" || job.Status != joboperation.Succeeded || len(job.Snapshot.Body) == 0 {
 		return joboperation.Snapshot{}, ErrInvalid
 	}
 	var envelope map[string]json.RawMessage
@@ -110,7 +110,7 @@ func (manager *Manager) persist(ctx context.Context, job joboperation.Job, index
 	if identity == "" {
 		identity = job.ID
 	}
-	key := fmt.Sprintf("videos/runway/%s/%03d-%s.%s", identity, index, hex.EncodeToString(collected.SHA256[:]), collected.Extension)
+	key := fmt.Sprintf("videos/%s/%s/%03d-%s.%s", job.Provider, identity, index, hex.EncodeToString(collected.SHA256[:]), collected.Extension)
 	asset, err := manager.assets.Begin(ctx, Asset{ID: id, JobID: job.ID, ChargeID: job.ChargeID, Provider: job.Provider, ChannelID: job.ChannelID, ResultIndex: index, ObjectKey: key, ContentType: collected.ContentType, ByteLength: collected.Size, SHA256: collected.SHA256})
 	if err != nil {
 		return "", err

@@ -47,6 +47,21 @@ func RenderMarkdown(items []Validated) ([]byte, error) {
 			sort.Strings(outputs)
 			_, _ = fmt.Fprintf(&output, "| `%s` | %s | %s | %s | %d |\n", model.ID, codeList(protocols), codeList(operations), codeList(outputs), model.Capabilities.MaximumImages)
 		}
+		videoModels := append([]VideoModel(nil), item.Manifest.VideoModels...)
+		if len(videoModels) > 0 {
+			output.WriteString("\n| Video model | Inputs | Maximum duration | Ratios | Audio |\n|---|---|---:|---|---|\n")
+			sort.Slice(videoModels, func(left, right int) bool { return videoModels[left].ID < videoModels[right].ID })
+			for _, model := range videoModels {
+				inputs := []string{}
+				if model.Capabilities.TextToVideo {
+					inputs = append(inputs, "text_to_video")
+				}
+				if model.Capabilities.ImageToVideo {
+					inputs = append(inputs, "image_to_video")
+				}
+				_, _ = fmt.Fprintf(&output, "| `%s` | %s | %d | %s | %t |\n", model.ID, codeList(inputs), model.Capabilities.MaximumDurationSeconds, codeList(model.Capabilities.Ratios), model.Capabilities.Audio)
+			}
+		}
 		output.WriteByte('\n')
 	}
 	return bytes.Clone([]byte(output.String())), nil

@@ -16,6 +16,7 @@ import (
 
 	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
+	videoconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/video/v1"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 )
 
@@ -80,6 +81,37 @@ func TestAsyncAdmissionBindsAsyncRuntimeAndConformanceProfile(t *testing.T) {
 	statement.Predicate.RuntimeSDK = RuntimeSDK
 	if _, err = CanonicalStatement(statement); err == nil {
 		t.Fatal("accepted a mixed async schema and sync SDK profile")
+	}
+}
+
+func TestVideoAdmissionBindsIsolatedRuntimeAndConformanceProfile(t *testing.T) {
+	validated, err := manifest.Parse([]byte(`{"schema_version":"nativegateway.provider/v1","id":"provider.video-example","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"video-sidecar","auth_secret_ref":"video-token"},"models":[],"video_models":[{"id":"video-v1","protocols":["runway"],"operations":["video.generate"],"capabilities":{"media_type":"application/json","output":["url"],"text_to_video":true,"image_to_video":false,"audio":false,"maximum_duration_seconds":60,"ratios":["16:9"]},"async":{"contract":"video/v1","callback":true}}]}`), "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := videoconformance.Report{SchemaVersion: videoconformance.ReportSchema, PluginID: validated.Manifest.ID, PluginVersion: validated.Manifest.Version, ManifestDigest: hex.EncodeToString(validated.Digest[:]), SDKVersion: videoconformance.SDKVersion, Outcome: "pass"}
+	for _, id := range videoconformance.RequiredCheckIDs() {
+		report.Checks = append(report.Checks, videoconformance.Check{ID: id, Outcome: "pass"})
+	}
+	reportBody, err := videoconformance.CanonicalReport(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := testStatement(validated, Digest(reportBody))
+	statement.Predicate.RuntimeSchema = VideoRuntimeSchema
+	statement.Predicate.RuntimeSDK = VideoRuntimeSDK
+	statement.Predicate.Conformance.SchemaVersion = videoconformance.ReportSchema
+	statement.Predicate.Conformance.RequiredChecksDigest = videoconformance.RequiredChecksDigest()
+	trust, signers := testTrust(t)
+	envelope := signValue(t, AdmissionPayloadType, statement, signers)
+	body, _ := CanonicalEnvelope(envelope)
+	verified, err := VerifyAdmission(envelope, trust, testNow, AdmissionExpectation{PluginID: validated.Manifest.ID, PluginVersion: validated.Manifest.Version, Platform: "linux/arm64", EnvelopeDigest: Digest(body), GatewayVersion: "0.1.0", Manifest: validated})
+	if err != nil || VerifyVideoConformanceReport(verified, report) != nil {
+		t.Fatalf("video admission=%#v err=%v", verified, err)
+	}
+	statement.Predicate.RuntimeSDK = AsyncRuntimeSDK
+	if _, err = CanonicalStatement(statement); err == nil {
+		t.Fatal("accepted mixed video and async profile")
 	}
 }
 

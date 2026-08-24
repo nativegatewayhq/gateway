@@ -253,6 +253,7 @@ func run(stdout, stderr io.Writer) int {
 	var pluginClient *plugins.Client
 	var pluginImageExecutor *pluginProvider.Executor
 	var pluginRoutes []imageoperation.ModelRoute
+	var pluginVideoRoutes []videooperation.Route
 	if cfg.PluginMode != config.PluginDisabled {
 		validated, loadErr := manifest.LoadDirectory(cfg.PluginManifestDir, "0.1.0")
 		if loadErr != nil || cfg.PluginMode == config.PluginRequired && len(validated) == 0 {
@@ -290,13 +291,14 @@ func run(stdout, stderr io.Writer) int {
 		pluginImageExecutor = pluginProvider.New(pluginClient)
 		geminiExecutor = pluginProvider.NewGeminiMux(pluginRegistry, pluginImageExecutor, googleExecutor)
 		pluginRoutes = pluginRegistry.Routes()
+		pluginVideoRoutes = pluginRegistry.VideoRoutes()
 	}
 	imageModels, err := imageoperation.DefaultRegistryWithAsyncAndAdditional(cfg.ReplicateModels, cfg.FalModels, pluginRoutes)
 	if err != nil {
 		logger.Error("gateway model registry initialization failed")
 		return 1
 	}
-	videoModels, err := videooperation.NewRegistryWithCapabilities(cfg.RunwayModels, cfg.RunwayModelCapabilities)
+	videoModels, err := videooperation.NewRegistryWithCapabilitiesAndAdditional(cfg.RunwayModels, cfg.RunwayModelCapabilities, pluginVideoRoutes)
 	if err != nil {
 		logger.Error("gateway video model registry initialization failed")
 		return 1
@@ -630,11 +632,12 @@ func run(stdout, stderr io.Writer) int {
 	var falHandler http.Handler
 	var falWebhookHandler http.Handler
 	var pluginWebhookHandler http.Handler
+	var pluginVideoWebhookHandler http.Handler
 	var managementHandler http.Handler
 	var runwayHandler http.Handler
 	var asyncWorker *jobs.Worker
 	asyncProviders := map[string]jobs.Provider{}
-	if pluginClient != nil && (pluginRegistry.SupportsAsyncProtocol("replicate") || pluginRegistry.SupportsAsyncProtocol("fal")) {
+	if pluginClient != nil && (pluginRegistry.SupportsAsyncProtocol("replicate") || pluginRegistry.SupportsAsyncProtocol("fal") || pluginRegistry.SupportsVideo()) {
 		pluginAsync, pluginErr := pluginProvider.NewAsync(pluginClient, cfg.ReconcileInterval)
 		if pluginErr != nil {
 			logger.Error("gateway async plugin provider initialization failed")
@@ -679,6 +682,15 @@ func run(stdout, stderr io.Writer) int {
 		asyncProviders["runway"] = runwayAdapter
 		readinessChecks = append(readinessChecks, runwayAssetStore.Ready)
 	}
+	if runwayAssetStore == nil && pluginRegistry != nil && pluginRegistry.SupportsVideo() {
+		var runwayErr error
+		runwayAssetStore, runwayErr = runwayassets.NewStore(pool)
+		if runwayErr != nil {
+			logger.Error("gateway Runway asset store initialization failed")
+			return 1
+		}
+		readinessChecks = append(readinessChecks, runwayAssetStore.Ready)
+	}
 	if len(asyncProviders) > 0 {
 		jobRepository, repositoryErr := jobs.NewRepository(pool, cfg.ReplayBodyBytes)
 		if repositoryErr != nil {
@@ -705,6 +717,12 @@ func run(stdout, stderr io.Writer) int {
 			serviceConfig.Webhooks["plugin"] = jobs.WebhookConfig{PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.PluginCallbackBindingTTL, CallbackSecret: cfg.PluginCallbackSecrets[0], EnabledChannel: func(channelID string) bool {
 				binding, ok := pluginRegistry.Binding(channelID)
 				return ok && binding.Async && binding.Callback
+			}, PathPrefix: func(channelID string) string {
+				binding, ok := pluginRegistry.Binding(channelID)
+				if ok && binding.Video {
+					return "/internal/webhooks/plugin-video"
+				}
+				return "/internal/webhooks/plugin"
 			}}
 		}
 		jobService, serviceErr := jobs.NewService(jobRepository, asyncProviders, serviceConfig, "gateway-submit")
@@ -718,6 +736,13 @@ func run(stdout, stderr io.Writer) int {
 			if serviceErr != nil {
 				logger.Error("gateway plugin callback handler initialization failed")
 				return 1
+			}
+			if pluginRegistry.SupportsVideo() {
+				pluginVideoWebhookHandler, serviceErr = pluginProvider.NewVideoCallbackHandler(pluginRegistry, pluginProvider.ServiceCallbackApplier{Service: jobService}, cfg.PluginCallbackSecrets, cfg.PluginCallbackTolerance, cfg.PluginCallbackBodyBytes)
+				if serviceErr != nil {
+					logger.Error("gateway plugin video callback handler initialization failed")
+					return 1
+				}
 			}
 		}
 		if cfg.JobManagementMode == config.JobManagementRequired {
@@ -772,9 +797,13 @@ func run(stdout, stderr io.Writer) int {
 				falWebhookHandler = webhook
 			}
 		}
-		if cfg.RunwayEnabled {
+		if cfg.RunwayEnabled || pluginRegistry != nil && pluginRegistry.SupportsVideo() {
 			handler := runwayProtocol.NewHandler(logger, apiKeyAuthenticator, videoModels, jobService, cfg.RunwayBodyBytes)
-			handler.SetUploads(runwayAdapter, runwayAssetStore)
+			if runwayAdapter != nil {
+				handler.SetUploads(runwayAdapter, runwayAssetStore)
+			} else {
+				handler.SetUploads(nil, runwayAssetStore)
+			}
 			handler.SetManagedResults(videoResults != nil)
 			if cfg.BillingMode == config.BillingRequired {
 				handler.SetBilling(billingService)
@@ -929,6 +958,7 @@ func run(stdout, stderr io.Writer) int {
 		Fal:                  falHandler,
 		FalWebhook:           falWebhookHandler,
 		PluginWebhook:        pluginWebhookHandler,
+		PluginVideoWebhook:   pluginVideoWebhookHandler,
 		Runway:               runwayHandler,
 		Management:           managementHandler,
 		ClientIPResolver:     clientIPResolver,

@@ -12,6 +12,7 @@ import (
 
 	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
+	videoconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/video/v1"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 )
 
@@ -53,6 +54,11 @@ func VerifyReportDirectory(snapshot Snapshot, directory string) error {
 		case asyncconformance.ReportSchema:
 			report, decodeErr := asyncconformance.DecodeReport(bytes.NewReader(body), MaximumConformanceReportBytes)
 			if decodeErr != nil || VerifyAsyncConformanceReport(admission, report) != nil {
+				return ErrInvalid
+			}
+		case videoconformance.ReportSchema:
+			report, decodeErr := videoconformance.DecodeReport(bytes.NewReader(body), MaximumConformanceReportBytes)
+			if decodeErr != nil || VerifyVideoConformanceReport(admission, report) != nil {
 				return ErrInvalid
 			}
 		default:
