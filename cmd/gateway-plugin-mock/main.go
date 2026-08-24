@@ -1,18 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/nativegatewayhq/gateway/internal/plugins"
-	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
+	runtimev1 "github.com/nativegatewayhq/gateway/plugin-sdk/runtime/v1"
 )
+
+const conformanceHeader = "X-Native-Gateway-Conformance"
+const conformanceCaseHeader = "X-Native-Gateway-Conformance-Case"
 
 const transparentPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+X8W8WQAAAABJRU5ErkJggg=="
 
@@ -38,7 +39,7 @@ func main() {
 	}
 	mux.HandleFunc("GET /plugin/v1/health", auth(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"status":"ok"}`)
+		_ = runtimev1.EncodeHealth(w)
 	}))
 	mux.HandleFunc("POST /plugin/v1/execute", auth(execute))
 	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
@@ -49,25 +50,43 @@ func main() {
 }
 
 func execute(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20+1))
-	if err != nil || len(body) > 2<<20 || manifest.HasDuplicateKeys(body) {
+	request, err := runtimev1.DecodeRequest(r.Body, 2<<20)
+	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
-	decoder.DisallowUnknownFields()
-	var request plugins.ExecuteRequest
-	if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF || request.SchemaVersion != plugins.RequestSchema || request.Operation != "image.generate" || request.RequestID == "" || request.PluginID == "" || request.PluginVersion == "" || request.ManifestDigest == "" || request.Model == "" || request.Input.Prompt == "" || request.Input.Images < 1 || request.Input.Images > 10 {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+	if r.Header.Get(conformanceHeader) == "runtime/v1" {
+		switch r.Header.Get(conformanceCaseHeader) {
+		case "error":
+			expected := expectation(request)
+			response := runtimev1.Failure(request.Identity(), runtimev1.InvalidRequest("conformance invalid request"))
+			w.Header().Set("Content-Type", "application/json")
+			_ = runtimev1.EncodeResponse(w, response, expected)
+			return
+		case "cancel":
+			<-r.Context().Done()
+			if !errorsIsCancellation(r.Context().Err()) {
+				http.Error(w, "canceled", http.StatusRequestTimeout)
+			}
+			return
+		}
 	}
-	images := make([]plugins.Image, request.Input.Images)
+	images := make([]runtimev1.Image, request.Input.Images)
 	for index := range images {
-		images[index] = plugins.Image{MIMEType: "image/png", Base64: base64.StdEncoding.EncodeToString(mustDecodePNG())}
+		images[index] = runtimev1.Image{MIMEType: "image/png", Base64: base64.StdEncoding.EncodeToString(mustDecodePNG())}
 	}
-	response := plugins.ExecuteResponse{SchemaVersion: plugins.ResponseSchema, RequestID: request.RequestID, PluginID: request.PluginID, PluginVersion: request.PluginVersion, ManifestDigest: request.ManifestDigest, Result: &plugins.Result{Images: images, Usage: plugins.Usage{Images: len(images)}}}
+	expected := expectation(request)
+	response := runtimev1.Success(request.Identity(), runtimev1.Result{Images: images, Usage: runtimev1.Usage{Images: len(images)}})
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
+	_ = runtimev1.EncodeResponse(w, response, expected)
+}
+
+func expectation(request runtimev1.ExecuteRequest) runtimev1.Expectation {
+	return runtimev1.Expectation{Identity: request.Identity(), Protocol: request.Protocol, Model: request.Model, Output: "base64", MaximumImages: 10}
+}
+
+func errorsIsCancellation(err error) bool {
+	return err == context.Canceled || err == context.DeadlineExceeded
 }
 func mustDecodePNG() []byte {
 	value, err := base64.StdEncoding.DecodeString(transparentPNG)

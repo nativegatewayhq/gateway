@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,9 @@ func TestParseCanonicalDigestAndValidation(t *testing.T) {
 	second, err := Parse([]byte(" \n"+validManifest+"\n"), "0.9.9")
 	if err != nil || first.Digest != second.Digest {
 		t.Fatalf("digest stable=%v err=%v", first.Digest == second.Digest, err)
+	}
+	if hex.EncodeToString(first.Digest[:]) != "b2210aa93268add9e0fafd5e7735fd82b3b5db33bcd7a63e1bbeb74d7975c1a9" {
+		t.Fatalf("manifest digest changed: %x", first.Digest)
 	}
 	for _, value := range []string{`{"schema_version":"nativegateway.provider/v1","schema_version":"nativegateway.provider/v1"}`, `{"schema_version":"nativegateway.provider/v1","secret":"private"}`, validManifest[:len(validManifest)-1] + `,"unknown":true}`, validManifest} {
 		version := "1.0.0"

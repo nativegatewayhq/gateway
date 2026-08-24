@@ -1,0 +1,1 @@
+{"schema_version":"nativegateway.plugin-request/v1","request_id":"req_test","plugin_id":"provider.example","plugin_version":"1.0.0","manifest_digest":"62892b5cc04328d02a3277730b1a10eae5b029c43690b0a58c4271c68af9204f","operation":"image.generate","protocol":"openai","model":"example-image-v1","input":{"prompt":"draw","images":1}}

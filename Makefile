@@ -1,4 +1,4 @@
-.PHONY: build check fmt fmt-check integration-test test vet
+.PHONY: build check fmt fmt-check integration-test public-sdk-test test vet
 
 build:
 	mkdir -p bin
@@ -11,6 +11,7 @@ build:
 	go build -o bin/gateway-video-price ./cmd/gateway-video-price
 	go build -o bin/gateway-audio-price ./cmd/gateway-audio-price
 	go build -o bin/gateway-plugin-validator ./cmd/gateway-plugin-validator
+	go build -o bin/gateway-plugin-conformance ./cmd/gateway-plugin-conformance
 	go build -o bin/gateway-plugin-mock ./cmd/gateway-plugin-mock
 
 fmt:
@@ -22,6 +23,10 @@ fmt-check:
 test:
 	go test -race ./...
 
+public-sdk-test:
+	cd examples/plugin/go-sidecar-template && GOWORK=off go test ./...
+	test -z "$$(cd examples/plugin/go-sidecar-template && GOWORK=off go list -deps ./... | grep 'github.com/nativegatewayhq/gateway/internal/' || true)"
+
 integration-test:
 	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi
 	@if [ -z "$$TEST_REDIS_URL" ]; then echo "TEST_REDIS_URL is required"; exit 1; fi
@@ -30,4 +35,4 @@ integration-test:
 vet:
 	go vet ./...
 
-check: fmt-check vet test build
+check: fmt-check vet test public-sdk-test build
