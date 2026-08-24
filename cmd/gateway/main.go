@@ -35,6 +35,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/ratelimit"
 	"github.com/nativegatewayhq/gateway/internal/reconciliation"
 	"github.com/nativegatewayhq/gateway/internal/runwayassets"
+	"github.com/nativegatewayhq/gateway/internal/speechstorage"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	"github.com/nativegatewayhq/gateway/internal/videostorage"
@@ -140,6 +141,28 @@ func run(stdout, stderr io.Writer) int {
 		}
 		audioAssetService.SetTelemetry(telemetryRuntime.Recorder)
 		readinessChecks = append(readinessChecks, audioAssetService.Ready)
+	}
+	var speechOutputService *speechstorage.Service
+	var openAISpeechAssetHandler http.Handler
+	if cfg.SpeechOutputStorage.Mode == speechstorage.Managed {
+		repository, storageErr := speechstorage.NewRepository(pool)
+		if storageErr != nil {
+			logger.Error("gateway speech output initialization failed")
+			return 1
+		}
+		objects, storageErr := audioassets.NewS3(audioassets.S3Config{Endpoint: cfg.SpeechOutputStorage.Endpoint, Region: cfg.SpeechOutputStorage.Region, Bucket: cfg.SpeechOutputStorage.Bucket, AccessKeyID: cfg.SpeechOutputStorage.AccessKeyID, SecretAccessKey: cfg.SpeechOutputStorage.SecretAccessKey, ServerSideEncryption: cfg.SpeechOutputStorage.ServerSideEncryption, UploadTimeout: cfg.SpeechOutputStorage.UploadTimeout, DownloadTimeout: cfg.SpeechOutputStorage.DownloadTimeout})
+		if storageErr != nil {
+			logger.Error("gateway speech output initialization failed")
+			return 1
+		}
+		speechOutputService, storageErr = speechstorage.NewService(repository, objects, cfg.SpeechOutputStorage, fmt.Sprintf("gateway-speech-output-%d", os.Getpid()))
+		if storageErr != nil {
+			logger.Error("gateway speech output initialization failed")
+			return 1
+		}
+		speechOutputService.SetTelemetry(telemetryRuntime.Recorder)
+		openAISpeechAssetHandler = openaiProtocol.NewSpeechAssetHandler(logger, apiKeyAuthenticator, speechOutputService)
+		readinessChecks = append(readinessChecks, speechOutputService.Ready)
 	}
 	var imageResults *imagestorage.Manager
 	if cfg.ImageStorage.Mode == imagestorage.Managed {
@@ -490,6 +513,7 @@ func run(stdout, stderr io.Writer) int {
 			handler = openaiProtocol.NewBillableSpeechHandler(logger, apiKeyAuthenticator, audioModels, openaiProvider.NewSpeech(providerCredentialRegistry, cfg.SpeechTimeout, cfg.SpeechStreamIdleTimeout), healthGate, cfg.SpeechRequestBytes, cfg.SpeechResponseBytes, audioChargeBilling)
 		}
 		handler.SetTelemetry(telemetryRuntime.Recorder)
+		handler.SetManagedOutputs(speechOutputService)
 		openAISpeechHandler = handler
 	}
 	if len(cfg.OpenAITranscriptionModels) > 0 {
@@ -689,7 +713,25 @@ func run(stdout, stderr io.Writer) int {
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
 	workerCount := 0
-	workerFinished := make(chan struct{}, 6)
+	workerFinished := make(chan struct{}, 7)
+	if speechOutputService != nil {
+		workerCount++
+		go func() {
+			defer func() { workerFinished <- struct{}{} }()
+			ticker := time.NewTicker(cfg.SpeechOutputStorage.CleanupInterval)
+			defer ticker.Stop()
+			for {
+				if _, workerErr := speechOutputService.RunCleanup(workerCtx); workerErr != nil {
+					logger.Warn("Speech output cleanup cycle failed", "category", "speech_output_cleanup_failed")
+				}
+				select {
+				case <-workerCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
 	if audioAssetService != nil {
 		workerCount++
 		go func() {
@@ -798,6 +840,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAIChat:           openAIChatHandler,
 		OpenAIResponses:      openAIResponsesHandler,
 		OpenAISpeech:         openAISpeechHandler,
+		OpenAISpeechAssets:   openAISpeechAssetHandler,
 		OpenAITranscriptions: openAITranscriptionHandler,
 		OpenAITranslations:   openAITranslationHandler,
 		OpenAIAudioAssets:    openAIAudioAssetHandler,

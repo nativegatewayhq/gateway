@@ -21,6 +21,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/audioassets"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	"github.com/nativegatewayhq/gateway/internal/speechstorage"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
@@ -52,6 +53,28 @@ assert r.read() == b"gateway-audio-ok"`
 	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("JavaScript Speech SDK: %v: %s", err, output)
+	}
+}
+
+func TestPythonAndJavaScriptManagedSpeechDelivery(t *testing.T) {
+	registry, _ := audiooperation.NewRegistry([]string{"tts-1"})
+	asset := speechstorage.Asset{ID: "speechasset_00000000000000000000000000000009", State: speechstorage.Capturing, ExpiresAt: time.Now().Add(time.Hour)}
+	outputs := &managedSpeechOutputFake{asset: asset}
+	handler := NewSpeechHandler(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, speechExecutorFunc(func(context.Context, openaiProvider.SpeechRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, ContentLength: 5, Header: http.Header{"Content-Type": {"audio/mpeg"}}, Body: io.NopCloser(strings.NewReader("audio"))}, nil
+	}), providerhealth.NoopGate{}, 1024, 1024)
+	handler.SetManagedOutputs(outputs)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `import urllib.request
+r=urllib.request.urlopen(urllib.request.Request("` + server.URL + `/v1/audio/speech",data=b'{"model":"tts-1","input":"hello","voice":"alloy"}',headers={"Authorization":"Bearer service","Content-Type":"application/json","Idempotency-Key":"python-managed","X-Native-Gateway-Delivery":"managed"},method="POST"))
+assert r.read()==b"audio" and r.headers["X-Native-Gateway-Speech-Asset"].startswith("speechasset_")`
+	if output, err := exec.Command("python3", "-c", python).CombinedOutput(); err != nil {
+		t.Fatalf("Python managed speech: %v: %s", err, output)
+	}
+	javascript := `(async()=>{const r=await fetch("` + server.URL + `/v1/audio/speech",{method:"POST",headers:{Authorization:"Bearer service","Content-Type":"application/json","Idempotency-Key":"node-managed","X-Native-Gateway-Delivery":"managed"},body:JSON.stringify({model:"tts-1",input:"hello",voice:"alloy"})});if(Buffer.from(await r.arrayBuffer()).toString()!=="audio"||!r.headers.get("x-native-gateway-speech-asset").startsWith("speechasset_"))process.exit(2)})().catch(e=>{console.error(e);process.exit(1)})`
+	if output, err := exec.Command("node", "-e", javascript).CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript managed speech: %v: %s", err, output)
 	}
 }
 

@@ -27,6 +27,7 @@ type Dependencies struct {
 	OpenAIChat           http.Handler
 	OpenAIResponses      http.Handler
 	OpenAISpeech         http.Handler
+	OpenAISpeechAssets   http.Handler
 	OpenAITranscriptions http.Handler
 	OpenAITranslations   http.Handler
 	OpenAIAudioAssets    http.Handler
@@ -84,7 +85,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, dependenci
 	}
 
 	server := &http.Server{
-		Handler:           httpserver.NewHandlerWithTelemetry(logger, dependencies.Ready, dependencies.ClientIPResolver, dependencies.Telemetry, dependencies.TracePropagator, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels, OpenAIChat: dependencies.OpenAIChat, OpenAIResponses: dependencies.OpenAIResponses, OpenAISpeech: dependencies.OpenAISpeech, OpenAITranscriptions: dependencies.OpenAITranscriptions, OpenAITranslations: dependencies.OpenAITranslations, OpenAIAudioAssets: dependencies.OpenAIAudioAssets, Anthropic: dependencies.Anthropic, Replicate: dependencies.Replicate, ReplicateWebhook: dependencies.ReplicateWebhook, Fal: dependencies.Fal, FalWebhook: dependencies.FalWebhook, Runway: dependencies.Runway, Management: dependencies.Management}),
+		Handler:           httpserver.NewHandlerWithTelemetry(logger, dependencies.Ready, dependencies.ClientIPResolver, dependencies.Telemetry, dependencies.TracePropagator, httpserver.Routes{Gemini: dependencies.Gemini, OpenAIImages: dependencies.OpenAIImages, OpenAIImageEdits: dependencies.OpenAIImageEdits, OpenAIModels: dependencies.OpenAIModels, OpenAIChat: dependencies.OpenAIChat, OpenAIResponses: dependencies.OpenAIResponses, OpenAISpeech: dependencies.OpenAISpeech, OpenAISpeechAssets: dependencies.OpenAISpeechAssets, OpenAITranscriptions: dependencies.OpenAITranscriptions, OpenAITranslations: dependencies.OpenAITranslations, OpenAIAudioAssets: dependencies.OpenAIAudioAssets, Anthropic: dependencies.Anthropic, Replicate: dependencies.Replicate, ReplicateWebhook: dependencies.ReplicateWebhook, Fal: dependencies.Fal, FalWebhook: dependencies.FalWebhook, Runway: dependencies.Runway, Management: dependencies.Management}),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

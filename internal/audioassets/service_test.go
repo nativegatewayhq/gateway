@@ -3,6 +3,7 @@ package audioassets
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,7 +106,7 @@ func TestPrivateS3PutGetDeleteAndReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := [32]byte{1}
+	digest := sha256.Sum256(value)
 	if err = store.Ready(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestPrivateS3PutGetDeleteAndReadiness(t *testing.T) {
 	if err = store.Put(context.Background(), "audio/org/object.bin", "audio/wav", int64(len(value)), digest, bytes.NewReader(value)); err != nil {
 		t.Fatalf("conditional reuse: %v", err)
 	}
-	body, err := store.Get(context.Background(), "audio/org/object.bin", 100)
+	body, err := store.Get(context.Background(), "audio/org/object.bin", int64(len(value)))
 	if err != nil {
 		t.Fatal(err)
 	}

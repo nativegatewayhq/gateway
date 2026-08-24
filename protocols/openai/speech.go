@@ -21,6 +21,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
+	"github.com/nativegatewayhq/gateway/internal/speechstorage"
 	"github.com/nativegatewayhq/gateway/internal/telemetry"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
@@ -46,6 +47,12 @@ type SpeechBilling interface {
 	MarkReconciling(context.Context, string, string) error
 }
 
+type SpeechOutputManager interface {
+	Begin(context.Context, apikey.Principal, string, string, [32]byte) (speechstorage.Asset, error)
+	Capture(context.Context, speechstorage.Asset, string, io.Reader, io.Writer, int64) (speechstorage.CaptureResult, error)
+	Open(context.Context, apikey.Principal, string) (speechstorage.Asset, io.ReadCloser, error)
+}
+
 type SpeechHandler struct {
 	common               *Handler
 	models               SpeechRegistry
@@ -55,6 +62,11 @@ type SpeechHandler struct {
 	maximumResponseBytes int64
 	telemetry            *telemetry.Recorder
 	billing              SpeechBilling
+	outputs              SpeechOutputManager
+}
+
+func (handler *SpeechHandler) SetManagedOutputs(outputs SpeechOutputManager) {
+	handler.outputs = outputs
 }
 
 func NewBillableSpeechHandler(logger *slog.Logger, authenticator Authenticator, models SpeechRegistry, executor SpeechExecutor, health providerhealth.Gate, maximumRequestBytes, maximumResponseBytes int64, billing SpeechBilling) *SpeechHandler {
@@ -93,6 +105,18 @@ func (handler *SpeechHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 	}
 	principal, ok := handler.common.authenticate(tracked, request)
 	if !ok {
+		return
+	}
+	delivery := strings.TrimSpace(request.Header.Get("X-Native-Gateway-Delivery"))
+	if delivery == "" {
+		delivery = "stream"
+	}
+	if delivery != "stream" && delivery != "managed" {
+		writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_delivery_mode", "invalid speech delivery mode")
+		return
+	}
+	if delivery == "managed" && handler.outputs == nil {
+		writeError(tracked, http.StatusServiceUnavailable, "server_error", "managed_delivery_unavailable", "managed speech delivery unavailable")
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -143,7 +167,53 @@ func (handler *SpeechHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 	if !ok {
 		return
 	}
-	response, executeErr := handler.execute(request.Context(), route, openaiProvider.SpeechRequest{ChannelID: route.ChannelID, ContentType: "application/json", Accept: request.Header.Get("Accept"), UserAgent: request.Header.Get("User-Agent"), ContentLength: int64(len(body)), Body: bytes.NewReader(body)})
+	if charge.State == "CAPTURED" && delivery != "managed" {
+		writeError(tracked, http.StatusConflict, "invalid_request_error", "idempotency_conflict", "completed speech can only be replayed from managed delivery")
+		return
+	}
+	var outputAsset speechstorage.Asset
+	if delivery == "managed" {
+		key := request.Header.Get("Idempotency-Key")
+		if !idempotency.Valid(key) {
+			writeError(tracked, http.StatusBadRequest, "invalid_request_error", "invalid_idempotency_key", "valid Idempotency-Key is required")
+			return
+		}
+		fingerprint := idempotency.Fingerprint("openai", audiooperation.Speech, route.ID, route.ChannelID, "application/json", body)
+		outputAsset, err = handler.outputs.Begin(request.Context(), principal, key, charge.ID, fingerprint)
+		if err != nil {
+			if charge.ID != "" {
+				_, _ = handler.billing.Release(context.WithoutCancel(request.Context()), charge.ID, "managed_output_begin_failed")
+			}
+			if errors.Is(err, speechstorage.ErrPending) || errors.Is(err, speechstorage.ErrConflict) {
+				writeError(tracked, http.StatusConflict, "invalid_request_error", "idempotency_conflict", "managed speech request is already in progress")
+			} else {
+				writeError(tracked, http.StatusServiceUnavailable, "server_error", "managed_delivery_unavailable", "managed speech delivery unavailable")
+			}
+			return
+		}
+		tracked.Header().Set("X-Native-Gateway-Speech-Asset", outputAsset.ID)
+		if outputAsset.State == speechstorage.Available {
+			asset, replayBody, replayErr := handler.outputs.Open(request.Context(), principal, outputAsset.ID)
+			if replayErr != nil {
+				writeError(tracked, http.StatusServiceUnavailable, "server_error", "managed_delivery_unavailable", "managed speech delivery unavailable")
+				return
+			}
+			defer replayBody.Close()
+			tracked.Header().Set("Content-Type", asset.ContentType)
+			tracked.Header().Set("Content-Length", strconv.FormatInt(asset.ByteLength, 10))
+			tracked.WriteHeader(http.StatusOK)
+			if _, replayErr = relaySpeech(tracked, replayBody, handler.maximumResponseBytes, asset.ByteLength); replayErr != nil {
+				providerOutcome = "failure"
+			}
+			handler.observe(request, permit, nil, errSpeechStreamWrite)
+			return
+		}
+	}
+	executionContext := request.Context()
+	if delivery == "managed" {
+		executionContext = context.WithoutCancel(request.Context())
+	}
+	response, executeErr := handler.execute(executionContext, route, openaiProvider.SpeechRequest{ChannelID: route.ChannelID, ContentType: "application/json", Accept: request.Header.Get("Accept"), UserAgent: request.Header.Get("User-Agent"), ContentLength: int64(len(body)), Body: bytes.NewReader(body)})
 	if executeErr != nil {
 		handler.observe(request, permit, nil, executeErr)
 		providerOutcome = "failure"
@@ -185,7 +255,18 @@ func (handler *SpeechHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 		tracked.Header().Set("Content-Length", strconv.FormatInt(response.ContentLength, 10))
 	}
 	tracked.WriteHeader(response.StatusCode)
-	result, relayErr := relaySpeech(tracked, response.Body, handler.maximumResponseBytes, response.ContentLength)
+	var result speechStreamResult
+	var relayErr error
+	if delivery == "managed" {
+		captured, captureErr := handler.outputs.Capture(context.WithoutCancel(request.Context()), outputAsset, contentType, response.Body, tracked, response.ContentLength)
+		result = speechStreamResult{Bytes: captured.Bytes, SHA256: captured.SHA256}
+		relayErr = captureErr
+		if relayErr == nil && (captured.DownstreamErr != nil || captured.StorageErr != nil) {
+			providerOutcome = "failure"
+		}
+	} else {
+		result, relayErr = relaySpeech(tracked, response.Body, handler.maximumResponseBytes, response.ContentLength)
+	}
 	if relayErr != nil {
 		handler.observe(request, permit, response, relayErr)
 		providerOutcome = "failure"
@@ -194,7 +275,7 @@ func (handler *SpeechHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 		}
 		return
 	}
-	if charge.ID != "" {
+	if charge.ID != "" && charge.State != "CAPTURED" {
 		if _, err = handler.billing.Complete(context.WithoutCancel(request.Context()), charge.ID, audiobilling.StreamEvidence{Status: response.StatusCode, Headers: map[string][]string(tracked.Header()), Bytes: result.Bytes, SHA256: result.SHA256}); err != nil {
 			_ = handler.billing.MarkReconciling(context.WithoutCancel(request.Context()), charge.ID, "settlement_failed")
 			providerOutcome = "failure"

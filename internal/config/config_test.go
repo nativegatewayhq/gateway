@@ -62,6 +62,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AudioInputStorage.Mode != "disabled" || cfg.AudioInputStorage.MaximumBytes != 64<<20 || cfg.AudioInputStorage.Retention != 7*24*time.Hour {
 		t.Errorf("audio input storage config=%+v", cfg.AudioInputStorage)
 	}
+	if cfg.SpeechOutputStorage.Mode != "disabled" || cfg.SpeechOutputStorage.MaximumBytes != 256<<20 || cfg.SpeechOutputStorage.Retention != 7*24*time.Hour {
+		t.Errorf("speech output storage config=%+v", cfg.SpeechOutputStorage)
+	}
 	if cfg.Telemetry.Mode != "disabled" || cfg.Telemetry.ServiceName != "native-ai-gateway" || cfg.Telemetry.SampleRatio != 0.1 {
 		t.Errorf("telemetry config=%+v", cfg.Telemetry)
 	}
@@ -521,6 +524,14 @@ func TestManagedAudioInputStorageConfiguration(t *testing.T) {
 	values["GATEWAY_AUDIO_INPUT_STORAGE_ENDPOINT"] = "http://private.example"
 	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
 		t.Fatal("unsafe audio storage endpoint accepted")
+	}
+}
+
+func TestManagedSpeechOutputStorageConfiguration(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway", "GATEWAY_SPEECH_OUTPUT_STORAGE_MODE": "managed", "GATEWAY_SPEECH_OUTPUT_STORAGE_ENDPOINT": "http://127.0.0.1:9000", "GATEWAY_SPEECH_OUTPUT_STORAGE_REGION": "auto", "GATEWAY_SPEECH_OUTPUT_STORAGE_BUCKET": "speech-private", "GATEWAY_SPEECH_OUTPUT_STORAGE_ACCESS_KEY_ID": "access", "GATEWAY_SPEECH_OUTPUT_STORAGE_SECRET_ACCESS_KEY": "secret", "GATEWAY_SPEECH_OUTPUT_STORAGE_MAX_BYTES": "1048576", "GATEWAY_SPEECH_OUTPUT_STORAGE_MAX_CONCURRENT_CAPTURES": "3", "GATEWAY_SPEECH_OUTPUT_STORAGE_RETENTION": "48h"}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || cfg.SpeechOutputStorage.Mode != "managed" || cfg.SpeechOutputStorage.MaximumBytes != 1048576 || cfg.SpeechOutputStorage.MaximumConcurrentCaptures != 3 || cfg.SpeechOutputStorage.Retention != 48*time.Hour {
+		t.Fatalf("config=%+v err=%v", cfg.SpeechOutputStorage, err)
 	}
 }
 

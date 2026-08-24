@@ -25,6 +25,14 @@ func TestAudioAssetMetadataUsesBoundedRouteWithoutAssetIdentity(t *testing.T) {
 	}
 }
 
+func TestSpeechAssetMetadataUsesBoundedRouteWithoutAssetIdentity(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://gateway.example/v1/audio/speech/assets/speechasset_private/content", nil)
+	protocol, operation, route := requestMetadata(request)
+	if protocol != "openai" || operation != "audio.speech.asset.content" || route != "/v1/audio/speech/assets/{id}/content" || strings.Contains(route, "private") || boundedOperation(operation) != operation || boundedRoute(route) != route {
+		t.Fatalf("metadata=%s/%s/%s", protocol, operation, route)
+	}
+}
+
 func TestFalWebhookMetadataUsesBoundedRouteWithoutCapability(t *testing.T) {
 	request := httptest.NewRequest("POST", "https://gateway.example/internal/webhooks/fal/job_00000000000000000000000000000000/whk_secretcapability", nil)
 	protocol, operation, route := requestMetadata(request)

@@ -68,6 +68,16 @@ func (store *S3Store) Put(ctx context.Context, key, contentType string, size int
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode == http.StatusPreconditionFailed {
+		existing, verifyErr := store.Get(ctx, key, size)
+		if verifyErr != nil {
+			return ErrStorage
+		}
+		defer existing.Close()
+		hash := sha256.New()
+		read, verifyErr := io.Copy(hash, existing)
+		if verifyErr != nil || read != size || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), hex.EncodeToString(digest[:])) {
+			return ErrStorage
+		}
 		return nil
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
@@ -88,7 +98,7 @@ func (store *S3Store) Get(ctx context.Context, key string, maximum int64) (io.Re
 	if err != nil {
 		return nil, ErrStorage
 	}
-	if response.StatusCode < 200 || response.StatusCode > 299 || response.ContentLength < 1 || response.ContentLength > maximum {
+	if response.StatusCode < 200 || response.StatusCode > 299 || response.ContentLength != maximum {
 		response.Body.Close()
 		return nil, ErrStorage
 	}

@@ -112,6 +112,10 @@ func TestConcurrentBeginAndCompleteAreExactlyOnce(t *testing.T) {
 	if _, err = s.Complete(ctx, charge.ID, evidence); err != nil {
 		t.Fatal(err)
 	}
+	replay, err := s.Begin(ctx, testRequest("same-key"))
+	if err != nil || replay.ID != charge.ID || replay.State != "CAPTURED" {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
 	var available, reserved int64
 	if err = pool.QueryRow(ctx, `SELECT available,reserved FROM organization_wallets WHERE organization_id='org_audio'`).Scan(&available, &reserved); err != nil || available != 9990 || reserved != 0 {
 		t.Fatalf("wallet=%d/%d err=%v", available, reserved, err)

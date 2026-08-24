@@ -8,9 +8,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/audiobilling"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
+	"github.com/nativegatewayhq/gateway/internal/speechstorage"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 )
@@ -170,3 +173,63 @@ type errorWriter struct{}
 func (errorWriter) Header() http.Header       { return http.Header{} }
 func (errorWriter) WriteHeader(int)           {}
 func (errorWriter) Write([]byte) (int, error) { return 0, context.Canceled }
+
+type managedSpeechOutputFake struct {
+	asset           speechstorage.Asset
+	captured        int
+	downstreamError error
+}
+
+func (f *managedSpeechOutputFake) Open(context.Context, apikey.Principal, string) (speechstorage.Asset, io.ReadCloser, error) {
+	return f.asset, io.NopCloser(strings.NewReader("audio")), nil
+}
+
+func (f *managedSpeechOutputFake) Begin(context.Context, apikey.Principal, string, string, [32]byte) (speechstorage.Asset, error) {
+	return f.asset, nil
+}
+func (f *managedSpeechOutputFake) Capture(_ context.Context, asset speechstorage.Asset, _ string, source io.Reader, downstream io.Writer, _ int64) (speechstorage.CaptureResult, error) {
+	body, err := io.ReadAll(source)
+	if err != nil {
+		return speechstorage.CaptureResult{}, err
+	}
+	f.captured++
+	_, writeErr := downstream.Write(body)
+	if f.downstreamError != nil {
+		writeErr = f.downstreamError
+	}
+	return speechstorage.CaptureResult{Asset: asset, Bytes: int64(len(body)), SHA256: [32]byte{1}, DownstreamErr: writeErr}, nil
+}
+
+func TestManagedSpeechKeepsNativeBodyAndReturnsOpaqueAssetHeader(t *testing.T) {
+	registry, _ := audiooperation.NewRegistry([]string{"tts-1"})
+	outputs := &managedSpeechOutputFake{asset: speechstorage.Asset{ID: "speechasset_00000000000000000000000000000001", State: speechstorage.Capturing, ExpiresAt: time.Now().Add(time.Hour)}}
+	handler := NewSpeechHandler(slog.Default(), acceptingAuth(t), registry, speechExecutorFunc(func(context.Context, openaiProvider.SpeechRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, ContentLength: 5, Header: http.Header{"Content-Type": {"audio/mpeg"}}, Body: io.NopCloser(strings.NewReader("audio"))}, nil
+	}), providerhealth.NoopGate{}, 256, 256)
+	handler.SetManagedOutputs(outputs)
+	request := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(`{"model":"tts-1","input":"hello","voice":"alloy"}`))
+	request.Header.Set("Authorization", "Bearer service-secret")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "managed-speech")
+	request.Header.Set("X-Native-Gateway-Delivery", "managed")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != 200 || recorder.Body.String() != "audio" || recorder.Header().Get("X-Native-Gateway-Speech-Asset") != outputs.asset.ID || outputs.captured != 1 {
+		t.Fatalf("status=%d headers=%v body=%q captured=%d", recorder.Code, recorder.Header(), recorder.Body.String(), outputs.captured)
+	}
+}
+
+func TestSpeechRejectsInvalidDeliveryBeforeProvider(t *testing.T) {
+	registry, _ := audiooperation.NewRegistry([]string{"tts-1"})
+	calls := 0
+	handler := NewSpeechHandler(slog.Default(), acceptingAuth(t), registry, speechExecutorFunc(func(context.Context, openaiProvider.SpeechRequest) (*http.Response, error) { calls++; return nil, nil }), providerhealth.NoopGate{}, 256, 256)
+	request := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(`{"model":"tts-1","input":"hello","voice":"alloy"}`))
+	request.Header.Set("Authorization", "Bearer service-secret")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Native-Gateway-Delivery", "public")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || calls != 0 {
+		t.Fatalf("status=%d calls=%d", recorder.Code, calls)
+	}
+}
