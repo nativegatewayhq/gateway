@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-058
 title: Phase 5 OpenAI Audio Translations Native Multipart Foundation
-status: in_progress
+status: completed
 created_at: 2026-08-24T12:43:08+09:00
-updated_at: 2026-08-24T12:50:19+09:00
+updated_at: 2026-08-24T13:04:17+09:00
 owners:
   - gateway
 initiative: phase-5-openai-audio-translations-foundation
@@ -233,23 +233,31 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] 공식 Python·JavaScript SDK에서 Key와 Base URL만 변경해 audio translation이 성공함
-- [ ] `audio.translation` operation, model registry, permission, rate limit과 telemetry가 transcription과 분리됨
-- [ ] multipart가 bounded spool되고 file/model/optional field 및 모든 선언 제한이 fail closed됨
-- [ ] temperature, response format과 translation 전용 capability가 dispatch 전에 검증됨
-- [ ] Provider credential 교체와 fixed `/v1/audio/translations` origin이 보장됨
-- [ ] native JSON/verbose JSON/text/SRT/VTT status·header·body가 보존됨
-- [ ] timeout/reset/panic/cancel/client failure가 Provider 재호출을 만들지 않음
-- [ ] 성공·실패·cancel의 input/outbound temporary file이 모두 제거됨
-- [ ] audio/prompt/filename/result/credential이 DB·log·telemetry에 노출되지 않음
-- [ ] billing-required translation enablement와 dispatch가 fail closed됨
-- [ ] transcription의 native multipart, billing, fault와 SDK 회귀가 없음
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README, migration과 멀티레포 handoff가 갱신됨
+- [x] 공식 Python·JavaScript SDK에서 Key와 Base URL만 변경해 audio translation이 성공함
+- [x] `audio.translation` operation, model registry, permission, rate limit과 telemetry가 transcription과 분리됨
+- [x] multipart가 bounded spool되고 file/model/optional field 및 모든 선언 제한이 fail closed됨
+- [x] temperature, response format과 translation 전용 capability가 dispatch 전에 검증됨
+- [x] Provider credential 교체와 fixed `/v1/audio/translations` origin이 보장됨
+- [x] native JSON/verbose JSON/text/SRT/VTT status·header·body가 보존됨
+- [x] timeout/reset/panic/cancel/client failure가 Provider 재호출을 만들지 않음
+- [x] 성공·실패·cancel의 input/outbound temporary file이 모두 제거됨
+- [x] audio/prompt/filename/result/credential이 DB·log·telemetry에 노출되지 않음
+- [x] billing-required translation enablement와 dispatch가 fail closed됨
+- [x] transcription의 native multipart, billing, fault와 SDK 회귀가 없음
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README, migration과 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `bb2278e` (`feat: add native OpenAI audio translations`)
+- Pull Request: [#85](https://github.com/nativegatewayhq/gateway/pull/85)
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과: formatter, vet, 전체 race test와 모든 Gateway CLI build를 검증했다.
+- `GOCACHE=/private/tmp/gateway-go-cache GOFLAGS=-p=1 TEST_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway_plan058?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/14' make integration-test` 통과: migration 52 적용·반복, translation permission과 기존 DB·Wallet·billing·routing 회귀를 검증했다.
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/openai -count=1` 통과: 공식 OpenAI Python 3.3.1과 JavaScript 7.5.0 SDK의 JSON 객체 및 text 문자열 translation과 전체 OpenAI SDK 회귀를 검증했다.
+- logical `translation-public`이 Provider `whisper-1`로 교체되고 file bytes가 보존되며, fixed `/v1/audio/translations` origin과 Provider credential replacement가 적용됨을 adapter/facade test로 검증했다.
+- JSON, verbose JSON, text, SRT, VTT의 native status·safe header·body 보존과 translation-only field/capability/temperature fail-closed를 검증했다.
+- timeout, reset, panic, cancel, response oversize가 단일 dispatch로 종료되고 memory/file input 및 outbound temporary spool이 제거됨을 검증했다.
+- migration·handler·adapter의 저장 및 관측 경로를 감사해 audio, filename, prompt, translated result, service key와 Provider credential 원문이 DB·log·telemetry에 추가되지 않았음을 확인했다.
 
 ## Rollback 계획
 
