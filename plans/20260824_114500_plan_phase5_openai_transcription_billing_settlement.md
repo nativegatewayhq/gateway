@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-057
 title: Phase 5 OpenAI Transcription Duration and Token Pricing Settlement
-status: in_progress
+status: completed
 created_at: 2026-08-24T11:45:00+09:00
-updated_at: 2026-08-24T12:00:00+09:00
+updated_at: 2026-08-24T12:32:22+09:00
 owners:
   - gateway
 initiative: phase-5-openai-transcription-billing-settlement
@@ -229,21 +229,27 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] token/duration strategy와 reservation upper bound가 immutable하게 publication됨
-- [ ] typed Provider usage만 actual quantity와 비용으로 인정됨
-- [ ] dispatch 전에 Wallet·quota·spend cap이 원자적으로 예약됨
-- [ ] valid JSON/SSE usage가 exactly-once Capture되고 차액이 반환됨
-- [ ] known non-2xx는 Release되고 uncertain/invalid/missing usage는 Reconciliation됨
-- [ ] actual usage 상한 초과가 자동 추가 인출 없이 manual review로 수렴함
-- [ ] duplicate idempotency request가 Provider·Ledger를 재실행하지 않음
-- [ ] audio/prompt/filename/transcript/credential이 DB·log·telemetry에 노출되지 않음
-- [ ] text/SRT/VTT의 관리형 dispatch가 fail closed되고 BYOK 호환은 유지됨
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README, CLI, migration과 멀티레포 handoff가 갱신됨
+- [x] token/duration strategy와 reservation upper bound가 immutable하게 publication됨
+- [x] typed Provider usage만 actual quantity와 비용으로 인정됨
+- [x] dispatch 전에 Wallet·quota·spend cap이 원자적으로 예약됨
+- [x] valid JSON/SSE usage가 exactly-once Capture되고 차액이 반환됨
+- [x] known non-2xx는 Release되고 uncertain/invalid/missing usage는 Reconciliation됨
+- [x] actual usage 상한 초과가 자동 추가 인출 없이 manual review로 수렴함
+- [x] duplicate idempotency request가 Provider·Ledger를 재실행하지 않음
+- [x] audio/prompt/filename/transcript/credential이 DB·log·telemetry에 노출되지 않음
+- [x] text/SRT/VTT의 관리형 dispatch가 fail closed되고 BYOK 호환은 유지됨
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README, CLI, migration과 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 commit: `c3f9651` (`feat: settle OpenAI transcription usage billing`)
+- Pull Request: [#83](https://github.com/nativegatewayhq/gateway/pull/83)
+- `GOCACHE=/private/tmp/gateway-go-cache make check` 통과: formatter, vet, 전체 race test와 모든 Gateway CLI build를 검증했다.
+- `GOCACHE=/private/tmp/gateway-go-cache GOFLAGS=-p=1 TEST_DATABASE_URL='postgres://gateway:gateway-local@127.0.0.1:55433/gateway_plan057?sslmode=disable' TEST_REDIS_URL='redis://127.0.0.1:56379/13' make integration-test` 통과: migration 51, 동시 예약·정산, Wallet·quota·spend cap, append-only guard, reconciliation/manual convergence와 기존 과금 회귀를 검증했다.
+- `GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/openai -count=1` 통과: 공식 OpenAI Python 3.3.1 및 JavaScript 7.5.0 SDK의 native token/duration transcription 응답과 transcript 보존을 검증했다.
+- JSON/SSE fault test에서 duplicate/missing/invalid usage, terminal 이전·이후 disconnect, timeout/reset/cancel/panic과 duplicate idempotency no-redispatch를 검증했다.
+- migration과 저장 경로 감사에서 content-free typed usage, safe header projection, response SHA-256만 보존되고 audio/prompt/filename/transcript/credential 원문 컬럼이나 로그 필드가 없음을 확인했다.
 
 ## Rollback 계획
 
