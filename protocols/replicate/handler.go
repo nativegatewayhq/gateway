@@ -24,6 +24,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	joboperation "github.com/nativegatewayhq/gateway/operations/job"
+	providerplugin "github.com/nativegatewayhq/gateway/providers/plugin"
 	providerreplicate "github.com/nativegatewayhq/gateway/providers/replicate"
 )
 
@@ -54,7 +55,10 @@ type Handler struct {
 	availability     Availability
 	maximumBodyBytes int64
 	publicBase       string
+	managedResults   bool
 }
+
+func (handler *Handler) SetManagedResults(enabled bool) { handler.managedResults = enabled }
 
 func NewHandler(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, service JobService, chargeBilling Billing, availability Availability, maximumBodyBytes int64, publicBase string) *Handler {
 	return &Handler{logger: logger, authenticator: authenticator, models: models, jobs: service, billing: chargeBilling, availability: availability, maximumBodyBytes: maximumBodyBytes, publicBase: strings.TrimSuffix(publicBase, "/")}
@@ -133,7 +137,7 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		writeDetail(writer, http.StatusUnprocessableEntity, "input.num_outputs is not supported for this model")
 		return
 	}
-	if route.Provider != providercredentials.Replicate || (handler.availability != nil && !handler.availability.ConfiguredChannel(request.Context(), route.ChannelID, route.Provider)) {
+	if (route.Provider != providercredentials.Replicate && route.Provider != providercredentials.Plugin) || (handler.availability != nil && !handler.availability.ConfiguredChannel(request.Context(), route.ChannelID, route.Provider)) {
 		writeDetail(writer, http.StatusServiceUnavailable, "Prediction provider is unavailable")
 		return
 	}
@@ -166,7 +170,11 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		chargeID = charge.ID
 	}
 	owner := joboperation.Owner{OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID}
-	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "replicate", Operation: "image.generate", Model: version, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: usage}, providerreplicate.SubmitPayload{Body: body, Prefer: prefer, CancelAfter: cancelAfter})
+	payload := any(providerreplicate.SubmitPayload{Body: body, Prefer: prefer, CancelAfter: cancelAfter})
+	if route.Provider == providercredentials.Plugin {
+		payload = providerplugin.WrapAsyncPayload(payload)
+	}
+	created, err := handler.jobs.Submit(request.Context(), jobs.CreateRequest{RequestID: requestid.FromContext(request.Context()), Owner: owner, Protocol: "replicate", Operation: "image.generate", Model: version, Provider: string(route.Provider), ChannelID: route.ChannelID, ChargeID: chargeID, IdempotencyKey: key, Fingerprint: fingerprint, EstimatedUsage: usage, ManagedResultRequired: handler.managedResults}, payload)
 	if err != nil {
 		writeDetail(writer, http.StatusServiceUnavailable, "Prediction could not be submitted")
 		return
@@ -225,11 +233,26 @@ func (handler *Handler) writeJob(writer http.ResponseWriter, value joboperation.
 	if len(value.Snapshot.Body) > 0 && json.Valid(value.Snapshot.Body) {
 		if create && value.Snapshot.Status >= 400 {
 			status = value.Snapshot.Status
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(status)
+			_, _ = writer.Write(value.Snapshot.Body)
+			return
 		}
-		writer.Header().Set("Content-Type", "application/json")
-		writer.WriteHeader(status)
-		_, _ = writer.Write(value.Snapshot.Body)
-		return
+		var response map[string]any
+		if json.Unmarshal(value.Snapshot.Body, &response) == nil && response != nil {
+			response["id"] = value.ID
+			if _, exists := response["model"]; !exists {
+				response["model"] = value.Model
+			}
+			if _, exists := response["version"]; !exists {
+				response["version"] = value.Model
+			}
+			if _, exists := response["urls"]; !exists {
+				response["urls"] = map[string]string{"get": handler.publicBase + "/v1/predictions/" + value.ID, "cancel": handler.publicBase + "/v1/predictions/" + value.ID + "/cancel"}
+			}
+			writeJSON(writer, status, response)
+			return
+		}
 	}
 	nativeStatus := "starting"
 	switch value.Status {
@@ -243,7 +266,7 @@ func (handler *Handler) writeJob(writer http.ResponseWriter, value joboperation.
 		nativeStatus = "canceled"
 	}
 	base := handler.publicBase
-	response := map[string]any{"id": value.ID, "status": nativeStatus, "urls": map[string]string{"get": base + "/v1/predictions/" + value.ID, "cancel": base + "/v1/predictions/" + value.ID + "/cancel"}}
+	response := map[string]any{"id": value.ID, "model": value.Model, "version": value.Model, "status": nativeStatus, "urls": map[string]string{"get": base + "/v1/predictions/" + value.ID, "cancel": base + "/v1/predictions/" + value.ID + "/cancel"}}
 	writeJSON(writer, status, response)
 }
 func (handler *Handler) wait(ctx context.Context, owner joboperation.Owner, id string, duration time.Duration) joboperation.Job {

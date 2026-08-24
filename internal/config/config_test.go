@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
 	"log/slog"
 	"strings"
@@ -575,6 +576,19 @@ func TestPluginConfigurationRejectsEnabledModeWithoutReferences(t *testing.T) {
 	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway", "GATEWAY_PLUGIN_MODE": "optional"}
 	if _, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
 		t.Fatal("incomplete plugin configuration accepted")
+	}
+}
+
+func TestPluginCallbackConfigurationUsesSeparateRotatableKeys(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway", "GATEWAY_PLUGIN_CALLBACK_SECRETS": secret + "," + secret, "GATEWAY_PLUGIN_CALLBACK_TOLERANCE": "4m", "GATEWAY_PLUGIN_CALLBACK_BINDING_TTL": "24h", "GATEWAY_PLUGIN_CALLBACK_BODY_BYTES": "4096"}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || len(cfg.PluginCallbackSecrets) != 2 || cfg.PluginCallbackTolerance != 4*time.Minute || cfg.PluginCallbackBindingTTL != 24*time.Hour || cfg.PluginCallbackBodyBytes != 4096 {
+		t.Fatalf("callback config=%#v err=%v", cfg.PluginCallbackSecrets, err)
+	}
+	values["GATEWAY_PLUGIN_CALLBACK_SECRETS"] = "not-a-secret"
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("invalid callback secret accepted")
 	}
 }
 

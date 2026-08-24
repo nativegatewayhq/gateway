@@ -250,6 +250,7 @@ func run(stdout, stderr io.Writer) int {
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout, cfg.GeminiStreamIdleTimeout)
 	var geminiExecutor gemini.Executor = googleExecutor
 	var pluginRegistry *plugins.Registry
+	var pluginClient *plugins.Client
 	var pluginImageExecutor *pluginProvider.Executor
 	var pluginRoutes []imageoperation.ModelRoute
 	if cfg.PluginMode != config.PluginDisabled {
@@ -282,7 +283,7 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway plugin channel snapshot initialization failed")
 			return 1
 		}
-		pluginClient := plugins.NewClient(pluginRegistry)
+		pluginClient = plugins.NewClient(pluginRegistry)
 		if cfg.PluginMode == config.PluginRequired {
 			readinessChecks = append(readinessChecks, pluginClient.Health)
 		}
@@ -628,10 +629,19 @@ func run(stdout, stderr io.Writer) int {
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
 	var falWebhookHandler http.Handler
+	var pluginWebhookHandler http.Handler
 	var managementHandler http.Handler
 	var runwayHandler http.Handler
 	var asyncWorker *jobs.Worker
 	asyncProviders := map[string]jobs.Provider{}
+	if pluginClient != nil && (pluginRegistry.SupportsAsyncProtocol("replicate") || pluginRegistry.SupportsAsyncProtocol("fal")) {
+		pluginAsync, pluginErr := pluginProvider.NewAsync(pluginClient, cfg.ReconcileInterval)
+		if pluginErr != nil {
+			logger.Error("gateway async plugin provider initialization failed")
+			return 1
+		}
+		asyncProviders["plugin"] = pluginAsync
+	}
 	var replicateAdapter *replicateProvider.Client
 	var falAdapter *falProvider.Client
 	var runwayAdapter *runwayProvider.Client
@@ -687,12 +697,29 @@ func run(stdout, stderr io.Writer) int {
 		if cfg.FalWebhookMode == config.FalWebhookRequired {
 			serviceConfig.Webhooks["fal"] = jobs.WebhookConfig{PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.FalWebhookBindingTTL, CallbackSecret: cfg.FalWebhookCallbackSecret}
 		}
+		if pluginRegistry != nil && pluginRegistry.SupportsCallbacks() {
+			if len(cfg.PluginCallbackSecrets) == 0 {
+				logger.Error("gateway plugin callback secret initialization failed")
+				return 1
+			}
+			serviceConfig.Webhooks["plugin"] = jobs.WebhookConfig{PublicBaseURL: cfg.PublicBaseURL, BindingTTL: cfg.PluginCallbackBindingTTL, CallbackSecret: cfg.PluginCallbackSecrets[0], EnabledChannel: func(channelID string) bool {
+				binding, ok := pluginRegistry.Binding(channelID)
+				return ok && binding.Async && binding.Callback
+			}}
+		}
 		jobService, serviceErr := jobs.NewService(jobRepository, asyncProviders, serviceConfig, "gateway-submit")
 		if serviceErr != nil {
 			logger.Error("gateway Job service initialization failed")
 			return 1
 		}
 		jobService.SetTelemetry(telemetryRuntime.Recorder)
+		if pluginRegistry != nil && pluginRegistry.SupportsCallbacks() {
+			pluginWebhookHandler, serviceErr = pluginProvider.NewCallbackHandler(pluginRegistry, pluginProvider.ServiceCallbackApplier{Service: jobService}, cfg.PluginCallbackSecrets, cfg.PluginCallbackTolerance, cfg.PluginCallbackBodyBytes)
+			if serviceErr != nil {
+				logger.Error("gateway plugin callback handler initialization failed")
+				return 1
+			}
+		}
 		if cfg.JobManagementMode == config.JobManagementRequired {
 			managementHandler, serviceErr = managementProtocol.NewHandler(apiKeyAuthenticator, jobRepository, cfg.JobManagementCursorSecrets)
 			if serviceErr != nil {
@@ -706,12 +733,13 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway Job worker initialization failed")
 			return 1
 		}
-		if videoResults != nil {
-			asyncWorker.SetResultManager(videoResults)
+		if videoResults != nil || imageResults != nil {
+			asyncWorker.SetResultManager(jobs.ResultRouter{Image: jobs.ImageResultManager{Manager: imageResults}, Video: videoResults})
 		}
 		asyncWorker.SetTelemetry(telemetryRuntime.Recorder)
-		if cfg.ReplicateEnabled {
+		if cfg.ReplicateEnabled || pluginRegistry != nil && pluginRegistry.SupportsAsyncProtocol("replicate") {
 			replicateHandler = replicateProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.ReplicateBodyBytes, cfg.PublicBaseURL)
+			replicateHandler.(*replicateProtocol.Handler).SetManagedResults(imageResults != nil)
 			if cfg.ReplicateWebhookMode == config.ReplicateWebhookRequired {
 				verifier, verifierErr := replicateProtocol.NewSignatureVerifier(cfg.ReplicateWebhookSecrets, cfg.ReplicateWebhookTolerance)
 				if verifierErr != nil {
@@ -726,8 +754,9 @@ func run(stdout, stderr io.Writer) int {
 				replicateWebhookHandler.(*replicateProtocol.WebhookHandler).SetTelemetry(telemetryRuntime.Recorder)
 			}
 		}
-		if cfg.FalEnabled {
+		if cfg.FalEnabled || pluginRegistry != nil && pluginRegistry.SupportsAsyncProtocol("fal") {
 			falHandler = falProtocol.NewHandler(logger, apiKeyAuthenticator, imageModels, jobService, billingService, providerCredentialRegistry, cfg.FalBodyBytes, cfg.PublicBaseURL)
+			falHandler.(*falProtocol.Handler).SetManagedResults(imageResults != nil)
 			if cfg.FalWebhookMode == config.FalWebhookRequired {
 				verifier, verifierErr := falProtocol.NewFalJWKSVerifier(falProtocol.JWKSConfig{URL: cfg.FalJWKSURL, ExpectedURL: "https://rest.fal.ai/.well-known/jwks.json", Timeout: cfg.FalJWKSTimeout, CacheTTL: cfg.FalJWKSCacheTTL, RefreshCooldown: cfg.FalJWKSRefreshCooldown, MaximumBodyBytes: 64 * 1024})
 				if verifierErr != nil {
@@ -899,6 +928,7 @@ func run(stdout, stderr io.Writer) int {
 		ReplicateWebhook:     replicateWebhookHandler,
 		Fal:                  falHandler,
 		FalWebhook:           falWebhookHandler,
+		PluginWebhook:        pluginWebhookHandler,
 		Runway:               runwayHandler,
 		Management:           managementHandler,
 		ClientIPResolver:     clientIPResolver,

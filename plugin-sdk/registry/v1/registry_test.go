@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 )
@@ -48,6 +49,37 @@ func TestThresholdIndexAndAdmissionBindAllEvidence(t *testing.T) {
 	report.Checks = report.Checks[:len(report.Checks)-1]
 	if err = VerifyConformanceReport(verifiedAdmission, report); err == nil {
 		t.Fatal("accepted incomplete conformance check set")
+	}
+}
+
+func TestAsyncAdmissionBindsAsyncRuntimeAndConformanceProfile(t *testing.T) {
+	validated, err := manifest.Parse([]byte(`{"schema_version":"nativegateway.provider/v1","id":"provider.async-example","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"async-sidecar","auth_secret_ref":"async-token"},"models":[{"id":"async-image-v1","protocols":["replicate"],"operations":["image.generate"],"capabilities":{"media_type":"application/json","output":["url"],"maximum_images":2},"async":{"contract":"async/v1","callback":true}}]}`), "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := asyncconformance.Report{SchemaVersion: asyncconformance.ReportSchema, PluginID: validated.Manifest.ID, PluginVersion: validated.Manifest.Version, ManifestDigest: hex.EncodeToString(validated.Digest[:]), SDKVersion: asyncconformance.SDKVersion, Outcome: "pass"}
+	for _, id := range asyncconformance.RequiredCheckIDs() {
+		report.Checks = append(report.Checks, asyncconformance.Check{ID: id, Outcome: "pass"})
+	}
+	reportBody, err := asyncconformance.CanonicalReport(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := testStatement(validated, Digest(reportBody))
+	statement.Predicate.RuntimeSchema = AsyncRuntimeSchema
+	statement.Predicate.RuntimeSDK = AsyncRuntimeSDK
+	statement.Predicate.Conformance.SchemaVersion = asyncconformance.ReportSchema
+	statement.Predicate.Conformance.RequiredChecksDigest = asyncconformance.RequiredChecksDigest()
+	trust, signers := testTrust(t)
+	envelope := signValue(t, AdmissionPayloadType, statement, signers)
+	body, _ := CanonicalEnvelope(envelope)
+	verified, err := VerifyAdmission(envelope, trust, testNow, AdmissionExpectation{PluginID: validated.Manifest.ID, PluginVersion: validated.Manifest.Version, Platform: "linux/arm64", EnvelopeDigest: Digest(body), GatewayVersion: "0.1.0", Manifest: validated})
+	if err != nil || VerifyAsyncConformanceReport(verified, report) != nil {
+		t.Fatalf("async admission = %#v, %v", verified, err)
+	}
+	statement.Predicate.RuntimeSDK = RuntimeSDK
+	if _, err = CanonicalStatement(statement); err == nil {
+		t.Fatal("accepted a mixed async schema and sync SDK profile")
 	}
 }
 

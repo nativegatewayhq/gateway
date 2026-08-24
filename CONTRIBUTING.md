@@ -146,8 +146,10 @@ Pull Request에는 다음 정보를 포함한다.
 ## Provider Adapter 기여
 
 외부 HTTP sidecar Adapter는 Gateway의 `internal/` package를 import하지 않고
-`plugin-sdk/runtime/v1` 공개 wire package만 사용한다. 시작점은
-[`examples/plugin/go-sidecar-template`](./examples/plugin/go-sidecar-template)이다.
+동기 Adapter는 `plugin-sdk/runtime/v1`, 비동기 Adapter는
+`plugin-sdk/async/v1` 공개 wire package만 사용한다. 시작점은 각각
+[`examples/plugin/go-sidecar-template`](./examples/plugin/go-sidecar-template)과
+[`examples/plugin/go-async-sidecar-template`](./examples/plugin/go-async-sidecar-template)이다.
 
 Adapter 변경 PR과 외부 저장소 CI에서는 다음을 실행한다.
 
@@ -155,12 +157,15 @@ Adapter 변경 PR과 외부 저장소 CI에서는 다음을 실행한다.
 GOWORK=off go test ./...
 go run ./cmd/gateway-plugin-validator -manifest-dir /absolute/manifests
 go run ./cmd/gateway-plugin-conformance ...
+go run ./cmd/gateway-plugin-conformance -profile async-v1 ...
 ```
 
 Conformance는 실제 유료 Provider 호출이 아닌 전용 test-mode contract를
 사용해야 한다. endpoint, secret ref/value, prompt, raw request/response 또는
 이미지를 report와 로그에 포함하면 안 된다. v1 필드 삭제나 의미 변경은
 허용하지 않으며 additive optional field 또는 새 schema version으로 변경한다.
+Async callback HMAC 키는 sidecar bearer와 분리하고 callback URL, capability,
+Provider Job ref와 서명을 report나 로그에 기록하지 않는다.
 기존 버전 폐기는 새 버전 공개와 migration 기간을 제공하는 별도 Plan으로만
 진행한다.
 

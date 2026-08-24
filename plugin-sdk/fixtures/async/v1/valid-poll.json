@@ -1,0 +1,1 @@
+{"schema_version":"nativegateway.plugin-async-control-request/v1","request_id":"fixture_poll","gateway_job_id":"job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plugin_id":"provider.async-example","plugin_version":"1.0.0","manifest_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action":"poll","provider_job_ref":"provider:job-1"}

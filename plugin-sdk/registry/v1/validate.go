@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
 )
 
@@ -93,10 +94,12 @@ func validateStatement(value Statement) error {
 }
 
 func validateAdmission(value Admission) error {
-	if !validID(value.PluginID, 128) || !versionPattern.MatchString(value.PluginVersion) || !sha256Pattern.MatchString(value.ManifestDigest) || value.RuntimeSchema != RuntimeSchema || value.RuntimeSDK != RuntimeSDK || !validCompatibility(value.GatewayCompatibility) || !validPlatform(value.Platform) || validateDescriptor(value.Artifact, "artifact") != nil || validateDescriptor(value.SBOM, "sbom") != nil || validateDescriptor(value.Provenance, "provenance") != nil {
+	syncProfile := value.RuntimeSchema == RuntimeSchema && value.RuntimeSDK == RuntimeSDK && value.Conformance.SchemaVersion == conformance.ReportSchema && value.Conformance.RequiredChecksDigest == conformance.RequiredChecksDigest()
+	asyncProfile := value.RuntimeSchema == AsyncRuntimeSchema && value.RuntimeSDK == AsyncRuntimeSDK && value.Conformance.SchemaVersion == asyncconformance.ReportSchema && value.Conformance.RequiredChecksDigest == asyncconformance.RequiredChecksDigest()
+	if !validID(value.PluginID, 128) || !versionPattern.MatchString(value.PluginVersion) || !sha256Pattern.MatchString(value.ManifestDigest) || (!syncProfile && !asyncProfile) || !validCompatibility(value.GatewayCompatibility) || !validPlatform(value.Platform) || validateDescriptor(value.Artifact, "artifact") != nil || validateDescriptor(value.SBOM, "sbom") != nil || validateDescriptor(value.Provenance, "provenance") != nil {
 		return ErrInvalid
 	}
-	if value.Conformance.SchemaVersion != conformance.ReportSchema || value.Conformance.Outcome != "pass" || !sha256Pattern.MatchString(value.Conformance.ReportDigest) || value.Conformance.RequiredChecksDigest != conformance.RequiredChecksDigest() {
+	if value.Conformance.Outcome != "pass" || !sha256Pattern.MatchString(value.Conformance.ReportDigest) {
 		return ErrInvalid
 	}
 	if !validHTTPSResource(value.Source.Repository, 512) || !commitPattern.MatchString(value.Source.Commit) || !validHTTPSResource(value.Builder.ID, 512) || !sha256Pattern.MatchString(value.Builder.InvocationDigest) {

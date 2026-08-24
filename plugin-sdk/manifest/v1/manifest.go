@@ -41,6 +41,11 @@ type Model struct {
 	Protocols    []string     `json:"protocols"`
 	Operations   []string     `json:"operations"`
 	Capabilities Capabilities `json:"capabilities"`
+	Async        *Async       `json:"async,omitempty"`
+}
+type Async struct {
+	Contract string `json:"contract"`
+	Callback bool   `json:"callback"`
 }
 type Capabilities struct {
 	MediaType     string   `json:"media_type"`
@@ -81,14 +86,24 @@ func validate(value Manifest, gatewayVersion string) error {
 		return ErrInvalid
 	}
 	models := map[string]bool{}
+	executionContract := ""
 	for _, model := range value.Models {
-		if !validID(model.ID, 200) || models[model.ID] || len(model.Protocols) < 1 || len(model.Protocols) > 2 || len(model.Operations) != 1 || model.Operations[0] != "image.generate" || model.Capabilities.MediaType != "application/json" || model.Capabilities.MaximumImages < 1 || model.Capabilities.MaximumImages > 10 || len(model.Capabilities.Output) != 1 || (model.Capabilities.Output[0] != "base64" && model.Capabilities.Output[0] != "url") {
+		if !validID(model.ID, 200) || models[model.ID] || len(model.Protocols) < 1 || len(model.Protocols) > 2 || len(model.Operations) != 1 || model.Operations[0] != "image.generate" || model.Capabilities.MediaType != "application/json" || model.Capabilities.MaximumImages < 1 || model.Capabilities.MaximumImages > 10 || len(model.Capabilities.Output) != 1 || (model.Capabilities.Output[0] != "base64" && model.Capabilities.Output[0] != "url") || model.Async != nil && model.Async.Contract != "async/v1" {
 			return ErrInvalid
 		}
 		models[model.ID] = true
+		modelContract := "runtime/v1"
+		if model.Async != nil {
+			modelContract = model.Async.Contract
+		}
+		if executionContract != "" && executionContract != modelContract {
+			return ErrInvalid
+		}
+		executionContract = modelContract
 		protocols := map[string]bool{}
 		for _, protocol := range model.Protocols {
-			if protocol != "openai" && protocol != "gemini" || protocols[protocol] {
+			validProtocol := model.Async == nil && (protocol == "openai" || protocol == "gemini") || model.Async != nil && (protocol == "replicate" || protocol == "fal")
+			if !validProtocol || protocols[protocol] {
 				return ErrInvalid
 			}
 			protocols[protocol] = true
@@ -142,6 +157,18 @@ func compare(left, right [3]int) int {
 
 // IsCompatible reports whether current satisfies the strict v1 compatibility range.
 func IsCompatible(expression, current string) bool { return compatible(expression, current) }
+
+// ExecutionContract returns the single sidecar contract selected by a valid
+// manifest. A manifest cannot mix synchronous and asynchronous models.
+func ExecutionContract(value Validated) string {
+	if len(value.Manifest.Models) == 0 {
+		return ""
+	}
+	if value.Manifest.Models[0].Async != nil {
+		return value.Manifest.Models[0].Async.Contract
+	}
+	return "runtime/v1"
+}
 
 // HasDuplicateKeys reports malformed JSON and duplicate object member names at
 // any depth. It is exported so sidecar contract decoders can share the same

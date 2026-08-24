@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	asyncconformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/async/v1"
 	conformance "github.com/nativegatewayhq/gateway/plugin-sdk/conformance/v1"
 	"github.com/nativegatewayhq/gateway/plugin-sdk/jsonstrict"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
@@ -42,6 +44,8 @@ func run(arguments []string, getenv func(string) string, stdout, stderr io.Write
 	timeout := flags.Duration("timeout", 10*time.Second, "per-check timeout")
 	maximumRequest := flags.Int64("maximum-request-bytes", 2<<20, "maximum sidecar request bytes")
 	maximumResponse := flags.Int64("maximum-response-bytes", 64<<20, "maximum sidecar response bytes")
+	profile := flags.String("profile", "runtime-v1", "conformance profile: runtime-v1 or async-v1")
+	callbackSecretEnv := flags.String("callback-secret-env", "", "environment variable containing a base64 32-byte async callback key")
 	if flags.Parse(arguments) != nil || flags.NArg() != 0 {
 		return configurationFailure(stderr)
 	}
@@ -50,6 +54,43 @@ func run(arguments []string, getenv func(string) string, stdout, stderr io.Write
 		return configurationFailure(stderr)
 	}
 	defer clear(secret)
+	if *profile == "async-v1" {
+		encoded := getenv(*callbackSecretEnv)
+		callbackSecret, decodeErr := base64.StdEncoding.DecodeString(encoded)
+		if *callbackSecretEnv == "" || decodeErr != nil || len(callbackSecret) != 32 {
+			return configurationFailure(stderr)
+		}
+		defer clear(callbackSecret)
+		runner, newErr := asyncconformance.New(asyncconformance.Config{Manifest: validated, Endpoint: endpoint, Secret: secret, CallbackSecret: callbackSecret, Timeout: *timeout, MaximumRequestBytes: *maximumRequest, MaximumResponseBytes: *maximumResponse})
+		if newErr != nil {
+			return configurationFailure(stderr)
+		}
+		report, runErr := runner.Run(context.Background())
+		if runErr != nil {
+			return configurationFailure(stderr)
+		}
+		if *jsonOutput {
+			if asyncconformance.EncodeReport(stdout, report) != nil {
+				return configurationFailure(stderr)
+			}
+		} else {
+			_, _ = fmt.Fprintf(stdout, "%s@%s async conformance %s (%d checks)\n", report.PluginID, report.PluginVersion, report.Outcome, len(report.Checks))
+			for _, check := range report.Checks {
+				if check.Category == "" {
+					_, _ = fmt.Fprintf(stdout, "%s %s\n", check.Outcome, check.ID)
+				} else {
+					_, _ = fmt.Fprintf(stdout, "%s %s [%s]\n", check.Outcome, check.ID, check.Category)
+				}
+			}
+		}
+		if report.Outcome != "pass" {
+			return 1
+		}
+		return 0
+	}
+	if *profile != "runtime-v1" {
+		return configurationFailure(stderr)
+	}
 	runner, err := conformance.New(conformance.Config{Manifest: validated, Endpoint: endpoint, Secret: secret, Timeout: *timeout, MaximumRequestBytes: *maximumRequest, MaximumResponseBytes: *maximumResponse})
 	if err != nil {
 		return configurationFailure(stderr)

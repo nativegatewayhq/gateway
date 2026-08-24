@@ -16,6 +16,9 @@ The Gateway repository is authoritative for these contracts:
 - `plugin-sdk/registry/v1`: strict Registry/Trust/DSSE/admission and compatibility-matrix contract
 - `cmd/gateway-plugin-registry`: offline local bundle verification; no remote fetch or execution
 - `examples/plugin/manifests`: valid conformance corpus seed
+- `plugin-sdk/async/v1`: strict submit/poll/cancel/result and signed callback contract
+- `plugin-sdk/conformance/async/v1`: stable secret-safe async admission report and runner
+- `examples/plugin/go-async-sidecar-template`: isolated deterministic async reference module
 
 Repository-local follow-up plans should consume, not duplicate, this contract:
 
@@ -31,3 +34,12 @@ Initiative `phase-6-signed-adapter-registry` adds these repository boundaries:
 - `dashboard`: consumes the secret-safe matrix projection only. It never receives signature bytes, trust paths, endpoint origins, or credentials.
 
 Compatibility changes require a new schema/envelope version or a backward-compatible additive v1 change. Consumers must key artifacts by schema and SDK version rather than repository commit. Existing manifest digest and `plugin_channel_snapshots` rows are immutable audit evidence and must not be rewritten during rollout or rollback.
+
+Initiative `phase-6-async-plugin-runtime` keeps native Replicate/fal public
+routes and durable Job/Ledger state in Gateway while the sidecar sees only a
+bounded operation request and opaque Provider Job ref. Conformance owns SDK
+restart/cancel verification, Registry reruns `async-v1` before admission, and
+Cloud injects the callback HMAC independently from the outbound bearer. A
+submitted Job must drain through its persisted channel/ref during rollback;
+it must never be redispatched or released merely because callback delivery was
+missed.
