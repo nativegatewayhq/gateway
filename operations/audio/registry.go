@@ -106,7 +106,7 @@ func (registry *TranscriptionRegistry) List() []TranscriptionModel {
 }
 func validTranscriptionFormat(value string) bool {
 	switch value {
-	case "json", "text", "srt", "verbose_json", "vtt":
+	case "json", "text", "srt", "verbose_json", "vtt", "diarized_json":
 		return true
 	default:
 		return false

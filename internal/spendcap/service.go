@@ -342,7 +342,7 @@ func validID(value, prefix string) bool {
 	return err == nil
 }
 func validChargeID(value string) bool {
-	return validID(value, "charge_") || validID(value, "chc_") || validID(value, "asc_")
+	return validID(value, "charge_") || validID(value, "chc_") || validID(value, "asc_") || validID(value, "atc_")
 }
 func (store *Store) id(prefix string) (string, error) {
 	value := make([]byte, 16)

@@ -14,6 +14,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/app"
 	"github.com/nativegatewayhq/gateway/internal/audiobilling"
 	"github.com/nativegatewayhq/gateway/internal/audiopricing"
+	"github.com/nativegatewayhq/gateway/internal/audioreconciliation"
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/chatbilling"
 	"github.com/nativegatewayhq/gateway/internal/chatpricing"
@@ -314,7 +315,10 @@ func run(stdout, stderr io.Writer) int {
 	var responsesChargeBilling openaiProtocol.ResponsesBilling
 	var anthropicChargeBilling anthropicProtocol.Billing
 	var audioChargeBilling openaiProtocol.SpeechBilling
+	var transcriptionChargeBilling openaiProtocol.TranscriptionBilling
+	var transcriptionPricing *audiopricing.Service
 	var chatReconciliationWorker *chatreconciliation.Worker
+	var transcriptionReconciliationWorker *audioreconciliation.Worker
 	if cfg.BillingMode == config.BillingRequired {
 		priceEstimator, pricingErr := pricing.NewService(pool, cfg.MinimumMarginBPS)
 		if pricingErr != nil {
@@ -352,6 +356,28 @@ func run(stdout, stderr io.Writer) int {
 			return 1
 		}
 		audioChargeBilling = audioService
+		transcriptionPricing = audioPrices
+		if len(cfg.OpenAITranscriptionModels) > 0 {
+			readinessChecks = append(readinessChecks, func(ctx context.Context) error {
+				for _, model := range transcriptionModels.List() {
+					if _, priceErr := audioPrices.EstimateTranscription(ctx, audiopricing.TranscriptionPriceRequest{ChannelID: model.ChannelID, Model: model.ID}); priceErr != nil {
+						return priceErr
+					}
+				}
+				return nil
+			})
+		}
+		transcriptionService, transcriptionBillingErr := audiobilling.NewTranscriptionWithControls(pool, audioPrices, ledger.NewService(pool), costquota.NewStore(pool), spendcap.NewStore(pool))
+		if transcriptionBillingErr != nil {
+			logger.Error("gateway Audio Transcription billing initialization failed")
+			return 1
+		}
+		transcriptionChargeBilling = transcriptionService
+		transcriptionReconciliationWorker, transcriptionBillingErr = audioreconciliation.New(pool, transcriptionService, fmt.Sprintf("gateway-transcription-%d", os.Getpid()), cfg.ReconcileLease, cfg.ReconcileMaxAttempts)
+		if transcriptionBillingErr != nil {
+			logger.Error("gateway Audio Transcription reconciliation initialization failed")
+			return 1
+		}
 		chatReconciliationWorker, chatBillingErr = chatreconciliation.New(pool, chatService, fmt.Sprintf("gateway-%d", os.Getpid()), cfg.ReconcileLease, cfg.ReconcileMaxAttempts)
 		if chatBillingErr != nil {
 			logger.Error("gateway Chat reconciliation initialization failed")
@@ -411,7 +437,12 @@ func run(stdout, stderr io.Writer) int {
 		openAISpeechHandler = handler
 	}
 	if len(cfg.OpenAITranscriptionModels) > 0 {
-		handler := openaiProtocol.NewTranscriptionHandler(logger, apiKeyAuthenticator, transcriptionModels, openaiProvider.NewTranscription(providerCredentialRegistry, cfg.TranscriptionTimeout, cfg.TranscriptionStreamIdleTimeout), healthGate, cfg.TranscriptionRequestBytes, cfg.TranscriptionFileBytes, cfg.TranscriptionFieldBytes, cfg.TranscriptionResponseBytes, cfg.TranscriptionSpoolLimit)
+		var handler *openaiProtocol.TranscriptionHandler
+		if transcriptionChargeBilling == nil {
+			handler = openaiProtocol.NewTranscriptionHandler(logger, apiKeyAuthenticator, transcriptionModels, openaiProvider.NewTranscription(providerCredentialRegistry, cfg.TranscriptionTimeout, cfg.TranscriptionStreamIdleTimeout), healthGate, cfg.TranscriptionRequestBytes, cfg.TranscriptionFileBytes, cfg.TranscriptionFieldBytes, cfg.TranscriptionResponseBytes, cfg.TranscriptionSpoolLimit)
+		} else {
+			handler = openaiProtocol.NewBillableTranscriptionHandler(logger, apiKeyAuthenticator, transcriptionModels, openaiProvider.NewTranscription(providerCredentialRegistry, cfg.TranscriptionTimeout, cfg.TranscriptionStreamIdleTimeout), healthGate, cfg.TranscriptionRequestBytes, cfg.TranscriptionFileBytes, cfg.TranscriptionFieldBytes, cfg.TranscriptionResponseBytes, cfg.TranscriptionSpoolLimit, transcriptionChargeBilling)
+		}
 		handler.SetTelemetry(telemetryRuntime.Recorder)
 		openAITranscriptionHandler = handler
 	}
@@ -449,6 +480,7 @@ func run(stdout, stderr io.Writer) int {
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAudioOperations(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, transcriptionModels, providerCredentialRegistry)
+	openAIModelsHandler.SetTranscriptionPricing(transcriptionPricing)
 	var replicateHandler http.Handler
 	var replicateWebhookHandler http.Handler
 	var falHandler http.Handler
@@ -588,7 +620,7 @@ func run(stdout, stderr io.Writer) int {
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
 	workerCount := 0
-	workerFinished := make(chan struct{}, 3)
+	workerFinished := make(chan struct{}, 4)
 	if reconciliationWorker != nil {
 		workerCount++
 		go func() {
@@ -607,6 +639,24 @@ func run(stdout, stderr io.Writer) int {
 			for {
 				if _, workerErr := chatReconciliationWorker.RunOne(workerCtx); workerErr != nil {
 					logger.Warn("Chat reconciliation cycle failed", "category", "chat_reconciliation_failed")
+				}
+				select {
+				case <-workerCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
+	if transcriptionReconciliationWorker != nil {
+		workerCount++
+		go func() {
+			defer func() { workerFinished <- struct{}{} }()
+			ticker := time.NewTicker(cfg.ReconcileInterval)
+			defer ticker.Stop()
+			for {
+				if _, workerErr := transcriptionReconciliationWorker.RunOne(workerCtx); workerErr != nil {
+					logger.Warn("Audio Transcription reconciliation cycle failed", "category", "transcription_reconciliation_failed")
 				}
 				select {
 				case <-workerCtx.Done():

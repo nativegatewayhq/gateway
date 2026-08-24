@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/nativegatewayhq/gateway/internal/audiopricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
@@ -36,6 +37,15 @@ type ModelsHandler struct {
 	transcriptions interface {
 		List() []audiooperation.TranscriptionModel
 	}
+	transcriptionPricing interface {
+		EstimateTranscription(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error)
+	}
+}
+
+func (handler *ModelsHandler) SetTranscriptionPricing(pricing interface {
+	EstimateTranscription(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error)
+}) {
+	handler.transcriptionPricing = pricing
 }
 
 func NewModelsHandlerWithAllAudioOperations(logger *slog.Logger, authenticator Authenticator, models ModelRegistry, chat interface{ List() []chatoperation.Model }, responses interface {
@@ -240,6 +250,10 @@ func (handler *ModelsHandler) ServeHTTP(writer http.ResponseWriter, request *htt
 			available := configured[model.Provider]
 			if channelAvailability, ok := handler.availability.(ChannelProviderAvailability); ok {
 				available = channelAvailability.ConfiguredChannel(request.Context(), model.ChannelID, model.Provider)
+			}
+			if available && handler.transcriptionPricing != nil {
+				_, priceErr := handler.transcriptionPricing.EstimateTranscription(request.Context(), audiopricing.TranscriptionPriceRequest{ChannelID: model.ChannelID, Model: model.ID})
+				available = priceErr == nil
 			}
 			if available {
 				data = append(data, modelObject{model.ID, "model", model.Created, model.Owner})

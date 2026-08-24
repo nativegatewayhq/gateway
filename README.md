@@ -121,7 +121,7 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_OPENAI_SPEECH_STREAM_IDLE_TIMEOUT` | `30s` | Maximum silence between upstream audio reads; maximum `10m` |
 | `GATEWAY_OPENAI_SPEECH_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum native Speech JSON request body |
 | `GATEWAY_OPENAI_SPEECH_MAX_RESPONSE_BODY_BYTES` | `268435456` | Maximum streamed audio response; maximum 2 GiB |
-| `GATEWAY_OPENAI_TRANSCRIPTION_MODELS` | unset | Comma-separated OpenAI transcription models; enables native `POST /v1/audio/transcriptions` in BYOK mode |
+| `GATEWAY_OPENAI_TRANSCRIPTION_MODELS` | unset | Comma-separated OpenAI transcription models; managed mode additionally requires an active immutable price |
 | `GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON` | unset | Exact model capability map for streaming, response formats, language, prompt, and timestamps |
 | `GATEWAY_OPENAI_TRANSCRIPTION_REQUEST_TIMEOUT` | `2m` | Complete transcription upload and response timeout; maximum `10m` |
 | `GATEWAY_OPENAI_TRANSCRIPTION_STREAM_IDLE_TIMEOUT` | `30s` | Maximum silence between upstream transcription response reads; maximum `10m` |
@@ -369,7 +369,27 @@ print(transcript.text)
 
 The Gateway parses the inbound multipart stream under independent request, file, field, part, and concurrency limits. Small audio files remain in bounded memory; larger files spill to a permission-restricted temporary file. It then reconstructs a new multipart request, replaces the service credential, and sends it only to the fixed OpenAI transcription origin. Input audio, filename, prompt, transcript content, credentials, and Provider request IDs are never logged.
 
-Capabilities are fail closed per model. `response_formats` defaults to `json`; optional language, prompt, timestamp, and SSE streaming fields are accepted only when declared in `GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON`. Native JSON, text, SRT, VTT, and capability-enabled SSE response bytes are preserved within the configured limit. Provider responses, timeout, reset, panic, and client cancellation never trigger redispatch. Billing-required deployments reject enabled transcription models until verified duration/token settlement is implemented.
+Capabilities are fail closed per model. `response_formats` defaults to `json`; optional language, prompt, timestamp, and SSE streaming fields are accepted only when declared in `GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON`. Native JSON, text, SRT, VTT, diarized JSON, and capability-enabled SSE response bytes are preserved within the configured limit. Provider responses, timeout, reset, panic, and client cancellation never trigger redispatch.
+
+In billing-required mode, publish exactly one immutable token or duration strategy with a verified reservation upper bound. Token prices use input/output `USD_TICKS` per million tokens; duration prices use `USD_TICKS` per minute and normalize Provider decimal seconds to ceiling milliseconds without floating point.
+
+```bash
+gateway-audio-price \
+  -operation transcription \
+  -action publish \
+  -channel-id channel_00000000000000000000000000000001 \
+  -model gpt-4o-transcribe \
+  -publication-key openai-gpt-4o-transcribe-2026-08 \
+  -effective-from 2026-08-01T00:00:00Z \
+  -strategy openai-transcription-token-v1 \
+  -cost-input 2500000 -cost-output 10000000 \
+  -sale-input 3000000 -sale-output 12000000 \
+  -maximum-input-tokens 16000 -maximum-output-tokens 2000
+```
+
+Use `openai-transcription-duration-v1` with `-cost-per-minute`, `-sale-per-minute`, and `-maximum-duration-milliseconds` for duration-billed models. `-action estimate` prints the active maximum cost and sale; `-action inspect` also prints its immutable price ID and strategy.
+
+Managed requests require `Idempotency-Key`. Wallet, hierarchical quota, and Provider spend cap reserve the published maximum before dispatch. Strict native `usage.type=tokens` or `usage.type=duration` evidence determines actual Capture and releases the difference. Known non-2xx responses Release; timeout, reset, panic, invalid/missing usage, settlement failure, or an incomplete stream retain the reservation for bounded reconciliation. Usage-less text/SRT/VTT formats remain available in BYOK mode but fail closed before managed dispatch. Audio, filename, prompt, transcript, segments, and credentials are not stored as billing evidence.
 
 ### Anthropic Messages foundation
 

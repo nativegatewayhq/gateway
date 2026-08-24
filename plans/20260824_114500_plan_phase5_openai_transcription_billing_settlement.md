@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-057
 title: Phase 5 OpenAI Transcription Duration and Token Pricing Settlement
-status: accepted
+status: in_progress
 created_at: 2026-08-24T11:45:00+09:00
-updated_at: 2026-08-24T11:45:00+09:00
+updated_at: 2026-08-24T12:00:00+09:00
 owners:
   - gateway
 initiative: phase-5-openai-transcription-billing-settlement

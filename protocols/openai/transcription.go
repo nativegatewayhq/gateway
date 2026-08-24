@@ -1,8 +1,11 @@
 package openai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,10 +16,15 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/audiobilling"
+	"github.com/nativegatewayhq/gateway/internal/audiopricing"
+	"github.com/nativegatewayhq/gateway/internal/idempotency"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
@@ -46,6 +54,12 @@ type TranscriptionRegistry interface {
 type TranscriptionExecutor interface {
 	Create(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error)
 }
+type TranscriptionBilling interface {
+	Begin(context.Context, audiobilling.TranscriptionBeginRequest) (audiobilling.TranscriptionCharge, error)
+	Complete(context.Context, string, audiobilling.TranscriptionEvidence) (audiobilling.TranscriptionCharge, error)
+	Release(context.Context, string, string) (audiobilling.TranscriptionCharge, error)
+	MarkReconciling(context.Context, string, string, *audiobilling.TranscriptionEvidence) error
+}
 type TranscriptionHandler struct {
 	common                                                                         *Handler
 	models                                                                         TranscriptionRegistry
@@ -55,6 +69,7 @@ type TranscriptionHandler struct {
 	maximumRequestBytes, maximumFileBytes, maximumFieldBytes, maximumResponseBytes int64
 	tempDir                                                                        string
 	telemetry                                                                      *telemetry.Recorder
+	billing                                                                        TranscriptionBilling
 }
 
 func NewTranscriptionHandler(logger *slog.Logger, authenticator Authenticator, models TranscriptionRegistry, executor TranscriptionExecutor, health providerhealth.Gate, requestBytes, fileBytes, fieldBytes, responseBytes int64, spoolLimit int) *TranscriptionHandler {
@@ -65,6 +80,11 @@ func NewTranscriptionHandler(logger *slog.Logger, authenticator Authenticator, m
 		spoolLimit = 1
 	}
 	return &TranscriptionHandler{common: NewImagesHandler(logger, authenticator, nil, nil, 1), models: models, executor: executor, health: health, spoolSlots: make(chan struct{}, spoolLimit), maximumRequestBytes: requestBytes, maximumFileBytes: fileBytes, maximumFieldBytes: fieldBytes, maximumResponseBytes: responseBytes}
+}
+func NewBillableTranscriptionHandler(logger *slog.Logger, authenticator Authenticator, models TranscriptionRegistry, executor TranscriptionExecutor, health providerhealth.Gate, requestBytes, fileBytes, fieldBytes, responseBytes int64, spoolLimit int, billing TranscriptionBilling) *TranscriptionHandler {
+	handler := NewTranscriptionHandler(logger, authenticator, models, executor, health, requestBytes, fileBytes, fieldBytes, responseBytes, spoolLimit)
+	handler.billing = billing
+	return handler
 }
 func (h *TranscriptionHandler) SetTelemetry(r *telemetry.Recorder) {
 	h.telemetry = r
@@ -143,9 +163,19 @@ func (h *TranscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	charge, ok := h.beginCharge(tracked, r, principal, route, form)
+	if !ok {
+		h.releaseHealth(r, permit)
+		return
+	}
 	outbound, contentType, length, err := h.buildMultipart(form, route.ProviderModel)
 	if err != nil {
 		h.releaseHealth(r, permit)
+		if charge.ID != "" {
+			if _, releaseErr := h.billing.Release(context.WithoutCancel(r.Context()), charge.ID, "local_spool_failure"); releaseErr != nil {
+				_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "release_failed", nil)
+			}
+		}
 		writeError(tracked, 503, "server_error", "spool_unavailable", "transcription capacity unavailable")
 		return
 	}
@@ -155,10 +185,18 @@ func (h *TranscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if executeErr != nil {
 		h.observe(r, permit, nil, executeErr)
 		outcome = "failure"
+		if charge.ID != "" {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "executor_uncertain", nil)
+		}
 		h.writeExecutorError(tracked, executeErr)
 		return
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		h.handleProviderFailure(tracked, r, permit, response, charge)
+		outcome = "failure"
+		return
+	}
 	streaming := isEventStream(response.Header.Get("Content-Type"))
 	if streaming && !route.Capabilities.Streaming {
 		h.observe(r, permit, response, openaiProvider.ErrTranscriptionUpstream)
@@ -167,6 +205,43 @@ func (h *TranscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if streaming {
+		if charge.ID != "" {
+			copyTranscriptionHeaders(tracked.Header(), response.Header)
+			tracked.WriteHeader(response.StatusCode)
+			result, relayErr := relayBillableTranscription(tracked, response.Body, h.maximumResponseBytes)
+			var evidence *audiobilling.TranscriptionEvidence
+			if result.UsageFound {
+				value := audiobilling.TranscriptionEvidence{SchemaVersion: result.SchemaVersion, Usage: result.Usage, Status: response.StatusCode, Headers: map[string][]string(response.Header), SHA256: result.TerminalSHA256}
+				evidence = &value
+			}
+			if relayErr != nil && evidence != nil && errors.Is(relayErr, errSpeechStreamWrite) {
+				if _, settleErr := h.billing.Complete(context.WithoutCancel(r.Context()), charge.ID, *evidence); settleErr != nil {
+					_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "settlement_failed", evidence)
+				}
+				h.observe(r, permit, response, relayErr)
+				outcome = "failure"
+				return
+			}
+			if relayErr != nil || evidence == nil {
+				reason := "stream_protocol_invalid"
+				if errors.Is(relayErr, errSpeechStreamWrite) {
+					reason = "client_disconnect"
+				}
+				_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, reason, evidence)
+				h.observe(r, permit, response, relayErr)
+				outcome = "failure"
+				return
+			}
+			if _, settleErr := h.billing.Complete(context.WithoutCancel(r.Context()), charge.ID, *evidence); settleErr != nil {
+				_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "settlement_failed", evidence)
+				h.observe(r, permit, response, settleErr)
+				outcome = "failure"
+				return
+			}
+			h.observe(r, permit, response, nil)
+			outcome = "success"
+			return
+		}
 		copyTranscriptionHeaders(tracked.Header(), response.Header)
 		tracked.WriteHeader(response.StatusCode)
 		if relayErr := relayTranscription(tracked, response.Body, h.maximumResponseBytes, true); relayErr != nil {
@@ -182,8 +257,30 @@ func (h *TranscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if readErr != nil || !validTranscriptionResponseType(response.Header.Get("Content-Type")) {
 		h.observe(r, permit, response, openaiProvider.ErrTranscriptionUpstream)
 		outcome = "failure"
+		if charge.ID != "" {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "invalid_provider_response", nil)
+		}
 		writeError(tracked, 502, "server_error", "invalid_provider_response", "invalid provider response")
 		return
+	}
+	if charge.ID != "" {
+		usage, schema, usageErr := extractTranscriptionUsage(body)
+		digest := sha256.Sum256(body)
+		evidence := audiobilling.TranscriptionEvidence{SchemaVersion: schema, Usage: usage, Status: response.StatusCode, Headers: map[string][]string(response.Header), SHA256: digest}
+		if usageErr != nil {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "usage_invalid", nil)
+			h.observe(r, permit, response, openaiProvider.ErrTranscriptionUpstream)
+			outcome = "failure"
+			writeError(tracked, 502, "server_error", "invalid_provider_usage", "invalid provider response")
+			return
+		}
+		if _, settleErr := h.billing.Complete(context.WithoutCancel(r.Context()), charge.ID, evidence); settleErr != nil {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "settlement_failed", &evidence)
+			h.observe(r, permit, response, settleErr)
+			outcome = "failure"
+			writeError(tracked, 503, "server_error", "billing_unavailable", "billing unavailable")
+			return
+		}
 	}
 	copyTranscriptionHeaders(tracked.Header(), response.Header)
 	tracked.Header().Set("Content-Length", strconv.Itoa(len(body)))
@@ -191,6 +288,93 @@ func (h *TranscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	_, _ = tracked.Write(body)
 	h.observe(r, permit, response, nil)
 	outcome = "success"
+}
+
+func (h *TranscriptionHandler) beginCharge(w http.ResponseWriter, r *http.Request, principal apikey.Principal, route audiooperation.TranscriptionModel, form *transcriptionForm) (audiobilling.TranscriptionCharge, bool) {
+	if h.billing == nil {
+		return audiobilling.TranscriptionCharge{}, true
+	}
+	format := form.responseFormat
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "verbose_json" && format != "diarized_json" {
+		writeError(w, 400, "invalid_request_error", "unsupported_billing_response_format", "response format cannot be billed")
+		return audiobilling.TranscriptionCharge{}, false
+	}
+	key := r.Header.Get("Idempotency-Key")
+	if !idempotency.Valid(key) {
+		writeError(w, 400, "invalid_request_error", "invalid_idempotency_key", "valid Idempotency-Key is required")
+		return audiobilling.TranscriptionCharge{}, false
+	}
+	fingerprint, err := transcriptionFingerprint(form, route)
+	if err != nil {
+		writeError(w, 503, "server_error", "spool_unavailable", "transcription capacity unavailable")
+		return audiobilling.TranscriptionCharge{}, false
+	}
+	charge, err := h.billing.Begin(r.Context(), audiobilling.TranscriptionBeginRequest{RequestID: requestid.FromContext(r.Context()), OrganizationID: principal.OrganizationID, ProjectID: principal.ProjectID, APIKeyID: principal.APIKeyID, Model: route.ID, ChannelID: route.ChannelID, IdempotencyKey: key, Fingerprint: fingerprint})
+	if err == nil {
+		return charge, true
+	}
+	status, code := 503, "billing_unavailable"
+	if errors.Is(err, audiobilling.ErrConflict) || errors.Is(err, audiobilling.ErrPending) {
+		status, code = 409, "idempotency_conflict"
+	} else if errors.Is(err, audiobilling.ErrInvalid) {
+		status, code = 400, "invalid_request"
+	}
+	writeError(w, status, "invalid_request_error", code, "request could not be billed")
+	return audiobilling.TranscriptionCharge{}, false
+}
+
+func transcriptionFingerprint(form *transcriptionForm, route audiooperation.TranscriptionModel) ([32]byte, error) {
+	hash := sha256.New()
+	for _, value := range []string{"openai", audiooperation.Transcription, route.ID, route.ChannelID, route.ProviderModel, form.filename, form.fileType} {
+		_, _ = hash.Write([]byte(strconv.Itoa(len(value))))
+		_, _ = hash.Write([]byte{':'})
+		_, _ = hash.Write([]byte(value))
+	}
+	fields := append([]transcriptionField(nil), form.fields...)
+	sort.Slice(fields, func(i, j int) bool { return fields[i].name < fields[j].name })
+	for _, field := range fields {
+		_, _ = hash.Write([]byte(field.name))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(field.value))
+		_, _ = hash.Write([]byte{0})
+	}
+	file, err := form.file.Open()
+	if err != nil {
+		return [32]byte{}, err
+	}
+	_, err = io.Copy(hash, file)
+	file.Close()
+	if err != nil {
+		return [32]byte{}, err
+	}
+	var fingerprint [32]byte
+	copy(fingerprint[:], hash.Sum(nil))
+	return fingerprint, nil
+}
+
+func (h *TranscriptionHandler) handleProviderFailure(w http.ResponseWriter, r *http.Request, permit providerhealth.Permit, response *http.Response, charge audiobilling.TranscriptionCharge) {
+	body, err := readBounded(response.Body, min(h.maximumResponseBytes, 1<<20))
+	if err != nil {
+		h.observe(r, permit, response, openaiProvider.ErrTranscriptionUpstream)
+		if charge.ID != "" {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "provider_error_unavailable", nil)
+		}
+		writeError(w, 502, "server_error", "invalid_provider_response", "invalid provider response")
+		return
+	}
+	if charge.ID != "" {
+		if _, releaseErr := h.billing.Release(context.WithoutCancel(r.Context()), charge.ID, "provider_non_2xx"); releaseErr != nil {
+			_ = h.billing.MarkReconciling(context.WithoutCancel(r.Context()), charge.ID, "release_failed", nil)
+		}
+	}
+	copyTranscriptionHeaders(w.Header(), response.Header)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(response.StatusCode)
+	_, _ = w.Write(body)
+	h.observe(r, permit, response, nil)
 }
 
 type transcriptionField struct{ name, value string }
@@ -227,7 +411,7 @@ func (h *TranscriptionHandler) parseMultipart(w http.ResponseWriter, r *http.Req
 			return nil, errTranscriptionInvalid
 		}
 		name := part.FormName()
-		if name == "" || len(name) > 80 || seen[name] || blockedTranscriptionField(name) {
+		if name == "" || len(name) > 80 || strings.ContainsAny(name, "\x00\r\n") || seen[name] || blockedTranscriptionField(name) {
 			part.Close()
 			return nil, errTranscriptionInvalid
 		}
@@ -563,6 +747,136 @@ func relayTranscription(w http.ResponseWriter, r io.Reader, maximum int64, flush
 		return errTranscriptionTooLarge
 	} else if err != nil && !errors.Is(err, io.EOF) {
 		return err
+	}
+	return nil
+}
+
+type billableTranscriptionStreamResult struct {
+	Usage          audiopricing.TranscriptionUsage
+	SchemaVersion  string
+	TerminalSHA256 [32]byte
+	UsageFound     bool
+	DoneMarker     bool
+}
+
+func relayBillableTranscription(w http.ResponseWriter, source io.Reader, maximum int64) (billableTranscriptionStreamResult, error) {
+	if maximum < 1 {
+		return billableTranscriptionStreamResult{}, errTranscriptionTooLarge
+	}
+	reader := bufio.NewReaderSize(source, 32*1024)
+	controller := http.NewResponseController(w)
+	var result billableTranscriptionStreamResult
+	var event bytes.Buffer
+	var observed int64
+	for {
+		line, readErr := reader.ReadString('\n')
+		observed += int64(len(line))
+		if observed > maximum || int64(event.Len())+int64(len(line)) > maximum {
+			return result, errTranscriptionTooLarge
+		}
+		if len(line) > 0 {
+			trimmed := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+			if trimmed == "" && event.Len() > 0 {
+				if err := observeTranscriptionSSEEvent(event.Bytes(), &result); err != nil {
+					return result, err
+				}
+			}
+			written, writeErr := io.WriteString(w, line)
+			if writeErr != nil || written != len(line) {
+				return result, errSpeechStreamWrite
+			}
+			if flushErr := controller.Flush(); flushErr != nil {
+				return result, errSpeechStreamWrite
+			}
+			if trimmed == "" {
+				event.Reset()
+			} else {
+				event.WriteString(trimmed)
+				event.WriteByte('\n')
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				if event.Len() > 0 {
+					if err := observeTranscriptionSSEEvent(event.Bytes(), &result); err != nil {
+						return result, err
+					}
+				}
+				if !result.UsageFound {
+					return result, errTranscriptionUsage
+				}
+				return result, nil
+			}
+			return result, readErr
+		}
+	}
+}
+
+func observeTranscriptionSSEEvent(event []byte, result *billableTranscriptionStreamResult) error {
+	var dataLines []string
+	var eventName string
+	for _, line := range strings.Split(strings.TrimSuffix(string(event), "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, ":"):
+			continue
+		case line == "event":
+			eventName = ""
+		case strings.HasPrefix(line, "event:"):
+			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case line == "data":
+			dataLines = append(dataLines, "")
+		case strings.HasPrefix(line, "data:"):
+			value := strings.TrimPrefix(line, "data:")
+			if strings.HasPrefix(value, " ") {
+				value = value[1:]
+			}
+			dataLines = append(dataLines, value)
+		}
+	}
+	if len(dataLines) == 0 {
+		return nil
+	}
+	data := []byte(strings.Join(dataLines, "\n"))
+	if bytes.Equal(data, []byte("[DONE]")) {
+		if !result.UsageFound || result.DoneMarker {
+			return errTranscriptionUsage
+		}
+		result.DoneMarker = true
+		return nil
+	}
+	if result.DoneMarker {
+		return errTranscriptionUsage
+	}
+	fields, err := collectJSONFields(data, "type", "usage")
+	if err != nil || len(fields["type"]) != 1 || len(fields["usage"]) > 1 {
+		return errTranscriptionUsage
+	}
+	var eventType string
+	if json.Unmarshal(fields["type"][0], &eventType) != nil {
+		return errTranscriptionUsage
+	}
+	if eventName != "" && eventName != eventType {
+		return errTranscriptionUsage
+	}
+	if eventType != "transcript.text.done" {
+		if result.UsageFound {
+			return errTranscriptionUsage
+		}
+		return nil
+	}
+	if result.UsageFound || len(fields["usage"]) != 1 {
+		return errTranscriptionUsage
+	}
+	usage, err := parseTranscriptionUsage(fields["usage"][0])
+	if err != nil {
+		return err
+	}
+	result.Usage = usage
+	result.UsageFound = true
+	result.TerminalSHA256 = sha256.Sum256(data)
+	result.SchemaVersion = "openai-transcription-token-sse-v1"
+	if usage.Type == audiopricing.TranscriptionDuration {
+		result.SchemaVersion = "openai-transcription-duration-sse-v1"
 	}
 	return nil
 }

@@ -855,9 +855,6 @@ func Load(lookup LookupEnv) (Config, error) {
 	if _, err := audiooperation.NewTranscriptionRegistry(cfg.OpenAITranscriptionModels, cfg.OpenAITranscriptionCapabilities); err != nil {
 		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON: invalid model capabilities")
 	}
-	if cfg.BillingMode == BillingRequired && len(cfg.OpenAITranscriptionModels) > 0 {
-		return Config{}, fmt.Errorf("GATEWAY_OPENAI_TRANSCRIPTION_MODELS: transcription billing is not implemented")
-	}
 	if cfg.BillingMode == BillingRequired && len(cfg.GeminiLLMModels) > 0 {
 		if len(cfg.GeminiLLMModelLimits) != len(cfg.GeminiLLMModels) {
 			return Config{}, fmt.Errorf("GATEWAY_GEMINI_LLM_MODEL_LIMITS: every paid Gemini LLM model requires limits")

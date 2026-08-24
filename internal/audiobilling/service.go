@@ -1,4 +1,4 @@
-// Package audiobilling provides exactly-once Speech reservation and settlement.
+// Package audiobilling provides exactly-once Speech and transcription settlement.
 package audiobilling
 
 import (

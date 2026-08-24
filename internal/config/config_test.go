@@ -485,15 +485,15 @@ func TestOpenAISpeechConfigurationAndBillingBoundary(t *testing.T) {
 	}
 }
 
-func TestOpenAITranscriptionConfigurationAndBillingBoundary(t *testing.T) {
+func TestOpenAITranscriptionConfigurationSupportsBillingRequired(t *testing.T) {
 	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway", "GATEWAY_OPENAI_TRANSCRIPTION_MODELS": "gpt-4o-transcribe", "GATEWAY_OPENAI_TRANSCRIPTION_MODEL_CAPABILITIES_JSON": `{"gpt-4o-transcribe":{"streaming":true,"response_formats":["json","text"],"language":true,"prompt":true,"timestamps":false}}`, "GATEWAY_OPENAI_TRANSCRIPTION_REQUEST_TIMEOUT": "3m", "GATEWAY_OPENAI_TRANSCRIPTION_STREAM_IDLE_TIMEOUT": "20s", "GATEWAY_OPENAI_TRANSCRIPTION_MAX_REQUEST_BODY_BYTES": "65536", "GATEWAY_OPENAI_TRANSCRIPTION_MAX_FILE_BYTES": "32768", "GATEWAY_OPENAI_TRANSCRIPTION_MAX_FIELD_BYTES": "1024", "GATEWAY_OPENAI_TRANSCRIPTION_MAX_RESPONSE_BODY_BYTES": "4096", "GATEWAY_OPENAI_TRANSCRIPTION_MAX_CONCURRENT_SPOOLS": "4"}
 	cfg, err := Load(func(k string) (string, bool) { v, ok := values[k]; return v, ok })
 	if err != nil || len(cfg.OpenAITranscriptionModels) != 1 || !cfg.OpenAITranscriptionCapabilities["gpt-4o-transcribe"].Streaming || cfg.TranscriptionTimeout != 3*time.Minute || cfg.TranscriptionFileBytes != 32768 || cfg.TranscriptionSpoolLimit != 4 {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
 	values["GATEWAY_BILLING_MODE"] = "required"
-	if _, err = Load(func(k string) (string, bool) { v, ok := values[k]; return v, ok }); err == nil || !strings.Contains(err.Error(), "TRANSCRIPTION_MODELS") {
-		t.Fatalf("billing error=%v", err)
+	if _, err = Load(func(k string) (string, bool) { v, ok := values[k]; return v, ok }); err != nil {
+		t.Fatalf("billing configuration error=%v", err)
 	}
 }
 
