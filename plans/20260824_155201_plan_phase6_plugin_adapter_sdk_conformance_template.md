@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-063
 title: Phase 6 Public Plugin Adapter SDK, Conformance Kit, and Template
-status: accepted
+status: completed
 created_at: 2026-08-24T15:52:01+09:00
-updated_at: 2026-08-24T15:52:01+09:00
+updated_at: 2026-08-24T16:25:01+09:00
 owners:
   - gateway
 initiative: phase-6-plugin-adapter-sdk-conformance
@@ -211,20 +211,26 @@ go run ./cmd/gateway-plugin-conformance ...
 
 ## 완료 조건
 
-- [ ] 외부 module이 `plugin-sdk/runtime/v1`만으로 sidecar wire를 구현함
-- [ ] Gateway, mock과 template이 동일 public strict codec을 사용함
-- [ ] valid/invalid fixture corpus와 stable category가 제공됨
-- [ ] black-box conformance runner가 health/auth/execute/identity/output/usage/failure 경계를 검증함
-- [ ] machine-readable report가 secret·endpoint·prompt·raw image 없이 deterministic 생성됨
-- [ ] CLI가 env/file secret ref, bounded options와 stable exit code를 제공함
-- [ ] standalone Go Adapter template가 build/test/conformance를 통과함
-- [ ] 기존 manifest digest, immutable channel evidence와 native SDK 호환성이 유지됨
-- [ ] 전체 unit/race/integration/SDK/public-module 검사가 통과함
-- [ ] README, CONTRIBUTING, Makefile, examples와 멀티레포 handoff가 갱신됨
+- [x] 외부 module이 `plugin-sdk/runtime/v1`만으로 sidecar wire를 구현함
+- [x] Gateway, mock과 template이 동일 public strict codec을 사용함
+- [x] valid/invalid fixture corpus와 stable category가 제공됨
+- [x] black-box conformance runner가 health/auth/execute/identity/output/usage/failure 경계를 검증함
+- [x] machine-readable report가 secret·endpoint·prompt·raw image 없이 deterministic 생성됨
+- [x] CLI가 env/file secret ref, bounded options와 stable exit code를 제공함
+- [x] standalone Go Adapter template가 build/test/conformance를 통과함
+- [x] 기존 manifest digest, immutable channel evidence와 native SDK 호환성이 유지됨
+- [x] 전체 unit/race/integration/SDK/public-module 검사가 통과함
+- [x] README, CONTRIBUTING, Makefile, examples와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 Pull Request: [#95](https://github.com/nativegatewayhq/gateway/pull/95), 구현 commit `b2818bb`.
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과: fmt, vet, 전체 race unit test, standalone public module dependency 검사와 모든 binary build.
+- fresh PostgreSQL `gateway_plan063` 및 Redis DB 15에서 `GOFLAGS=-p=1 make integration-test` 통과: plugin channel snapshot, billing/idempotency와 전체 Gateway integration suite 유지.
+- `go test -tags=sdkconformance ./protocols/openai ./protocols/gemini -count=1` 통과: 기존 공식 OpenAI/Gemini SDK plugin wire 호환 유지.
+- 실행 중인 `gateway-plugin-mock`과 standalone `go-sidecar-template` 각각에 `gateway-plugin-conformance` 실행: 10개 health/auth/wire/success/error/cancel check 모두 pass.
+- `GOWORK=off go test ./...` 및 dependency audit 통과: template이 `plugin-sdk/runtime/v1`만 사용하고 Gateway `internal/` package를 import하지 않음.
+- versioned fixture corpus, strict report decode, secret/raw-content 부재, env/file ref와 capability Markdown의 unit/race test 통과.
 
 ## Rollback 계획
 

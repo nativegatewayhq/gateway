@@ -6,11 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/nativegatewayhq/gateway/plugin-sdk/jsonstrict"
 )
 
 const SchemaVersion = "nativegateway.provider/v1"
@@ -143,51 +144,5 @@ func compare(left, right [3]int) int {
 // any depth. It is exported so sidecar contract decoders can share the same
 // ambiguity-free JSON boundary as manifests.
 func HasDuplicateKeys(body []byte) bool {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	return scanValue(decoder) != nil || decoder.Decode(&struct{}{}) != io.EOF
-}
-func scanValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := map[string]bool{}
-		for decoder.More() {
-			token, err = decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := token.(string)
-			if !ok || seen[key] {
-				return fmt.Errorf("duplicate key")
-			}
-			seen[key] = true
-			if err = scanValue(decoder); err != nil {
-				return err
-			}
-		}
-		token, err = decoder.Token()
-		if err != nil || token != json.Delim('}') {
-			return ErrInvalid
-		}
-	case '[':
-		for decoder.More() {
-			if err = scanValue(decoder); err != nil {
-				return err
-			}
-		}
-		token, err = decoder.Token()
-		if err != nil || token != json.Delim(']') {
-			return ErrInvalid
-		}
-	default:
-		return ErrInvalid
-	}
-	return nil
+	return jsonstrict.Validate(body) != nil
 }

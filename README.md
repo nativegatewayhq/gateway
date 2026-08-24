@@ -49,8 +49,9 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 
 Provider plugins are disabled by default. The first version supports isolated
 HTTP sidecars for synchronous `image.generate`; see
-[`examples/plugin`](./examples/plugin) for the manifest, validator, mock server,
-and native OpenAI/Gemini usage contract.
+[`examples/plugin`](./examples/plugin) for the public versioned SDK, strict
+manifest contract, standalone Go template, black-box conformance CLI, mock
+server, and native OpenAI/Gemini usage contract.
 
 | Environment variable | Default | Description |
 |---|---|---|

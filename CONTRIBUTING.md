@@ -143,6 +143,27 @@ Pull Request에는 다음 정보를 포함한다.
 
 관련 계획이 없는 예외 작업이라면 계획이 필요하지 않은 이유를 적는다.
 
+## Provider Adapter 기여
+
+외부 HTTP sidecar Adapter는 Gateway의 `internal/` package를 import하지 않고
+`plugin-sdk/runtime/v1` 공개 wire package만 사용한다. 시작점은
+[`examples/plugin/go-sidecar-template`](./examples/plugin/go-sidecar-template)이다.
+
+Adapter 변경 PR과 외부 저장소 CI에서는 다음을 실행한다.
+
+```text
+GOWORK=off go test ./...
+go run ./cmd/gateway-plugin-validator -manifest-dir /absolute/manifests
+go run ./cmd/gateway-plugin-conformance ...
+```
+
+Conformance는 실제 유료 Provider 호출이 아닌 전용 test-mode contract를
+사용해야 한다. endpoint, secret ref/value, prompt, raw request/response 또는
+이미지를 report와 로그에 포함하면 안 된다. v1 필드 삭제나 의미 변경은
+허용하지 않으며 additive optional field 또는 새 schema version으로 변경한다.
+기존 버전 폐기는 새 버전 공개와 migration 기간을 제공하는 별도 Plan으로만
+진행한다.
+
 ## 프로젝트 불변 조건
 
 다음 조건을 위반하는 변경은 승인할 수 없다.

@@ -201,6 +201,7 @@ Gateway 계획은 Conformance 저장소의 내부 작업을 직접 소유하지 
 | `gateway-20260824-059` | completed | [Phase 5 OpenAI Audio Translation Duration Pricing and Settlement](./20260824_130934_plan_phase5_openai_audio_translation_billing_settlement.md) | `phase-5-openai-audio-translation-billing-settlement` |
 | `gateway-20260824-060` | completed | [Phase 5 Managed Audio Input Assets and Reusable References](./20260824_133500_plan_phase5_managed_audio_input_assets.md) | `phase-5-managed-audio-input-assets` |
 | `gateway-20260824-061` | completed | [Phase 5 Managed Speech Output Storage and Authorized Delivery](./20260824_141933_plan_phase5_managed_speech_output_delivery.md) | `phase-5-managed-speech-output-delivery` |
-| `gateway-20260824-062` | accepted | [Phase 6 Provider Manifest and HTTP Sidecar Plugin Foundation](./20260824_145849_plan_phase6_provider_manifest_http_plugin_foundation.md) | `phase-6-provider-plugin-foundation` |
+| `gateway-20260824-062` | completed | [Phase 6 Provider Manifest and HTTP Sidecar Plugin Foundation](./20260824_145849_plan_phase6_provider_manifest_http_plugin_foundation.md) | `phase-6-provider-plugin-foundation` |
+| `gateway-20260824-063` | completed | [Phase 6 Public Plugin Adapter SDK, Conformance Kit, and Template](./20260824_155201_plan_phase6_plugin_adapter_sdk_conformance_template.md) | `phase-6-plugin-adapter-sdk-conformance` |
 
 새 계획을 추가할 때 이 표에도 항목을 추가한다. 파일의 상세 내용과 충돌할 경우 개별 계획 파일의 메타데이터를 기준으로 한다.

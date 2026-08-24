@@ -3,22 +3,19 @@ package plugins
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
-	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
+	runtimev1 "github.com/nativegatewayhq/gateway/plugin-sdk/runtime/v1"
 )
 
-const RequestSchema = "nativegateway.plugin-request/v1"
-const ResponseSchema = "nativegateway.plugin-response/v1"
+const RequestSchema = runtimev1.RequestSchema
+const ResponseSchema = runtimev1.ResponseSchema
 
 var (
 	ErrUnavailable     = errors.New("plugin unavailable")
@@ -28,49 +25,13 @@ var (
 	ErrInvalidResponse = errors.New("invalid plugin response")
 )
 
-type ImageInput struct {
-	Prompt  string `json:"prompt"`
-	Images  int    `json:"images"`
-	Size    string `json:"size,omitempty"`
-	Quality string `json:"quality,omitempty"`
-}
-type ExecuteRequest struct {
-	SchemaVersion  string     `json:"schema_version"`
-	RequestID      string     `json:"request_id"`
-	PluginID       string     `json:"plugin_id"`
-	PluginVersion  string     `json:"plugin_version"`
-	ManifestDigest string     `json:"manifest_digest"`
-	Operation      string     `json:"operation"`
-	Protocol       string     `json:"protocol"`
-	Model          string     `json:"model"`
-	Input          ImageInput `json:"input"`
-}
-type Image struct {
-	MIMEType string `json:"mime_type"`
-	Base64   string `json:"base64,omitempty"`
-	URL      string `json:"url,omitempty"`
-}
-type Usage struct {
-	Images int `json:"images"`
-}
-type Result struct {
-	Images []Image `json:"images"`
-	Usage  Usage   `json:"usage"`
-}
-type PluginError struct {
-	Category  string `json:"category"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
-}
-type ExecuteResponse struct {
-	SchemaVersion  string       `json:"schema_version"`
-	RequestID      string       `json:"request_id"`
-	PluginID       string       `json:"plugin_id"`
-	PluginVersion  string       `json:"plugin_version"`
-	ManifestDigest string       `json:"manifest_digest"`
-	Result         *Result      `json:"result,omitempty"`
-	Error          *PluginError `json:"error,omitempty"`
-}
+type ImageInput = runtimev1.ImageInput
+type ExecuteRequest = runtimev1.ExecuteRequest
+type Image = runtimev1.Image
+type Usage = runtimev1.Usage
+type Result = runtimev1.Result
+type PluginError = runtimev1.PluginError
+type ExecuteResponse = runtimev1.ExecuteResponse
 
 type Client struct {
 	registry  *Registry
@@ -103,9 +64,13 @@ func (client *Client) Health(ctx context.Context) error {
 		if err != nil {
 			return ErrUnavailable
 		}
-		_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 4097))
+		healthBody, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
+		decodeErr := readErr
+		if decodeErr == nil && len(healthBody) > 0 {
+			_, decodeErr = runtimev1.DecodeHealth(bytes.NewReader(healthBody), 4096)
+		}
 		closeErr := response.Body.Close()
-		if readErr != nil || closeErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		if decodeErr != nil || closeErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 			return ErrUnavailable
 		}
 	}
@@ -147,7 +112,7 @@ func (client *Client) Execute(ctx context.Context, channelID, requestID, protoco
 		return ExecuteResponse{}, classifyContext(ctx.Err())
 	}
 	envelope := ExecuteRequest{SchemaVersion: RequestSchema, RequestID: requestID, PluginID: binding.PluginID, PluginVersion: binding.Version, ManifestDigest: binding.DigestHex(), Operation: "image.generate", Protocol: protocol, Model: binding.Model, Input: input}
-	body, err := json.Marshal(envelope)
+	body, err := runtimev1.CanonicalRequest(envelope)
 	if err != nil || int64(len(body)) > client.registry.config.MaximumRequestBytes {
 		return ExecuteResponse{}, ErrInvalidRequest
 	}
@@ -177,88 +142,26 @@ func (client *Client) Execute(ctx context.Context, channelID, requestID, protoco
 		return ExecuteResponse{}, classifyContext(ctx.Err())
 	}
 	defer response.Body.Close()
-	limited := io.LimitReader(response.Body, client.registry.config.MaximumResponseBytes+1)
-	responseBody, readErr := io.ReadAll(limited)
-	if readErr != nil || int64(len(responseBody)) > client.registry.config.MaximumResponseBytes {
-		return ExecuteResponse{}, ErrInvalidResponse
-	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return ExecuteResponse{}, ErrUnavailable
 	}
-	if manifest.HasDuplicateKeys(responseBody) {
+	expected := runtimev1.Expectation{Identity: runtimev1.Identity{RequestID: requestID, PluginID: binding.PluginID, PluginVersion: binding.Version, ManifestDigest: binding.DigestHex()}, Protocol: protocol, Model: binding.Model, Output: binding.Output, MaximumImages: binding.MaximumImages}
+	result, decodeErr := runtimev1.DecodeResponse(response.Body, client.registry.config.MaximumResponseBytes, expected)
+	if decodeErr != nil {
 		return ExecuteResponse{}, ErrInvalidResponse
 	}
-	decoder := json.NewDecoder(bytes.NewReader(responseBody))
-	decoder.DisallowUnknownFields()
-	var result ExecuteResponse
-	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.SchemaVersion != ResponseSchema || result.RequestID != requestID || result.PluginID != binding.PluginID || result.PluginVersion != binding.Version || result.ManifestDigest != binding.DigestHex() || (result.Result == nil) == (result.Error == nil) {
-		return ExecuteResponse{}, ErrInvalidResponse
-	}
-	if result.Error != nil {
-		if !validError(*result.Error) {
-			return ExecuteResponse{}, ErrInvalidResponse
+	if result.Result != nil && binding.Output == "url" {
+		for _, image := range result.Result.Images {
+			parsed, parseErr := url.Parse(image.URL)
+			if parseErr != nil {
+				return ExecuteResponse{}, ErrInvalidResponse
+			}
+			if _, allowed := binding.ResultOrigins[parsed.Scheme+"://"+parsed.Host]; !allowed {
+				return ExecuteResponse{}, ErrInvalidResponse
+			}
 		}
-		return result, nil
-	}
-	if !validResult(*result.Result, binding) {
-		return ExecuteResponse{}, ErrInvalidResponse
 	}
 	return result, nil
-}
-
-func validError(value PluginError) bool {
-	switch value.Category {
-	case "invalid_request", "authentication", "rate_limited", "unavailable", "internal":
-	default:
-		return false
-	}
-	return len(value.Message) > 0 && len(value.Message) <= 512 && strings.TrimSpace(value.Message) == value.Message
-}
-func validResult(value Result, binding Binding) bool {
-	if len(value.Images) < 1 || len(value.Images) > binding.MaximumImages || value.Usage.Images != len(value.Images) {
-		return false
-	}
-	for _, image := range value.Images {
-		if len(image.MIMEType) < 7 || len(image.MIMEType) > 128 || !strings.HasPrefix(image.MIMEType, "image/") || (image.Base64 == "") == (image.URL == "") {
-			return false
-		}
-		if binding.Output == "base64" {
-			if image.URL != "" {
-				return false
-			}
-			decoded, err := base64.StdEncoding.DecodeString(image.Base64)
-			if err != nil || len(decoded) == 0 || int64(len(decoded)) > 64<<20 || !matchesImageType(image.MIMEType, decoded) {
-				return false
-			}
-		} else {
-			if image.Base64 != "" {
-				return false
-			}
-			parsed, err := url.Parse(image.URL)
-			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-				return false
-			}
-			if _, ok := binding.ResultOrigins[parsed.Scheme+"://"+parsed.Host]; !ok {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func matchesImageType(mimeType string, body []byte) bool {
-	switch mimeType {
-	case "image/png":
-		return len(body) >= 8 && bytes.Equal(body[:8], []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
-	case "image/jpeg":
-		return len(body) >= 3 && body[0] == 0xff && body[1] == 0xd8 && body[2] == 0xff
-	case "image/gif":
-		return len(body) >= 6 && (string(body[:6]) == "GIF87a" || string(body[:6]) == "GIF89a")
-	case "image/webp":
-		return len(body) >= 12 && string(body[:4]) == "RIFF" && string(body[8:12]) == "WEBP"
-	default:
-		return false
-	}
 }
 func classifyContext(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
