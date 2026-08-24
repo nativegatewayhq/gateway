@@ -12,6 +12,7 @@ import (
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
 	"github.com/nativegatewayhq/gateway/internal/app"
+	"github.com/nativegatewayhq/gateway/internal/audioassets"
 	"github.com/nativegatewayhq/gateway/internal/audiobilling"
 	"github.com/nativegatewayhq/gateway/internal/audiopricing"
 	"github.com/nativegatewayhq/gateway/internal/audioreconciliation"
@@ -119,6 +120,27 @@ func run(stdout, stderr io.Writer) int {
 	}
 	apiKeyAuthenticator = networkGuard
 	readinessChecks := []func(context.Context) error{pool.Ping}
+	var audioAssetService *audioassets.Service
+	var openAIAudioAssetHandler http.Handler
+	if cfg.AudioInputStorage.Mode == audioassets.Managed {
+		repository, storageErr := audioassets.NewRepository(pool)
+		if storageErr != nil {
+			logger.Error("gateway audio asset initialization failed")
+			return 1
+		}
+		objects, storageErr := audioassets.NewS3(audioassets.S3Config{Endpoint: cfg.AudioInputStorage.Endpoint, Region: cfg.AudioInputStorage.Region, Bucket: cfg.AudioInputStorage.Bucket, AccessKeyID: cfg.AudioInputStorage.AccessKeyID, SecretAccessKey: cfg.AudioInputStorage.SecretAccessKey, ServerSideEncryption: cfg.AudioInputStorage.ServerSideEncryption, UploadTimeout: cfg.AudioInputStorage.UploadTimeout, DownloadTimeout: cfg.AudioInputStorage.DownloadTimeout})
+		if storageErr != nil {
+			logger.Error("gateway audio asset initialization failed")
+			return 1
+		}
+		audioAssetService, storageErr = audioassets.NewService(repository, objects, cfg.AudioInputStorage.Retention, cfg.AudioInputStorage.CleanupLease, cfg.AudioInputStorage.MaximumBytes, fmt.Sprintf("gateway-audio-asset-%d", os.Getpid()))
+		if storageErr != nil {
+			logger.Error("gateway audio asset initialization failed")
+			return 1
+		}
+		audioAssetService.SetTelemetry(telemetryRuntime.Recorder)
+		readinessChecks = append(readinessChecks, audioAssetService.Ready)
+	}
 	var imageResults *imagestorage.Manager
 	if cfg.ImageStorage.Mode == imagestorage.Managed {
 		collector, storageErr := imagestorage.NewCollector(cfg.ImageStorage)
@@ -309,6 +331,9 @@ func run(stdout, stderr io.Writer) int {
 	var openAISpeechHandler http.Handler
 	var openAITranscriptionHandler http.Handler
 	var openAITranslationHandler http.Handler
+	if audioAssetService != nil {
+		openAIAudioAssetHandler = openaiProtocol.NewAudioAssetHandler(logger, apiKeyAuthenticator, audioAssetService, cfg.AudioInputStorage.MaximumBytes, cfg.AudioInputStorage.MaximumConcurrentUploads, cfg.AudioInputStorage.AllowedContentTypes, cfg.AudioInputStorage.TemporaryDirectory)
+	}
 	xAIExecutor := xai.New(providerCredentialRegistry, cfg.ImagesTimeout)
 	imageExecutors := map[providercredentials.ProviderID]openaiProtocol.Executor{
 		providercredentials.OpenAI: openAIExecutor,
@@ -474,6 +499,7 @@ func run(stdout, stderr io.Writer) int {
 		} else {
 			handler = openaiProtocol.NewBillableTranscriptionHandler(logger, apiKeyAuthenticator, transcriptionModels, openaiProvider.NewTranscription(providerCredentialRegistry, cfg.TranscriptionTimeout, cfg.TranscriptionStreamIdleTimeout), healthGate, cfg.TranscriptionRequestBytes, cfg.TranscriptionFileBytes, cfg.TranscriptionFieldBytes, cfg.TranscriptionResponseBytes, cfg.TranscriptionSpoolLimit, transcriptionChargeBilling)
 		}
+		handler.SetAudioAssets(audioAssetService)
 		handler.SetTelemetry(telemetryRuntime.Recorder)
 		openAITranscriptionHandler = handler
 	}
@@ -484,6 +510,7 @@ func run(stdout, stderr io.Writer) int {
 		} else {
 			handler = openaiProtocol.NewBillableTranslationHandler(logger, apiKeyAuthenticator, translationModels, openaiProvider.NewTranslation(providerCredentialRegistry, cfg.TranslationTimeout), healthGate, cfg.TranslationRequestBytes, cfg.TranslationFileBytes, cfg.TranslationFieldBytes, cfg.TranslationResponseBytes, cfg.TranslationSpoolLimit, translationChargeBilling)
 		}
+		handler.SetAudioAssets(audioAssetService)
 		handler.SetTelemetry(telemetryRuntime.Recorder)
 		openAITranslationHandler = handler
 	}
@@ -662,7 +689,25 @@ func run(stdout, stderr io.Writer) int {
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
 	workerCount := 0
-	workerFinished := make(chan struct{}, 5)
+	workerFinished := make(chan struct{}, 6)
+	if audioAssetService != nil {
+		workerCount++
+		go func() {
+			defer func() { workerFinished <- struct{}{} }()
+			ticker := time.NewTicker(cfg.AudioInputStorage.CleanupInterval)
+			defer ticker.Stop()
+			for {
+				if _, workerErr := audioAssetService.RunCleanup(workerCtx); workerErr != nil {
+					logger.Warn("Audio asset cleanup cycle failed", "category", "audio_asset_cleanup_failed")
+				}
+				select {
+				case <-workerCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
 	if reconciliationWorker != nil {
 		workerCount++
 		go func() {
@@ -755,6 +800,7 @@ func run(stdout, stderr io.Writer) int {
 		OpenAISpeech:         openAISpeechHandler,
 		OpenAITranscriptions: openAITranscriptionHandler,
 		OpenAITranslations:   openAITranslationHandler,
+		OpenAIAudioAssets:    openAIAudioAssetHandler,
 		Anthropic:            anthropicHandler,
 		Replicate:            replicateHandler,
 		ReplicateWebhook:     replicateWebhookHandler,

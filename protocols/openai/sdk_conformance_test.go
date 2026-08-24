@@ -4,6 +4,7 @@ package openai
 
 import (
 	"context"
+	"crypto/sha256"
 	"io"
 	"log/slog"
 	"mime"
@@ -14,8 +15,10 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/audioassets"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
@@ -219,6 +222,43 @@ assert r.duration == 3.0001`
 	}
 	if calls != 2 || billing.complete == nil || billing.complete.DurationMilliseconds != 3001 {
 		t.Fatalf("calls=%d evidence=%+v", calls, billing.complete)
+	}
+}
+
+func TestPythonAndJavaScriptReusableAudioAssetFlow(t *testing.T) {
+	audio := wavBytes()
+	digest := sha256.Sum256(audio)
+	asset := audioassets.Asset{ID: "audasset_00000000000000000000000000000003", ByteLength: int64(len(audio)), ContentType: "audio/wav", SHA256: digest, State: audioassets.Available, CreatedAt: time.Unix(10, 0), ExpiresAt: time.Now().Add(time.Hour)}
+	assetAPI := NewAudioAssetHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), &audioAssetServiceStub{asset: asset}, 4096, 2, []string{"audio/wav"}, t.TempDir())
+	materializer := &audioMaterializerStub{asset: asset, body: audio}
+	registry, _ := audiooperation.NewTranscriptionRegistry([]string{"gpt-4o-transcribe"}, map[string]audiooperation.TranscriptionCapabilities{"gpt-4o-transcribe": {ResponseFormats: []string{"json"}}})
+	transcription := NewTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), registry, transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"text":"asset transcript"}`))}, nil
+	}), providerhealth.NoopGate{}, 8192, 4096, 1024, 4096, 2)
+	transcription.SetAudioAssets(materializer)
+	mux := http.NewServeMux()
+	mux.Handle("/v1/audio/assets", assetAPI)
+	mux.Handle("/v1/audio/transcriptions", transcription)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	python := `import json,urllib.request
+base="` + server.URL + `"
+wav=b"RIFF\x04\x00\x00\x00WAVEfmt "+bytes(32)
+def post(path,boundary,parts,headers={}):
+ body=b"".join([b"--"+boundary+b"\r\n"+h+b"\r\n\r\n"+v+b"\r\n" for h,v in parts])+b"--"+boundary+b"--\r\n"
+ req=urllib.request.Request(base+path,data=body,headers={"Authorization":"Bearer service","Content-Type":"multipart/form-data; boundary="+boundary.decode(),**headers})
+ return json.loads(urllib.request.urlopen(req).read())
+a=post("/v1/audio/assets",b"assetbound",[(b"Content-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav",wav)],{"Idempotency-Key":"python-asset"})
+r=post("/v1/audio/transcriptions",b"requestbound",[(b"Content-Disposition: form-data; name=\"model\"",b"gpt-4o-transcribe")],{"X-Native-Gateway-Audio-Asset":a["id"]})
+assert r["text"]=="asset transcript"`
+	command := exec.Command("python3", "-c", python)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python asset flow: %v: %s", err, output)
+	}
+	javascript := `(async()=>{const base="` + server.URL + `";const wav=Buffer.concat([Buffer.from("RIFF\x04\x00\x00\x00WAVEfmt "),Buffer.alloc(32)]);let f=new FormData();f.append("file",new Blob([wav],{type:"audio/wav"}),"a.wav");let r=await fetch(base+"/v1/audio/assets",{method:"POST",headers:{Authorization:"Bearer service","Idempotency-Key":"javascript-asset"},body:f});const a=await r.json();f=new FormData();f.append("model","gpt-4o-transcribe");r=await fetch(base+"/v1/audio/transcriptions",{method:"POST",headers:{Authorization:"Bearer service","X-Native-Gateway-Audio-Asset":a.id},body:f});const result=await r.json();if(result.text!=="asset transcript")process.exit(2)})().catch(e=>{console.error(e);process.exit(1)})`
+	command = exec.Command("node", "-e", javascript)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript asset flow: %v: %s", err, output)
 	}
 }
 

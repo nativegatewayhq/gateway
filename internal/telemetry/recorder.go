@@ -287,6 +287,16 @@ func requestMetadata(request *http.Request) (string, string, string) {
 		return "openai", "models.list", "/v1/models"
 	case path == "/v1/chat/completions":
 		return "openai", "chat.completions", "/v1/chat/completions"
+	case path == "/v1/audio/transcriptions":
+		return "openai", "audio.transcription", "/v1/audio/transcriptions"
+	case path == "/v1/audio/translations":
+		return "openai", "audio.translation", "/v1/audio/translations"
+	case path == "/v1/audio/assets":
+		return "openai", "audio.asset.create", "/v1/audio/assets"
+	case strings.HasPrefix(path, "/v1/audio/assets/") && request.Method == http.MethodDelete:
+		return "openai", "audio.asset.delete", "/v1/audio/assets/{id}"
+	case strings.HasPrefix(path, "/v1/audio/assets/"):
+		return "openai", "audio.asset.get", "/v1/audio/assets/{id}"
 	case path == "/gateway/v1/jobs":
 		return "gateway", "jobs.list", "/gateway/v1/jobs"
 	case strings.HasPrefix(path, "/gateway/v1/jobs/"):
@@ -332,7 +342,7 @@ func boundedProtocol(value string) string {
 	return allowed(value, "openai", "gemini", "replicate", "fal", "gateway")
 }
 func boundedOperation(value string) string {
-	return allowed(value, "image.generate", "image.edit", "chat.completions", "models.list", "jobs.list", "jobs.get", "health.live", "health.ready", "unknown")
+	return allowed(value, "image.generate", "image.edit", "chat.completions", "audio.transcription", "audio.translation", "audio.asset.create", "audio.asset.get", "audio.asset.delete", "models.list", "jobs.list", "jobs.get", "health.live", "health.ready", "unknown")
 }
 func boundedProvider(value string) string {
 	return allowed(value, "openai", "xai", "google", "replicate", "fal")
@@ -346,7 +356,9 @@ func boundedOutcome(value string) string {
 func boundedTransition(value string) string {
 	return allowed(value, "begin", "capture", "release", "reconciling", "replay")
 }
-func boundedStage(value string) string { return allowed(value, "fetch", "upload", "transform") }
+func boundedStage(value string) string {
+	return allowed(value, "fetch", "upload", "transform", "delete", "cleanup")
+}
 func boundedAuthStage(value string) string {
 	return allowed(value, "authenticate", "network", "rate_limit", "model_authorization")
 }
@@ -364,5 +376,5 @@ func boundedRejection(value string) string {
 }
 func boundedSource(value string) string { return allowed(value, "url", "base64", "inline") }
 func boundedRoute(value string) string {
-	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions", "/v1/models", "/gateway/v1/jobs", "/gateway/v1/jobs/{id}", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
+	return allowed(value, "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/assets", "/v1/audio/assets/{id}", "/v1/models", "/gateway/v1/jobs", "/gateway/v1/jobs/{id}", "/v1/predictions", "/v1/predictions/{id}", "/internal/webhooks/replicate/{job}/{token}", "/internal/webhooks/fal/{job}/{token}", "/v1beta/models/{model}:generateContent", "/health/live", "/health/ready", "unmatched")
 }

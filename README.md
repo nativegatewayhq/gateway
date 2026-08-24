@@ -179,6 +179,22 @@ Every response includes `X-Request-Id`. A caller-provided request ID is accepted
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_OPENAI` | unset | Exact comma-separated HTTPS origins allowed for OpenAI result URL collection |
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_XAI` | unset | Exact comma-separated HTTPS origins allowed for xAI result URL collection |
 | `GATEWAY_IMAGE_STORAGE_FETCH_ORIGINS_GOOGLE` | unset | Exact comma-separated HTTPS origins allowed for Google result URL collection |
+| `GATEWAY_AUDIO_INPUT_STORAGE_MODE` | `disabled` | `managed` enables private reusable audio input assets and reference dispatch |
+| `GATEWAY_AUDIO_INPUT_STORAGE_ENDPOINT` | unset | Private S3-compatible HTTPS endpoint; loopback HTTP is accepted only for local testing |
+| `GATEWAY_AUDIO_INPUT_STORAGE_REGION` | unset | S3 signing region; use `auto` for R2 |
+| `GATEWAY_AUDIO_INPUT_STORAGE_BUCKET` | unset | Private audio input bucket; objects are never public or returned as URLs |
+| `GATEWAY_AUDIO_INPUT_STORAGE_ACCESS_KEY_ID` | unset | Secret-manager supplied least-privilege S3/R2 access key ID |
+| `GATEWAY_AUDIO_INPUT_STORAGE_SECRET_ACCESS_KEY` | unset | Secret-manager supplied S3/R2 secret; never logged |
+| `GATEWAY_AUDIO_INPUT_STORAGE_SERVER_SIDE_ENCRYPTION` | unset | Optional `AES256` server-side encryption request for private audio objects |
+| `GATEWAY_AUDIO_INPUT_STORAGE_MAX_BYTES` | `67108864` | Maximum bytes per reusable input; maximum 512 MiB |
+| `GATEWAY_AUDIO_INPUT_STORAGE_MAX_CONCURRENT_UPLOADS` | `8` | Process-wide bounded upload spools; maximum 128 |
+| `GATEWAY_AUDIO_INPUT_STORAGE_UPLOAD_TIMEOUT` | `2m` | Complete private object upload timeout; maximum 10 minutes |
+| `GATEWAY_AUDIO_INPUT_STORAGE_DOWNLOAD_TIMEOUT` | `2m` | Complete private object materialization timeout; maximum 10 minutes |
+| `GATEWAY_AUDIO_INPUT_STORAGE_RETENTION` | `168h` | Asset lifetime from one hour through 30 days |
+| `GATEWAY_AUDIO_INPUT_STORAGE_CLEANUP_INTERVAL` | `1m` | Expiry and deletion worker interval; maximum one hour |
+| `GATEWAY_AUDIO_INPUT_STORAGE_CLEANUP_LEASE` | `5m` | Active dispatch and cleanup safety lease; maximum 10 minutes |
+| `GATEWAY_AUDIO_INPUT_STORAGE_ALLOWED_CONTENT_TYPES` | common audio MIME types | Exact comma-separated audio MIME allowlist, also checked against file magic |
+| `GATEWAY_AUDIO_INPUT_STORAGE_TEMP_DIR` | system temp | Directory for permission-restricted bounded upload/materialization spools |
 | `GATEWAY_VIDEO_STORAGE_MODE` | `provider` | `provider` preserves temporary Runway output URLs; `managed` persists successful videos and returns CDN URLs |
 | `GATEWAY_VIDEO_STORAGE_ENDPOINT` | unset | S3-compatible HTTPS endpoint; loopback HTTP is accepted only for local testing |
 | `GATEWAY_VIDEO_STORAGE_REGION` | unset | S3 signing region; use `auto` for R2 |
@@ -436,6 +452,27 @@ gateway-audio-price \
 ```
 
 Managed requests require `Idempotency-Key` and an explicit `response_format=verbose_json`. The published maximum is reserved atomically against Wallet, hierarchical quota, and Provider spend cap before dispatch. Exactly one duplicate-safe top-level native `duration` is normalized to ceiling milliseconds without floating point, captured once, and the reservation difference is released. Known non-2xx responses release the reservation; timeout, reset, invalid/missing/over-bound duration, or settlement failure retain it for bounded reconciliation without Provider redispatch. Default JSON, text, SRT, and VTT remain available in BYOK mode but fail closed before managed dispatch. Billing evidence contains only duration, status, safe headers, and a body digest; it never stores or replays the translated result.
+
+## Managed audio input assets
+
+With `GATEWAY_AUDIO_INPUT_STORAGE_MODE=managed`, authenticated callers may upload a private reusable input once and reference it from transcription or translation. Native official-SDK multipart uploads remain unchanged.
+
+```bash
+curl -sS https://gateway.example/v1/audio/assets \
+  -H 'Authorization: Bearer SERVICE_API_KEY' \
+  -H 'Idempotency-Key: upload-session-1' \
+  -F 'file=@speech.wav;type=audio/wav'
+
+curl -sS https://gateway.example/v1/audio/transcriptions \
+  -H 'Authorization: Bearer SERVICE_API_KEY' \
+  -H 'Idempotency-Key: transcription-1' \
+  -H 'X-Native-Gateway-Audio-Asset: audasset_...' \
+  -F 'model=gpt-4o-transcribe'
+```
+
+`GET /v1/audio/assets/{id}` returns bounded metadata and `DELETE` logically revokes new use before the cleanup worker removes the private object. A request must contain exactly one of a native `file` part or `X-Native-Gateway-Audio-Asset`; the extension header is never forwarded upstream. Asset authorization checks the authenticated organization, project, and API Key snapshot before billing reservation or Provider dispatch. Storage metadata never exposes the object key or digest, and the bucket must not permit public reads.
+
+The development Compose stack includes a private MinIO bucket initialized by `docker compose up -d`. Use `http://127.0.0.1:59000`, region `us-east-1`, bucket `gateway-audio-inputs`, access key `gateway-local`, and secret `gateway-local-secret` only for local development. Production deployments must use secret-managed least-privilege credentials, TLS, a private bucket, and an independent retention policy. The Compose commands follow MinIO's documented static-console server form and idempotent `mc mb --ignore-existing` bucket creation.
 
 ### Anthropic Messages foundation
 
