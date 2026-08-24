@@ -75,6 +75,7 @@ type ReplicateWebhookMode string
 type FalWebhookMode string
 type JobManagementMode string
 type PluginMode string
+type PluginRegistryMode string
 
 const (
 	BillingDisabled          BillingMode          = "disabled"
@@ -92,6 +93,8 @@ const (
 	PluginDisabled           PluginMode           = "disabled"
 	PluginOptional           PluginMode           = "optional"
 	PluginRequired           PluginMode           = "required"
+	PluginRegistryDisabled   PluginRegistryMode   = "disabled"
+	PluginRegistryRequired   PluginRegistryMode   = "required"
 )
 
 // Config contains non-provider process settings. Provider credentials remain
@@ -204,6 +207,12 @@ type Config struct {
 	PluginMode                      PluginMode
 	PluginManifestDir               string
 	Plugins                         plugins.Config
+	PluginRegistryMode              PluginRegistryMode
+	PluginRegistryTrustFile         string
+	PluginRegistryIndexFile         string
+	PluginRegistryAdmissionDir      string
+	PluginRegistryPlatform          string
+	PluginRegistryMinimumSequence   uint64
 }
 type ChatModelLimit struct{ MaximumInputTokens, MaximumOutputTokens int64 }
 type ChatRoute struct {
@@ -338,6 +347,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		RunwayPollInterval:              5 * time.Second,
 		JobManagementMode:               JobManagementDisabled,
 		PluginMode:                      PluginDisabled,
+		PluginRegistryMode:              PluginRegistryDisabled,
+		PluginRegistryMinimumSequence:   1,
 		Plugins:                         plugins.Config{Timeout: 2 * time.Minute, MaximumRequestBytes: 2 << 20, MaximumResponseBytes: 64 << 20, MaximumConcurrency: 16, EndpointOrigins: map[string]string{}, AuthSecrets: map[string]string{}, ResultOrigins: map[string][]string{}},
 	}
 
@@ -1684,6 +1695,24 @@ func loadPlugins(cfg *Config, lookup LookupEnv) error {
 	if value, ok := lookup("GATEWAY_PLUGIN_MANIFEST_DIR"); ok {
 		cfg.PluginManifestDir = strings.TrimSpace(value)
 	}
+	if value, ok := lookup("GATEWAY_PLUGIN_REGISTRY_MODE"); ok {
+		cfg.PluginRegistryMode = PluginRegistryMode(strings.TrimSpace(value))
+	}
+	if cfg.PluginRegistryMode != PluginRegistryDisabled && cfg.PluginRegistryMode != PluginRegistryRequired {
+		return fmt.Errorf("GATEWAY_PLUGIN_REGISTRY_MODE: must be disabled or required")
+	}
+	for key, target := range map[string]*string{"GATEWAY_PLUGIN_REGISTRY_TRUST_FILE": &cfg.PluginRegistryTrustFile, "GATEWAY_PLUGIN_REGISTRY_INDEX_FILE": &cfg.PluginRegistryIndexFile, "GATEWAY_PLUGIN_REGISTRY_ADMISSION_DIR": &cfg.PluginRegistryAdmissionDir, "GATEWAY_PLUGIN_REGISTRY_PLATFORM": &cfg.PluginRegistryPlatform} {
+		if value, ok := lookup(key); ok {
+			*target = strings.TrimSpace(value)
+		}
+	}
+	if value, ok := lookup("GATEWAY_PLUGIN_REGISTRY_MINIMUM_SEQUENCE"); ok {
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil || parsed < 1 {
+			return fmt.Errorf("GATEWAY_PLUGIN_REGISTRY_MINIMUM_SEQUENCE: must be a positive integer")
+		}
+		cfg.PluginRegistryMinimumSequence = parsed
+	}
 	if value, ok := lookup("GATEWAY_PLUGIN_ENDPOINTS_JSON"); ok {
 		if err := decodePluginJSON(value, &cfg.Plugins.EndpointOrigins); err != nil || len(cfg.Plugins.EndpointOrigins) > 128 {
 			return fmt.Errorf("GATEWAY_PLUGIN_ENDPOINTS_JSON: must be a bounded JSON object")
@@ -1751,6 +1780,9 @@ func loadPlugins(cfg *Config, lookup LookupEnv) error {
 	}
 	if cfg.PluginMode != PluginDisabled && (cfg.PluginManifestDir == "" || len(cfg.Plugins.EndpointOrigins) == 0 || len(cfg.Plugins.AuthSecrets) == 0) {
 		return fmt.Errorf("GATEWAY_PLUGIN_*: enabled plugin mode requires manifest directory, endpoints, and auth secret references")
+	}
+	if cfg.PluginRegistryMode == PluginRegistryRequired && (cfg.PluginMode == PluginDisabled || cfg.PluginRegistryTrustFile == "" || cfg.PluginRegistryIndexFile == "" || cfg.PluginRegistryAdmissionDir == "") {
+		return fmt.Errorf("GATEWAY_PLUGIN_REGISTRY_*: required registry mode requires enabled plugins and local trust, index, and admission paths")
 	}
 	return nil
 }

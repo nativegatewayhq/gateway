@@ -4,6 +4,7 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,8 @@ const ReportSchema = "nativegateway.plugin-conformance/v1"
 const SDKVersion = "runtime/v1"
 const TestModeHeader = "X-Native-Gateway-Conformance"
 const TestCaseHeader = "X-Native-Gateway-Conformance-Case"
+
+var requiredCheckIDs = []string{"execute.cancellation", "execute.error", "execute.success", "execute.unauthenticated", "health.authenticated", "health.unauthenticated", "wire.malformed_body", "wire.oversized_body", "wire.wrong_method", "wire.wrong_path"}
 
 var ErrInvalidConfig = errors.New("invalid conformance configuration")
 
@@ -92,6 +95,15 @@ func (runner *Runner) Run(ctx context.Context) (Report, error) {
 	}
 	sort.Slice(report.Checks, func(i, j int) bool { return report.Checks[i].ID < report.Checks[j].ID })
 	return report, nil
+}
+
+// RequiredCheckIDs returns the stable runtime/v1 official admission check set.
+func RequiredCheckIDs() []string { return append([]string(nil), requiredCheckIDs...) }
+
+// RequiredChecksDigest binds an admission to the exact sorted runtime/v1 check set.
+func RequiredChecksDigest() string {
+	digest := sha256.Sum256([]byte(strings.Join(requiredCheckIDs, "\n") + "\n"))
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func (runner *Runner) healthAuthenticated(ctx context.Context) Check {
@@ -303,6 +315,12 @@ func EncodeReport(writer io.Writer, report Report) error {
 		return ErrInvalidConfig
 	}
 	return json.NewEncoder(writer).Encode(report)
+}
+func CanonicalReport(report Report) ([]byte, error) {
+	if ValidateReport(report) != nil {
+		return nil, ErrInvalidConfig
+	}
+	return json.Marshal(report)
 }
 func DecodeReport(reader io.Reader, maximum int64) (Report, error) {
 	body, err := readBounded(reader, maximum)

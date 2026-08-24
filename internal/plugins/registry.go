@@ -15,6 +15,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
+	registryv1 "github.com/nativegatewayhq/gateway/plugin-sdk/registry/v1"
 )
 
 var ErrInvalidConfiguration = errors.New("invalid plugin configuration")
@@ -30,28 +31,66 @@ type Config struct {
 }
 
 type Binding struct {
-	PluginID, Version, Model, Protocol, ChannelID, CandidateID string
-	ManifestDigest                                             [32]byte
-	Origin                                                     *url.URL
-	BearerToken                                                string
-	MaximumImages                                              int
-	Output                                                     string
-	ResultOrigins                                              map[string]struct{}
+	PluginID, Version, Model, Protocol, ChannelID, CandidateID   string
+	ManifestDigest                                               [32]byte
+	Origin                                                       *url.URL
+	BearerToken                                                  string
+	MaximumImages                                                int
+	Output                                                       string
+	ResultOrigins                                                map[string]struct{}
+	RegistrySequence                                             uint64
+	RegistryIndexDigest, RegistryEnvelopeDigest, AdmissionDigest [32]byte
+}
+
+type RegistryIndexEvidence struct {
+	Sequence                                    uint64
+	IndexDigest, EnvelopeDigest, PreviousDigest [32]byte
+	CreatedAt, ExpiresAt                        time.Time
 }
 
 type Registry struct {
-	bindings map[string]Binding
-	routes   []imageoperation.ModelRoute
-	config   Config
+	bindings      map[string]Binding
+	routes        []imageoperation.ModelRoute
+	config        Config
+	indexEvidence *RegistryIndexEvidence
 }
 
 func NewRegistry(validated []manifest.Validated, config Config) (*Registry, error) {
+	return newRegistry(validated, config, nil)
+}
+
+func NewAdmittedRegistry(validated []manifest.Validated, config Config, snapshot registryv1.Snapshot) (*Registry, error) {
+	if len(snapshot.Admissions) != len(validated) {
+		return nil, ErrInvalidConfiguration
+	}
+	return newRegistry(validated, config, &snapshot)
+}
+
+func newRegistry(validated []manifest.Validated, config Config, snapshot *registryv1.Snapshot) (*Registry, error) {
 	if config.Timeout <= 0 || config.Timeout > 5*time.Minute || config.MaximumRequestBytes < 1 || config.MaximumRequestBytes > 64<<20 || config.MaximumResponseBytes < 1 || config.MaximumResponseBytes > 128<<20 || config.MaximumConcurrency < 1 || config.MaximumConcurrency > 4096 {
 		return nil, ErrInvalidConfiguration
 	}
 	result := &Registry{bindings: make(map[string]Binding), config: config}
+	if snapshot != nil {
+		indexDigest, ok1 := decodeSHA256(snapshot.Index.PayloadDigest)
+		envelopeDigest, ok2 := decodeSHA256(snapshot.Index.EnvelopeDigest)
+		previousDigest, ok3 := decodeOptionalSHA256(snapshot.Index.Index.PreviousIndexDigest)
+		if !ok1 || !ok2 || !ok3 || snapshot.Index.Index.Sequence < 1 {
+			return nil, ErrInvalidConfiguration
+		}
+		result.indexEvidence = &RegistryIndexEvidence{Sequence: snapshot.Index.Index.Sequence, IndexDigest: indexDigest, EnvelopeDigest: envelopeDigest, PreviousDigest: previousDigest, CreatedAt: snapshot.Index.Index.CreatedAt, ExpiresAt: snapshot.Index.Index.ExpiresAt}
+	}
 	seenModels := map[string]bool{"openai\x00gpt-image-1": true, "openai\x00grok-imagine-image-quality": true, "gemini\x00gemini-image": true}
 	for _, item := range validated {
+		var admissionDigest [32]byte
+		if snapshot != nil {
+			admission, exists := snapshot.Admissions[item.Manifest.ID+"@"+item.Manifest.Version]
+			var valid bool
+			admissionDigest, valid = decodeSHA256(admission.EnvelopeDigest)
+			if !exists || !valid {
+				return nil, ErrInvalidConfiguration
+			}
+		}
 		originValue, endpointOK := config.EndpointOrigins[item.Manifest.Transport.EndpointRef]
 		bearerToken, secretOK := config.AuthSecrets[item.Manifest.Transport.AuthSecretRef]
 		if !endpointOK || !secretOK || bearerToken == "" || len(bearerToken) > 4096 || strings.TrimSpace(bearerToken) != bearerToken {
@@ -76,7 +115,11 @@ func NewRegistry(validated []manifest.Validated, config Config) (*Registry, erro
 					return nil, ErrInvalidConfiguration
 				}
 				seenModels[modelKey] = true
-				digest := sha256.Sum256([]byte(item.Manifest.ID + "\x00" + item.Manifest.Version + "\x00" + model.ID + "\x00" + protocol + "\x00" + hex.EncodeToString(item.Digest[:])))
+				channelMaterial := item.Manifest.ID + "\x00" + item.Manifest.Version + "\x00" + model.ID + "\x00" + protocol + "\x00" + hex.EncodeToString(item.Digest[:])
+				if snapshot != nil {
+					channelMaterial += "\x00" + hex.EncodeToString(admissionDigest[:])
+				}
+				digest := sha256.Sum256([]byte(channelMaterial))
 				channelID := "channel_" + hex.EncodeToString(digest[:16])
 				candidateID := "candidate_plugin_" + hex.EncodeToString(digest[:8])
 				if channelID == "channel_00000000000000000000000000000001" || channelID == "channel_00000000000000000000000000000002" || channelID == "channel_00000000000000000000000000000003" {
@@ -86,6 +129,12 @@ func NewRegistry(validated []manifest.Validated, config Config) (*Registry, erro
 					return nil, ErrInvalidConfiguration
 				}
 				binding := Binding{PluginID: item.Manifest.ID, Version: item.Manifest.Version, Model: model.ID, Protocol: protocol, ChannelID: channelID, CandidateID: candidateID, ManifestDigest: item.Digest, Origin: origin, BearerToken: bearerToken, MaximumImages: model.Capabilities.MaximumImages, Output: model.Capabilities.Output[0], ResultOrigins: resultOrigins}
+				if snapshot != nil {
+					binding.RegistrySequence = result.indexEvidence.Sequence
+					binding.RegistryIndexDigest = result.indexEvidence.IndexDigest
+					binding.RegistryEnvelopeDigest = result.indexEvidence.EnvelopeDigest
+					binding.AdmissionDigest = admissionDigest
+				}
 				if _, duplicate := result.bindings[channelID]; duplicate {
 					return nil, ErrInvalidConfiguration
 				}
@@ -101,6 +150,13 @@ func NewRegistry(validated []manifest.Validated, config Config) (*Registry, erro
 		return result.routes[i].Protocol < result.routes[j].Protocol
 	})
 	return result, nil
+}
+
+func (registry *Registry) IndexEvidence() (RegistryIndexEvidence, bool) {
+	if registry == nil || registry.indexEvidence == nil {
+		return RegistryIndexEvidence{}, false
+	}
+	return *registry.indexEvidence, true
 }
 
 func parseOrigin(raw string) (*url.URL, error) {
@@ -179,4 +235,21 @@ func (binding Binding) DigestHex() string { return hex.EncodeToString(binding.Ma
 
 func (binding Binding) String() string {
 	return fmt.Sprintf("%s@%s/%s", binding.PluginID, binding.Version, binding.Model)
+}
+
+func decodeSHA256(value string) ([32]byte, bool) {
+	decoded, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	if err != nil || len(decoded) != 32 || !strings.HasPrefix(value, "sha256:") {
+		return [32]byte{}, false
+	}
+	var result [32]byte
+	copy(result[:], decoded)
+	return result, true
+}
+
+func decodeOptionalSHA256(value string) ([32]byte, bool) {
+	if value == "" {
+		return [32]byte{}, true
+	}
+	return decodeSHA256(value)
 }

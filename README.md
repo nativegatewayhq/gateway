@@ -104,6 +104,12 @@ server, and native OpenAI/Gemini usage contract.
 | `GATEWAY_PLUGIN_ENDPOINTS_JSON` | unset | JSON mapping of manifest endpoint refs to exact loopback HTTP or operator-controlled HTTPS origins |
 | `GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON` | unset | JSON mapping of manifest secret refs to environment-variable names; values are resolved separately and never stored in manifests |
 | `GATEWAY_PLUGIN_RESULT_ORIGINS_JSON` | unset | Optional plugin-ID to exact HTTPS result-origin allowlist for URL output manifests |
+| `GATEWAY_PLUGIN_REGISTRY_MODE` | `disabled` | `required` admits only manifests bound to an active threshold-signed local Registry bundle |
+| `GATEWAY_PLUGIN_REGISTRY_TRUST_FILE` | unset | Absolute mode-safe local Ed25519 trust policy; contains public keys only |
+| `GATEWAY_PLUGIN_REGISTRY_INDEX_FILE` | unset | Absolute local DSSE-signed Registry index envelope |
+| `GATEWAY_PLUGIN_REGISTRY_ADMISSION_DIR` | unset | Absolute local directory containing only digest-named DSSE admission envelopes |
+| `GATEWAY_PLUGIN_REGISTRY_PLATFORM` | process platform | Exact admitted platform; v1 accepts `linux/amd64` or `linux/arm64` |
+| `GATEWAY_PLUGIN_REGISTRY_MINIMUM_SEQUENCE` | `1` | Positive operator rollback floor combined with the persisted highest accepted sequence |
 | `GATEWAY_PLUGIN_TIMEOUT` | `2m` | Sidecar request timeout; maximum `5m` |
 | `GATEWAY_PLUGIN_MAX_REQUEST_BYTES` | `2097152` | Maximum canonical sidecar request envelope; maximum 64 MiB |
 | `GATEWAY_PLUGIN_MAX_RESPONSE_BYTES` | `67108864` | Maximum canonical sidecar response envelope; maximum 128 MiB |

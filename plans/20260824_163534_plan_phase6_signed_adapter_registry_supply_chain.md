@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-064
 title: Phase 6 Signed Official Adapter Registry and Supply-chain Verification
-status: accepted
+status: completed
 created_at: 2026-08-24T16:35:34+09:00
-updated_at: 2026-08-24T16:35:34+09:00
+updated_at: 2026-08-24T17:18:13+09:00
 owners:
   - gateway
 initiative: phase-6-signed-adapter-registry
@@ -268,20 +268,26 @@ go run ./cmd/gateway-plugin-registry matrix ...
 
 ## 완료 조건
 
-- [ ] strict Registry Index/Admission/Trust/DSSE public SDK와 canonical golden이 제공됨
-- [ ] operator-pinned threshold signature, expiry와 key rotation 경계가 fail closed함
-- [ ] OCI artifact, manifest, conformance, source/build/SBOM/provenance identity가 admission에 결속됨
-- [ ] sequence/previous digest/minimum floor가 stale rollback과 same-sequence equivocation을 거부함
-- [ ] offline CLI가 verify와 deterministic compatibility matrix를 secret-safe하게 제공함
-- [ ] Gateway required mode가 active exact admission만 route/channel로 publish함
-- [ ] request/charge snapshot이 registry index/admission identity를 불변 보존함
-- [ ] managed price/Wallet/Ledger와 endpoint/secret 경계가 Registry와 분리됨
-- [ ] unit/race/integration/SDK/public-module 검사가 통과함
-- [ ] release/yank/key rotation/rollback 문서와 멀티레포 handoff가 갱신됨
+- [x] strict Registry Index/Admission/Trust/DSSE public SDK와 canonical golden이 제공됨
+- [x] operator-pinned threshold signature, expiry와 key rotation 경계가 fail closed함
+- [x] OCI artifact, manifest, conformance, source/build/SBOM/provenance identity가 admission에 결속됨
+- [x] sequence/previous digest/minimum floor가 stale rollback과 same-sequence equivocation을 거부함
+- [x] offline CLI가 verify와 deterministic compatibility matrix를 secret-safe하게 제공함
+- [x] Gateway required mode가 active exact admission만 route/channel로 publish함
+- [x] request/charge snapshot이 registry index/admission identity를 불변 보존함
+- [x] managed price/Wallet/Ledger와 endpoint/secret 경계가 Registry와 분리됨
+- [x] unit/race/integration/SDK/public-module 검사가 통과함
+- [x] release/yank/key rotation/rollback 문서와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- 구현 Pull Request: `#97`.
+- `GOCACHE=/private/tmp/nativegateway-go-cache make check` 통과: fmt, vet, 전체 race unit test, public SDK dependency boundary, standalone Adapter template와 모든 Gateway/Plugin binary build.
+- fresh PostgreSQL `gateway_plan064_full` 및 Redis DB 14에서 `GOFLAGS=-p=1 make integration-test` 통과: migration 57, append-only Registry/index/channel evidence와 전체 billing/reconciliation/provider/protocol suite 유지.
+- `go test -count=1 -tags=sdkconformance ./protocols/openai ./protocols/gemini` 통과: 공식 OpenAI/Gemini SDK의 기존 native plugin route 호환 유지.
+- `GOWORK=off go test -race ./plugin-sdk/...` 통과: external-consumable Registry/Manifest/Runtime/Conformance SDK와 fixture corpus가 Gateway `internal/`에 의존하지 않음.
+- `gateway-plugin-registry` verify/matrix success-path test 통과: 실제 threshold-signed bundle, digest-named admission/report corpus와 manifest를 offline 검증하고 deterministic strict JSON matrix를 생성함.
+- tamper, threshold, key not-before/not-after, index expiry, yanked release, minimum sequence, broken previous digest, same-sequence equivocation, unsafe file permission, manifest/report/admission digest mismatch가 fail closed하는 unit/race test 통과.
 
 ## Rollback 계획
 

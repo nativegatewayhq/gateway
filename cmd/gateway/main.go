@@ -48,6 +48,7 @@ import (
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
+	registryv1 "github.com/nativegatewayhq/gateway/plugin-sdk/registry/v1"
 	anthropicProtocol "github.com/nativegatewayhq/gateway/protocols/anthropic"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
@@ -257,12 +258,27 @@ func run(stdout, stderr io.Writer) int {
 			logger.Error("gateway plugin manifest initialization failed")
 			return 1
 		}
-		pluginRegistry, err = plugins.NewRegistry(validated, cfg.Plugins)
+		pluginStore := plugins.NewStore(pool)
+		if cfg.PluginRegistryMode == config.PluginRegistryRequired {
+			lastSequence, lastDigest, stateErr := pluginStore.LastRegistryIndex(ctx)
+			if stateErr != nil {
+				logger.Error("gateway plugin registry state initialization failed")
+				return 1
+			}
+			snapshot, registryErr := registryv1.LoadSnapshot(registryv1.BundleConfig{TrustPolicyFile: cfg.PluginRegistryTrustFile, IndexEnvelopeFile: cfg.PluginRegistryIndexFile, AdmissionDirectory: cfg.PluginRegistryAdmissionDir, GatewayVersion: "0.1.0", Platform: cfg.PluginRegistryPlatform, MinimumSequence: cfg.PluginRegistryMinimumSequence, LastSequence: lastSequence, LastIndexDigest: lastDigest, Now: time.Now().UTC().Truncate(time.Second)}, validated)
+			if registryErr != nil {
+				logger.Error("gateway signed plugin registry initialization failed")
+				return 1
+			}
+			pluginRegistry, err = plugins.NewAdmittedRegistry(validated, cfg.Plugins, snapshot)
+		} else {
+			pluginRegistry, err = plugins.NewRegistry(validated, cfg.Plugins)
+		}
 		if err != nil {
 			logger.Error("gateway plugin registry initialization failed")
 			return 1
 		}
-		if err = plugins.NewStore(pool).Sync(ctx, pluginRegistry); err != nil {
+		if err = pluginStore.Sync(ctx, pluginRegistry); err != nil {
 			logger.Error("gateway plugin channel snapshot initialization failed")
 			return 1
 		}

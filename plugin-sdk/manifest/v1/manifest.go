@@ -140,6 +140,9 @@ func compare(left, right [3]int) int {
 	return 0
 }
 
+// IsCompatible reports whether current satisfies the strict v1 compatibility range.
+func IsCompatible(expression, current string) bool { return compatible(expression, current) }
+
 // HasDuplicateKeys reports malformed JSON and duplicate object member names at
 // any depth. It is exported so sidecar contract decoders can share the same
 // ambiguity-free JSON boundary as manifests.

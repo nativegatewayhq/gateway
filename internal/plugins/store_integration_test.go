@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
+	registryv1 "github.com/nativegatewayhq/gateway/plugin-sdk/registry/v1"
 )
 
 func pluginPool(t *testing.T) *pgxpool.Pool {
@@ -74,5 +75,39 @@ func TestStorePublishesImmutableChannelSnapshot(t *testing.T) {
 	}
 	if _, err = pool.Exec(context.Background(), `UPDATE plugin_channel_snapshots SET plugin_version='1.0.1' WHERE channel_id=$1`, binding.ChannelID); err == nil {
 		t.Fatal("immutable snapshot updated")
+	}
+}
+
+func TestStorePublishesSignedRegistryAndAdmissionEvidence(t *testing.T) {
+	pool := pluginPool(t)
+	item := validated(t, "provider.example", "openai")
+	created := time.Now().UTC().Truncate(time.Second)
+	snapshot := registryv1.Snapshot{Index: registryv1.VerifiedIndex{Index: registryv1.Index{Sequence: 7, CreatedAt: created, ExpiresAt: created.Add(time.Hour), PreviousIndexDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}, EnvelopeDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", PayloadDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}, Admissions: map[string]registryv1.VerifiedAdmission{"provider.example@1.0.0": {EnvelopeDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+	registry, err := NewAdmittedRegistry([]manifest.Validated{item}, testConfig(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool)
+	if err = store.Sync(context.Background(), registry); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Sync(context.Background(), registry); err != nil {
+		t.Fatal(err)
+	}
+	sequence, digest, err := store.LastRegistryIndex(context.Background())
+	if err != nil || sequence != 7 || digest != snapshot.Index.PayloadDigest {
+		t.Fatalf("LastRegistryIndex() = %d %q %v", sequence, digest, err)
+	}
+	binding := registry.Bindings()[0]
+	var storedSequence int64
+	var indexDigest, envelopeDigest, admissionDigest []byte
+	if err = pool.QueryRow(context.Background(), `SELECT registry_sequence,registry_index_digest,registry_envelope_digest,registry_admission_digest FROM plugin_channel_snapshots WHERE channel_id=$1`, binding.ChannelID).Scan(&storedSequence, &indexDigest, &envelopeDigest, &admissionDigest); err != nil {
+		t.Fatal(err)
+	}
+	if storedSequence != 7 || len(indexDigest) != 32 || len(envelopeDigest) != 32 || len(admissionDigest) != 32 {
+		t.Fatal("signed registry evidence mismatch")
+	}
+	if _, err = pool.Exec(context.Background(), `DELETE FROM plugin_registry_index_snapshots WHERE sequence=7`); err == nil {
+		t.Fatal("immutable registry snapshot deleted")
 	}
 }
