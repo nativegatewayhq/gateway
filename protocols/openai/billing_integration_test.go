@@ -3,8 +3,11 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,13 +25,97 @@ import (
 	chargebilling "github.com/nativegatewayhq/gateway/internal/billing"
 	"github.com/nativegatewayhq/gateway/internal/database"
 	"github.com/nativegatewayhq/gateway/internal/ledger"
+	pluginruntime "github.com/nativegatewayhq/gateway/internal/plugins"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/requestid"
 	"github.com/nativegatewayhq/gateway/internal/spendcap"
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
+	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 	"github.com/nativegatewayhq/gateway/providers/openaiimages"
+	pluginprovider "github.com/nativegatewayhq/gateway/providers/plugin"
 )
+
+type pluginIntegrationRoundTrip func(*http.Request) (*http.Response, error)
+
+func (function pluginIntegrationRoundTrip) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+func TestPluginBillingSnapshotAndIdempotencyAreExactlyOnce(t *testing.T) {
+	pool := isolatedOpenAIPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO organizations(id,name,slug) VALUES('org_plugin_billing','Plugin billing','plugin-billing'); INSERT INTO projects(id,organization_id,name,slug) VALUES('project_plugin_billing','org_plugin_billing','Plugin billing','plugin-billing')`); err != nil {
+		t.Fatal(err)
+	}
+	record, raw, err := apikey.GenerateForProject(rand.Reader, "plugin billing", "project_plugin_billing", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := apikey.NewPostgresStore(pool)
+	if err = store.Create(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	wallet := ledger.NewService(pool)
+	if _, err = wallet.Deposit(ctx, "org_plugin_billing", 500, "plugin-fixture"); err != nil {
+		t.Fatal(err)
+	}
+	validated, err := manifest.Parse([]byte(`{"schema_version":"nativegateway.provider/v1","id":"provider.example","version":"1.0.0","gateway_compatibility":">=0.1.0 <1.0.0","transport":{"kind":"http-sidecar","endpoint_ref":"sidecar","auth_secret_ref":"token"},"models":[{"id":"example-image-v1","protocols":["openai"],"operations":["image.generate"],"capabilities":{"media_type":"application/json","output":["base64"],"maximum_images":2}}]}`), "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins, err := pluginruntime.NewRegistry([]manifest.Validated{validated}, pluginruntime.Config{EndpointOrigins: map[string]string{"sidecar": "http://127.0.0.1:8081"}, AuthSecrets: map[string]string{"token": "plugin-secret"}, Timeout: time.Second, MaximumRequestBytes: 1 << 20, MaximumResponseBytes: 1 << 20, MaximumConcurrency: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = pluginruntime.NewStore(pool).Sync(ctx, plugins); err != nil {
+		t.Fatal(err)
+	}
+	binding := plugins.Bindings()[0]
+	estimator, _ := pricing.NewService(pool, 0)
+	if _, err = estimator.Publish(ctx, pricing.Price{ChannelID: binding.ChannelID, Protocol: "openai", Operation: "image.generate", Model: binding.Model, UnitCost: 60, UnitSale: 100, EffectiveFrom: time.Now().Add(-time.Hour)}, "plugin-price"); err != nil {
+		t.Fatal(err)
+	}
+	chargeService, _ := chargebilling.NewServiceWithControls(pool, estimator, wallet, nil, spendcap.NewStore(pool), 1<<20)
+	var calls atomic.Int64
+	client := pluginruntime.NewClientWithHTTPClient(plugins, &http.Client{Transport: pluginIntegrationRoundTrip(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		var envelope pluginruntime.ExecuteRequest
+		_ = json.NewDecoder(request.Body).Decode(&envelope)
+		encoded := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+		body, _ := json.Marshal(pluginruntime.ExecuteResponse{SchemaVersion: pluginruntime.ResponseSchema, RequestID: envelope.RequestID, PluginID: envelope.PluginID, PluginVersion: envelope.PluginVersion, ManifestDigest: envelope.ManifestDigest, Result: &pluginruntime.Result{Images: []pluginruntime.Image{{MIMEType: "image/png", Base64: encoded}}, Usage: pluginruntime.Usage{Images: 1}}})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})})
+	models, err := imageoperation.DefaultRegistryWithAsyncAndAdditional(nil, nil, plugins.Routes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseAvailability, _ := providercredentials.Load(func(string) (string, bool) { return "", false })
+	availability := pluginruntime.NewAvailability(baseAvailability, plugins)
+	handler := NewBillableImagesHandlerWithAvailability(slog.Default(), apikey.NewService(store), models, map[providercredentials.ProviderID]Executor{providercredentials.Plugin: pluginprovider.New(client)}, 1<<20, chargeService, availability)
+	invoke := func(id string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"example-image-v1","prompt":"draw","n":1}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+raw)
+		request.Header.Set("Idempotency-Key", "plugin-exactly-once")
+		request.Header.Set(requestid.HeaderName, id)
+		response := httptest.NewRecorder()
+		requestid.Middleware(handler).ServeHTTP(response, request)
+		return response
+	}
+	first, second := invoke("plugin-first"), invoke("plugin-second")
+	if first.Code != 200 || second.Code != 200 || second.Header().Get("Idempotency-Replayed") != "true" || calls.Load() != 1 {
+		t.Fatalf("responses=%d/%d calls=%d replay=%q", first.Code, second.Code, calls.Load(), second.Header().Get("Idempotency-Replayed"))
+	}
+	var state, pluginID, version string
+	var digest []byte
+	if err = pool.QueryRow(ctx, `SELECT c.state,s.plugin_id,s.plugin_version,s.manifest_digest FROM image_request_charges c JOIN plugin_channel_snapshots s ON s.channel_id=c.channel_id WHERE c.organization_id='org_plugin_billing'`).Scan(&state, &pluginID, &version, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if state != "CAPTURED" || pluginID != binding.PluginID || version != binding.Version || len(digest) != 32 {
+		t.Fatal("immutable plugin charge evidence mismatch")
+	}
+}
 
 func TestBillableImagesPostgresLifecyclePreservesNativeResponses(t *testing.T) {
 	pool := isolatedOpenAIPool(t)

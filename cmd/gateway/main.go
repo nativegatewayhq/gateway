@@ -29,6 +29,7 @@ import (
 	"github.com/nativegatewayhq/gateway/internal/ledger"
 	"github.com/nativegatewayhq/gateway/internal/networkauth"
 	"github.com/nativegatewayhq/gateway/internal/observability"
+	"github.com/nativegatewayhq/gateway/internal/plugins"
 	"github.com/nativegatewayhq/gateway/internal/pricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
@@ -46,6 +47,7 @@ import (
 	imageoperation "github.com/nativegatewayhq/gateway/operations/image"
 	responsesoperation "github.com/nativegatewayhq/gateway/operations/responses"
 	videooperation "github.com/nativegatewayhq/gateway/operations/video"
+	manifest "github.com/nativegatewayhq/gateway/plugin-sdk/manifest/v1"
 	anthropicProtocol "github.com/nativegatewayhq/gateway/protocols/anthropic"
 	falProtocol "github.com/nativegatewayhq/gateway/protocols/fal"
 	"github.com/nativegatewayhq/gateway/protocols/gemini"
@@ -57,6 +59,7 @@ import (
 	falProvider "github.com/nativegatewayhq/gateway/providers/fal"
 	"github.com/nativegatewayhq/gateway/providers/google"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
+	pluginProvider "github.com/nativegatewayhq/gateway/providers/plugin"
 	replicateProvider "github.com/nativegatewayhq/gateway/providers/replicate"
 	runwayProvider "github.com/nativegatewayhq/gateway/providers/runway"
 	"github.com/nativegatewayhq/gateway/providers/xai"
@@ -244,7 +247,34 @@ func run(stdout, stderr io.Writer) int {
 		return nil
 	}
 	googleExecutor := google.New(providerCredentialRegistry, cfg.GoogleTimeout, cfg.GeminiStreamIdleTimeout)
-	imageModels, err := imageoperation.DefaultRegistryWithAsync(cfg.ReplicateModels, cfg.FalModels)
+	var geminiExecutor gemini.Executor = googleExecutor
+	var pluginRegistry *plugins.Registry
+	var pluginImageExecutor *pluginProvider.Executor
+	var pluginRoutes []imageoperation.ModelRoute
+	if cfg.PluginMode != config.PluginDisabled {
+		validated, loadErr := manifest.LoadDirectory(cfg.PluginManifestDir, "0.1.0")
+		if loadErr != nil || cfg.PluginMode == config.PluginRequired && len(validated) == 0 {
+			logger.Error("gateway plugin manifest initialization failed")
+			return 1
+		}
+		pluginRegistry, err = plugins.NewRegistry(validated, cfg.Plugins)
+		if err != nil {
+			logger.Error("gateway plugin registry initialization failed")
+			return 1
+		}
+		if err = plugins.NewStore(pool).Sync(ctx, pluginRegistry); err != nil {
+			logger.Error("gateway plugin channel snapshot initialization failed")
+			return 1
+		}
+		pluginClient := plugins.NewClient(pluginRegistry)
+		if cfg.PluginMode == config.PluginRequired {
+			readinessChecks = append(readinessChecks, pluginClient.Health)
+		}
+		pluginImageExecutor = pluginProvider.New(pluginClient)
+		geminiExecutor = pluginProvider.NewGeminiMux(pluginRegistry, pluginImageExecutor, googleExecutor)
+		pluginRoutes = pluginRegistry.Routes()
+	}
+	imageModels, err := imageoperation.DefaultRegistryWithAsyncAndAdditional(cfg.ReplicateModels, cfg.FalModels, pluginRoutes)
 	if err != nil {
 		logger.Error("gateway model registry initialization failed")
 		return 1
@@ -362,6 +392,10 @@ func run(stdout, stderr io.Writer) int {
 		providercredentials.OpenAI: openAIExecutor,
 		providercredentials.XAI:    xAIExecutor,
 	}
+	if pluginImageExecutor != nil {
+		imageExecutors[providercredentials.Plugin] = pluginImageExecutor
+	}
+	providerAvailability := plugins.NewAvailability(providerCredentialRegistry, pluginRegistry)
 	var chargeBilling openaiProtocol.Billing
 	var billingService *chargebilling.Service
 	var reconciliationWorker *reconciliation.Worker
@@ -552,13 +586,13 @@ func run(stdout, stderr io.Writer) int {
 	var openAIImagesHandler *openaiProtocol.Handler
 	var openAIImageEditsHandler *openaiProtocol.EditHandler
 	if chargeBilling == nil {
-		geminiHandler = gemini.NewHandlerWithLLMModels(logger, apiKeyAuthenticator, googleExecutor, cfg.GeminiBodyBytes, healthGate, geminiLLMModels)
+		geminiHandler = gemini.NewHandlerWithImageAndLLMModels(logger, apiKeyAuthenticator, imageModels, geminiExecutor, cfg.GeminiBodyBytes, providerAvailability, healthGate, geminiLLMModels)
 		openAIImagesHandler = openaiProtocol.NewImagesHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, healthGate)
 		openAIImageEditsHandler = openaiProtocol.NewEditHandlerWithHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, healthGate)
 	} else {
-		geminiHandler = gemini.NewBillableHandlerWithLLMTokenBilling(logger, apiKeyAuthenticator, imageModels, googleExecutor, cfg.GeminiBodyBytes, chargeBilling, chatChargeBilling, providerCredentialRegistry, healthGate, geminiLLMModels)
-		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerCredentialRegistry, healthGate)
-		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerCredentialRegistry, healthGate)
+		geminiHandler = gemini.NewBillableHandlerWithLLMTokenBilling(logger, apiKeyAuthenticator, imageModels, geminiExecutor, cfg.GeminiBodyBytes, chargeBilling, chatChargeBilling, providerAvailability, healthGate, geminiLLMModels)
+		openAIImagesHandler = openaiProtocol.NewBillableImagesHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImagesBodyBytes, chargeBilling, providerAvailability, healthGate)
+		openAIImageEditsHandler = openaiProtocol.NewBillableEditHandlerWithAvailabilityAndHealth(logger, apiKeyAuthenticator, imageModels, imageExecutors, cfg.ImageEditsBodyBytes, cfg.ImageEditSpoolLimit, chargeBilling, providerAvailability, healthGate)
 	}
 	if imageResults != nil {
 		geminiHandler.SetResultManager(imageResults)
@@ -571,7 +605,7 @@ func run(stdout, stderr io.Writer) int {
 	geminiHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImagesHandler.SetTelemetry(telemetryRuntime.Recorder)
 	openAIImageEditsHandler.SetTelemetry(telemetryRuntime.Recorder)
-	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAudioOperations(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, transcriptionModels, translationModels, providerCredentialRegistry)
+	openAIModelsHandler := openaiProtocol.NewModelsHandlerWithAllAudioOperations(logger, apiKeyAuthenticator, imageModels, chatModels, responsesModels, videoModels, audioModels, transcriptionModels, translationModels, providerAvailability)
 	openAIModelsHandler.SetTranscriptionPricing(transcriptionPricing)
 	openAIModelsHandler.SetTranslationPricing(translationPricing)
 	var replicateHandler http.Handler

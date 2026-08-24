@@ -549,3 +549,31 @@ func TestLoadFalRequiresModelsAndPublicOrigin(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestPluginConfigurationResolvesSecretReferenceWithoutEcho(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_DATABASE_URL":                "postgres://gateway",
+		"GATEWAY_PLUGIN_MODE":                 "required",
+		"GATEWAY_PLUGIN_MANIFEST_DIR":         "/trusted/plugins",
+		"GATEWAY_PLUGIN_ENDPOINTS_JSON":       `{"example-sidecar":"http://127.0.0.1:8081"}`,
+		"GATEWAY_PLUGIN_AUTH_SECRET_ENV_JSON": `{"example-token":"PLUGIN_TOKEN"}`,
+		"PLUGIN_TOKEN":                        "super-secret-value",
+		"GATEWAY_PLUGIN_MAX_CONCURRENCY":      "7",
+	}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || cfg.PluginMode != PluginRequired || cfg.Plugins.AuthSecrets["example-token"] != "super-secret-value" || cfg.Plugins.MaximumConcurrency != 7 {
+		t.Fatalf("config rejected: %v", err)
+	}
+	delete(values, "PLUGIN_TOKEN")
+	_, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err == nil || strings.Contains(err.Error(), "super-secret-value") || strings.Contains(err.Error(), "PLUGIN_TOKEN") {
+		t.Fatalf("unsafe error: %v", err)
+	}
+}
+
+func TestPluginConfigurationRejectsEnabledModeWithoutReferences(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway", "GATEWAY_PLUGIN_MODE": "optional"}
+	if _, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("incomplete plugin configuration accepted")
+	}
+}

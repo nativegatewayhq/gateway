@@ -52,6 +52,19 @@ services:
     command:
       - "mc alias set local http://minio:9000 gateway-local gateway-local-secret && mc mb --ignore-existing local/gateway-audio-inputs"
 
+  plugin-mock:
+    profiles: ["plugin"]
+    image: golang:1.25-alpine
+    working_dir: /src
+    command: ["go", "run", "./cmd/gateway-plugin-mock"]
+    environment:
+      GATEWAY_PLUGIN_MOCK_ADDR: "0.0.0.0:8081"
+      GATEWAY_PLUGIN_MOCK_TOKEN: "${GATEWAY_PLUGIN_MOCK_TOKEN:-local-plugin-token}"
+    ports:
+      - "58081:8081"
+    volumes:
+      - .:/src:ro
+
 volumes:
   gateway-postgres:
   gateway-minio:

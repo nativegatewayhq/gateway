@@ -81,6 +81,22 @@ func TestModelsHandlerUsesChannelCredentialAvailability(t *testing.T) {
 	}
 }
 
+func TestModelsHandlerPublishesPluginLogicalModelByChannelSnapshot(t *testing.T) {
+	registry, err := imageoperation.NewRegistry(imageoperation.ModelRoute{Protocol: "openai", Model: "example-image-v1", Owner: "provider.example", Capabilities: []imageoperation.Capability{{Operation: imageoperation.Generate, MediaType: imageoperation.JSON}}, Policy: imageoperation.Fixed, FixedCandidateID: "candidate_plugin_example", Candidates: []imageoperation.ChannelCandidate{{ID: "candidate_plugin_example", Provider: providercredentials.Plugin, ProviderModel: "example-image-v1", ChannelID: "channel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Enabled: true}}, Usage: imageoperation.UsageCapability{Dimension: "output", Unit: "image", DefaultQuantity: 1, MaximumQuantity: 2, RequestExtractor: "openai-plugin-image-count-v1", ResultExtractor: "plugin-image-output-v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewModelsHandler(slog.Default(), acceptingAuth(t), registry, channelAvailability{"channel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": true})
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err = json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "example-image-v1" || list.Data[0].OwnedBy != "provider.example" {
+		t.Fatalf("response=%d list=%+v", response.Code, list)
+	}
+}
+
 func TestModelsHandlerReturnsEmptyListWithoutProviderCredentials(t *testing.T) {
 	t.Parallel()
 	handler := NewModelsHandler(slog.Default(), acceptingAuth(t), testRegistry(t), availability{})
