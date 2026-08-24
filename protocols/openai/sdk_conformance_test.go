@@ -101,6 +101,42 @@ assert r.text == "gateway transcript"`
 	}
 }
 
+func TestOfficialOpenAITranscriptionSDKsPreserveManagedUsageSettlement(t *testing.T) {
+	registry, _ := audiooperation.NewTranscriptionRegistry([]string{"gpt-4o-transcribe"}, map[string]audiooperation.TranscriptionCapabilities{"gpt-4o-transcribe": {ResponseFormats: []string{"json"}}})
+	billing := &transcriptionBillingStub{}
+	calls := 0
+	handler := NewBillableTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), authFunc(func(context.Context, string) (apikey.Principal, error) {
+		return apikey.Principal{}, nil
+	}), registry, transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+		calls++
+		body := `{"text":"gateway managed transcript","usage":{"type":"tokens","input_tokens":2,"input_token_details":{"audio_tokens":2,"text_tokens":0},"output_tokens":1,"total_tokens":3}}`
+		if calls == 2 {
+			body = `{"text":"gateway managed transcript","usage":{"type":"duration","seconds":3.0001}}`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}), providerhealth.NoopGate{}, 4096, 1024, 1024, 4096, 2, billing)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	python := `from openai import OpenAI
+c=OpenAI(api_key="service-key",base_url="` + server.URL + `/v1")
+r=c.audio.transcriptions.create(model="gpt-4o-transcribe",file=("sample.wav",b"sdk-audio","audio/wav"),extra_headers={"Idempotency-Key":"python-managed-key"})
+assert r.text == "gateway managed transcript"`
+	command := exec.Command("python3", "-c", python)
+	command.Env = append(os.Environ(), "PYTHONPATH=/private/tmp/openai-sdk-python")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Python managed Transcription SDK: %v: %s", err, output)
+	}
+	javascript := `const OpenAI=require("openai").default;const {toFile}=require("openai");(async()=>{const c=new OpenAI({apiKey:"service-key",baseURL:"` + server.URL + `/v1"});const file=await toFile(Buffer.from("sdk-audio"),"sample.wav",{type:"audio/wav"});const r=await c.audio.transcriptions.create({model:"gpt-4o-transcribe",file},{headers:{"Idempotency-Key":"javascript-managed-key"}});if(r.text!=="gateway managed transcript")process.exit(2)})().catch(e=>{console.error(e);process.exit(1)});`
+	command = exec.Command("node", "-e", javascript)
+	command.Env = append(os.Environ(), "NODE_PATH=/private/tmp/openai-sdk-node/node_modules")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("JavaScript managed Transcription SDK: %v: %s", err, output)
+	}
+	if calls != 2 || len(billing.completed) != 2 || billing.completed[0].Usage.TotalTokens != 3 || billing.completed[1].Usage.DurationMilliseconds != 3001 {
+		t.Fatalf("calls=%d completed=%+v", calls, billing.completed)
+	}
+}
+
 func TestOfficialOpenAISDKsUseOnlyBaseURLAndKey(t *testing.T) {
 	handler := chatHandler(t, authFunc(func(context.Context, string) (apikey.Principal, error) { return apikey.Principal{}, nil }), chatExecutorFunc(func(context.Context, openaiProvider.ChatRequest) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chatcmpl_sdk","object":"chat.completion","created":1,"model":"gpt-4.1","choices":[{"index":0,"message":{"role":"assistant","content":"gateway ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))}, nil

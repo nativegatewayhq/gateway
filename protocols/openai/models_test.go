@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/audiopricing"
 	"github.com/nativegatewayhq/gateway/internal/providercredentials"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	chatoperation "github.com/nativegatewayhq/gateway/operations/chat"
@@ -24,6 +25,12 @@ func (value availability) ConfiguredProviders() []providercredentials.ProviderID
 }
 
 type channelAvailability map[string]bool
+
+type transcriptionPricingFunc func(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error)
+
+func (function transcriptionPricingFunc) EstimateTranscription(ctx context.Context, request audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error) {
+	return function(ctx, request)
+}
 
 func (channelAvailability) ConfiguredProviders() []providercredentials.ProviderID { return nil }
 func (value channelAvailability) ConfiguredChannel(_ context.Context, channelID string, _ providercredentials.ProviderID) bool {
@@ -193,6 +200,23 @@ func TestModelsHandlerIncludesAuthorizedConfiguredTranscription(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.Code != 200 || len(list.Data) != 1 || list.Data[0].ID != "gpt-4o-transcribe" {
+		t.Fatalf("list=%+v", list)
+	}
+}
+
+func TestModelsHandlerHidesManagedTranscriptionWithoutActivePrice(t *testing.T) {
+	transcriptions, _ := audiooperation.NewTranscriptionRegistry([]string{"gpt-4o-transcribe"}, nil)
+	principal := apikey.Principal{ModelAccessMode: apikey.ModelAccessAllowlist, ModelPermissions: []apikey.ModelPermission{{Protocol: "openai", Operation: audiooperation.Transcription, Model: "gpt-4o-transcribe"}}}
+	handler := NewModelsHandlerWithAllAudioOperations(slog.Default(), authFunc(func(context.Context, string) (apikey.Principal, error) { return principal, nil }), nil, nil, nil, nil, nil, transcriptions, channelAvailability{"channel_00000000000000000000000000000001": true})
+	handler.SetTranscriptionPricing(transcriptionPricingFunc(func(context.Context, audiopricing.TranscriptionPriceRequest) (audiopricing.TranscriptionEstimate, error) {
+		return audiopricing.TranscriptionEstimate{}, audiopricing.ErrUnavailable
+	}))
+	response := modelsRequest(handler, http.MethodGet, true)
+	var list modelList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || len(list.Data) != 0 {
 		t.Fatalf("list=%+v", list)
 	}
 }

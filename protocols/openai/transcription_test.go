@@ -15,12 +15,115 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nativegatewayhq/gateway/internal/audiobilling"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
 	audiooperation "github.com/nativegatewayhq/gateway/operations/audio"
 	openaiProvider "github.com/nativegatewayhq/gateway/providers/openai"
 )
 
 type transcriptionExecutorFunc func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error)
+
+type transcriptionBillingStub struct {
+	begin             audiobilling.TranscriptionBeginRequest
+	beginCalls        int
+	pendingAfterFirst bool
+	complete          *audiobilling.TranscriptionEvidence
+	completed         []audiobilling.TranscriptionEvidence
+	released          string
+	reconciling       string
+}
+
+type failSecondTranscriptionWrite struct {
+	header http.Header
+	writes int
+}
+
+func (w *failSecondTranscriptionWrite) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+func (*failSecondTranscriptionWrite) WriteHeader(int) {}
+func (w *failSecondTranscriptionWrite) Write(body []byte) (int, error) {
+	w.writes++
+	if w.writes == 2 {
+		return 0, context.Canceled
+	}
+	return len(body), nil
+}
+func (*failSecondTranscriptionWrite) Flush() {}
+
+func (s *transcriptionBillingStub) Begin(_ context.Context, request audiobilling.TranscriptionBeginRequest) (audiobilling.TranscriptionCharge, error) {
+	s.beginCalls++
+	if s.pendingAfterFirst && s.beginCalls > 1 {
+		return audiobilling.TranscriptionCharge{}, audiobilling.ErrPending
+	}
+	s.begin = request
+	return audiobilling.TranscriptionCharge{ID: "atc_00000000000000000000000000000001"}, nil
+}
+
+func TestBillableTranscriptionDuplicateAndExecutorFaultsNeverRedispatch(t *testing.T) {
+	t.Run("duplicate", func(t *testing.T) {
+		billing := &transcriptionBillingStub{pendingAfterFirst: true}
+		calls := 0
+		handler := NewBillableTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), transcriptionRegistry(t, false), transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"text":"private","usage":{"type":"tokens","input_tokens":1,"input_token_details":{"audio_tokens":1,"text_tokens":0},"output_tokens":1,"total_tokens":2}}`))}, nil
+		}), providerhealth.NoopGate{}, 4096, 2048, 64, 4096, 1, billing)
+		for i := 0; i < 2; i++ {
+			contentType, body := transcriptionBody(t, []struct{ name, filename, value string }{{"model", "", "gpt-4o-transcribe"}, {"file", "a.wav", "audio"}})
+			request := transcriptionRequest(contentType, body)
+			request.Header.Set("Idempotency-Key", "duplicate-key")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if i == 1 && response.Code != http.StatusConflict {
+				t.Fatalf("duplicate status=%d body=%s", response.Code, response.Body.String())
+			}
+		}
+		if calls != 1 || billing.beginCalls != 2 {
+			t.Fatalf("provider calls=%d begin calls=%d", calls, billing.beginCalls)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		err    error
+		panics bool
+	}{{"timeout", openaiProvider.ErrTranscriptionTimeout, false}, {"reset", openaiProvider.ErrTranscriptionUpstream, false}, {"cancel", openaiProvider.ErrTranscriptionCanceled, false}, {"panic", nil, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			billing := &transcriptionBillingStub{}
+			calls := 0
+			handler := NewBillableTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), transcriptionRegistry(t, false), transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+				calls++
+				if tc.panics {
+					panic("provider panic")
+				}
+				return nil, tc.err
+			}), providerhealth.NoopGate{}, 4096, 2048, 64, 4096, 1, billing)
+			contentType, body := transcriptionBody(t, []struct{ name, filename, value string }{{"model", "", "gpt-4o-transcribe"}, {"file", "a.wav", "audio"}})
+			request := transcriptionRequest(contentType, body)
+			request.Header.Set("Idempotency-Key", "fault-key")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if calls != 1 || billing.reconciling != "executor_uncertain" || response.Code < 499 {
+				t.Fatalf("status=%d calls=%d reconcile=%s body=%s", response.Code, calls, billing.reconciling, response.Body.String())
+			}
+		})
+	}
+}
+func (s *transcriptionBillingStub) Complete(_ context.Context, _ string, evidence audiobilling.TranscriptionEvidence) (audiobilling.TranscriptionCharge, error) {
+	s.complete = &evidence
+	s.completed = append(s.completed, evidence)
+	return audiobilling.TranscriptionCharge{ID: "atc_00000000000000000000000000000001", State: "CAPTURED"}, nil
+}
+func (s *transcriptionBillingStub) Release(_ context.Context, _ string, reason string) (audiobilling.TranscriptionCharge, error) {
+	s.released = reason
+	return audiobilling.TranscriptionCharge{State: "RELEASED"}, nil
+}
+func (s *transcriptionBillingStub) MarkReconciling(_ context.Context, _ string, reason string, _ *audiobilling.TranscriptionEvidence) error {
+	s.reconciling = reason
+	return nil
+}
 
 func (f transcriptionExecutorFunc) Create(ctx context.Context, r openaiProvider.TranscriptionRequest) (*http.Response, error) {
 	return f(ctx, r)
@@ -307,5 +410,87 @@ func TestTranscriptionClientWriteFailureDoesNotRedispatchAndCleansTemporaryFiles
 	entries, err := filepath.Glob(filepath.Join(dir, "gateway-transcription-*"))
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("temporary files remain: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestBillableTranscriptionCapturesTypedUsageAndPreservesNativeBody(t *testing.T) {
+	billing := &transcriptionBillingStub{}
+	body := `{"text":"private transcript","usage":{"type":"tokens","input_tokens":4,"input_token_details":{"audio_tokens":3,"text_tokens":1},"output_tokens":2,"total_tokens":6}}`
+	handler := NewBillableTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), transcriptionRegistry(t, false), transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}), providerhealth.NoopGate{}, 4096, 2048, 64, 4096, 1, billing)
+	contentType, requestBody := transcriptionBody(t, []struct{ name, filename, value string }{{"model", "", "gpt-4o-transcribe"}, {"file", "a.wav", "audio"}})
+	request := transcriptionRequest(contentType, requestBody)
+	request.Header.Set("Idempotency-Key", "billing-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || response.Body.String() != body || billing.begin.IdempotencyKey != "billing-key" || billing.begin.Fingerprint == ([32]byte{}) || billing.complete == nil || billing.complete.Usage.TotalTokens != 6 || billing.released != "" || billing.reconciling != "" {
+		t.Fatalf("status=%d body=%s begin=%+v complete=%+v released=%s reconciling=%s", response.Code, response.Body.String(), billing.begin, billing.complete, billing.released, billing.reconciling)
+	}
+}
+
+func TestBillableTranscriptionReleaseReconcileAndFormatBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, format, providerBody, wantRelease, wantReconcile string
+		providerStatus                                         int
+		wantCalls                                              int
+	}{{"known failure", "json", `{"error":"bad"}`, "provider_non_2xx", "", 400, 1}, {"missing usage", "json", `{"text":"private"}`, "", "usage_invalid", 200, 1}, {"text fail closed", "text", "private", "", "", 200, 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			billing := &transcriptionBillingStub{}
+			calls := 0
+			handler := NewBillableTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), transcriptionRegistry(t, false), transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+				calls++
+				contentType := "application/json"
+				if tc.format == "text" {
+					contentType = "text/plain"
+				}
+				return &http.Response{StatusCode: tc.providerStatus, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(tc.providerBody))}, nil
+			}), providerhealth.NoopGate{}, 4096, 2048, 64, 4096, 1, billing)
+			parts := []struct{ name, filename, value string }{{"model", "", "gpt-4o-transcribe"}, {"file", "a.wav", "audio"}}
+			if tc.format != "json" {
+				parts = append(parts, struct{ name, filename, value string }{"response_format", "", tc.format})
+			}
+			contentType, requestBody := transcriptionBody(t, parts)
+			request := transcriptionRequest(contentType, requestBody)
+			request.Header.Set("Idempotency-Key", "billing-key")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if calls != tc.wantCalls || billing.released != tc.wantRelease || billing.reconciling != tc.wantReconcile {
+				t.Fatalf("status=%d calls=%d release=%s reconcile=%s body=%s", response.Code, calls, billing.released, billing.reconciling, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestBillableTranscriptionCapturesTerminalSSEUsage(t *testing.T) {
+	billing := &transcriptionBillingStub{}
+	stream := "data: {\"type\":\"transcript.text.delta\",\"delta\":\"private\"}\n\n" +
+		"data: {\"type\":\"transcript.text.done\",\"text\":\"private transcript\",\"usage\":{\"type\":\"tokens\",\"input_tokens\":2,\"input_token_details\":{\"audio_tokens\":2,\"text_tokens\":0},\"output_tokens\":1,\"total_tokens\":3}}\n\n"
+	handler := NewBillableTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), transcriptionRegistry(t, true), transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}, nil
+	}), providerhealth.NoopGate{}, 4096, 2048, 64, 4096, 1, billing)
+	contentType, requestBody := transcriptionBody(t, []struct{ name, filename, value string }{{"model", "", "gpt-4o-transcribe"}, {"stream", "", "true"}, {"file", "a.wav", "audio"}})
+	request := transcriptionRequest(contentType, requestBody)
+	request.Header.Set("Idempotency-Key", "stream-billing-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 || response.Body.String() != stream || billing.complete == nil || billing.complete.SchemaVersion != "openai-transcription-token-sse-v1" || billing.complete.Usage.TotalTokens != 3 || billing.reconciling != "" {
+		t.Fatalf("status=%d body=%q complete=%+v reconcile=%s", response.Code, response.Body.String(), billing.complete, billing.reconciling)
+	}
+}
+
+func TestBillableTranscriptionCapturesObservedTerminalUsageOnClientDisconnect(t *testing.T) {
+	billing := &transcriptionBillingStub{}
+	stream := "data: {\"type\":\"transcript.text.done\",\"text\":\"private\",\"usage\":{\"type\":\"tokens\",\"input_tokens\":1,\"input_token_details\":{\"audio_tokens\":1,\"text_tokens\":0},\"output_tokens\":1,\"total_tokens\":2}}\n\n"
+	handler := NewBillableTranscriptionHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), acceptingAuth(t), transcriptionRegistry(t, true), transcriptionExecutorFunc(func(context.Context, openaiProvider.TranscriptionRequest) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}, nil
+	}), providerhealth.NoopGate{}, 4096, 2048, 64, 4096, 1, billing)
+	contentType, requestBody := transcriptionBody(t, []struct{ name, filename, value string }{{"model", "", "gpt-4o-transcribe"}, {"stream", "", "true"}, {"file", "a.wav", "audio"}})
+	request := transcriptionRequest(contentType, requestBody)
+	request.Header.Set("Idempotency-Key", "disconnect-billing-key")
+	writer := &failSecondTranscriptionWrite{}
+	handler.ServeHTTP(writer, request)
+	if billing.complete == nil || billing.complete.Usage.TotalTokens != 2 || billing.reconciling != "" {
+		t.Fatalf("complete=%+v reconcile=%s writes=%d", billing.complete, billing.reconciling, writer.writes)
 	}
 }

@@ -1,4 +1,4 @@
-// Package audiopricing publishes immutable character-priced Speech rates.
+// Package audiopricing publishes immutable Speech and transcription rates.
 package audiopricing
 
 import (
