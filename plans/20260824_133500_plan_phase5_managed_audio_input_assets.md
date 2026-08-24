@@ -1,9 +1,9 @@
 ---
 id: gateway-20260824-060
 title: Phase 5 Managed Audio Input Assets and Reusable References
-status: accepted
+status: completed
 created_at: 2026-08-24T13:35:00+09:00
-updated_at: 2026-08-24T13:35:00+09:00
+updated_at: 2026-08-24T14:18:00+09:00
 owners:
   - gateway
 initiative: phase-5-managed-audio-input-assets
@@ -240,23 +240,28 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 
 ## 완료 조건
 
-- [ ] private S3/R2 asset create/get/delete가 tenant와 API-key 범위에서 동작함
-- [ ] bounded ingestion이 크기·MIME·magic·동시성 제한을 fail closed함
-- [ ] create idempotency가 동일 content를 재업로드/중복 기록하지 않음
-- [ ] native multipart file과 asset reference가 exactly-one으로 검증됨
-- [ ] available reference가 transcription/translation native file part로 안전하게 materialize됨
-- [ ] 다른 tenant, deleted, expired, pending asset이 Provider·Ledger 전에 거부됨
-- [ ] dispatch fingerprint가 immutable asset digest를 결합해 substitution을 차단함
-- [ ] delete/expiry와 active dispatch race가 lease로 안전하게 수렴함
-- [ ] cleanup restart/lease recovery와 object deletion retry가 동작함
-- [ ] audio/object key/digest/credential이 응답·log·telemetry·billing DB에 노출되지 않음
-- [ ] 기존 official SDK file upload와 managed settlement 회귀 검사가 통과함
-- [ ] 전체 unit/race/integration/SDK 검사가 통과함
-- [ ] README, migration, Docker Compose와 멀티레포 handoff가 갱신됨
+- [x] private S3/R2 asset create/get/delete가 tenant와 API-key 범위에서 동작함
+- [x] bounded ingestion이 크기·MIME·magic·동시성 제한을 fail closed함
+- [x] create idempotency가 동일 content를 재업로드/중복 기록하지 않음
+- [x] native multipart file과 asset reference가 exactly-one으로 검증됨
+- [x] available reference가 transcription/translation native file part로 안전하게 materialize됨
+- [x] 다른 tenant, deleted, expired, pending asset이 Provider·Ledger 전에 거부됨
+- [x] dispatch fingerprint가 immutable asset digest를 결합해 substitution을 차단함
+- [x] delete/expiry와 active dispatch race가 lease로 안전하게 수렴함
+- [x] cleanup restart/lease recovery와 object deletion retry가 동작함
+- [x] audio/object key/digest/credential이 응답·log·telemetry·billing DB에 노출되지 않음
+- [x] 기존 official SDK file upload와 managed settlement 회귀 검사가 통과함
+- [x] 전체 unit/race/integration/SDK 검사가 통과함
+- [x] README, migration, Docker Compose와 멀티레포 handoff가 갱신됨
 
 ## 검증 증거
 
-아직 구현 전.
+- `GOCACHE=/private/tmp/gateway-go-cache make check`
+- 신규 `gateway_plan060` PostgreSQL DB와 Redis를 사용한 전체 integration suite. 공유 Redis DB 잔존 키로 실패한 기존 rate-limit package는 빈 DB 13에서 격리 재실행하여 통과했다.
+- 실제 private MinIO bucket에 대한 conditional put/get/delete/readiness round trip
+- `go test -race -count=1 -tags=sdkconformance ./protocols/openai -run TestPythonAndJavaScriptReusableAudioAssetFlow`
+- concurrent publication, cross-tenant/API-key ownership, append-only event, active lease/delete/cleanup 수렴 integration tests
+- response projection, MIME/magic, exactly-one file/reference와 transcription/translation native materialization unit tests
 
 ## Rollback 계획
 
@@ -271,4 +276,3 @@ GOCACHE=/private/tmp/gateway-go-cache go test -tags=sdkconformance ./protocols/o
 - storage quota, retention tier와 storage billing
 - realtime transcription WebSocket and batch transcription Jobs
 - cross-provider STT/translation routing and fallback
-

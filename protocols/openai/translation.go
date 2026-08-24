@@ -52,6 +52,11 @@ type TranslationHandler struct {
 	tempDir                                                                        string
 	telemetry                                                                      *telemetry.Recorder
 	billing                                                                        TranslationBilling
+	assets                                                                         AudioAssetMaterializer
+}
+
+func (handler *TranslationHandler) SetAudioAssets(assets AudioAssetMaterializer) {
+	handler.assets = assets
 }
 
 func NewBillableTranslationHandler(logger *slog.Logger, authenticator Authenticator, models TranslationRegistry, executor TranslationExecutor, health providerhealth.Gate, requestBytes, fileBytes, fieldBytes, responseBytes int64, spoolLimit int, billing TranslationBilling) *TranslationHandler {
@@ -113,7 +118,12 @@ func (handler *TranslationHandler) ServeHTTP(writer http.ResponseWriter, request
 	}
 	helper := NewTranscriptionHandler(handler.common.logger, nil, nil, nil, nil, handler.maximumRequestBytes, handler.maximumFileBytes, handler.maximumFieldBytes, handler.maximumResponseBytes, 1)
 	helper.tempDir = handler.tempDir
-	form, err := helper.parseMultipart(tracked, request, parameters["boundary"])
+	assetID, assetRequested := requestedAudioAsset(request.Header)
+	if assetRequested && handler.assets == nil {
+		writeError(tracked, 503, "server_error", "audio_asset_unavailable", "audio asset unavailable")
+		return
+	}
+	form, err := helper.parseMultipart(tracked, request, parameters["boundary"], assetRequested)
 	if err != nil {
 		status, code := 400, "invalid_multipart"
 		if errors.Is(err, errTranscriptionTooLarge) {
@@ -123,6 +133,18 @@ func (handler *TranslationHandler) ServeHTTP(writer http.ResponseWriter, request
 		return
 	}
 	defer form.file.Cleanup()
+	if assetRequested {
+		materialized, materializeErr := handler.assets.Materialize(request.Context(), principal, assetID)
+		if materializeErr != nil {
+			writeError(tracked, 404, "invalid_request_error", "asset_not_found", "audio asset not found")
+			return
+		}
+		defer handler.assets.Release(context.WithoutCancel(request.Context()), materialized)
+		if materializeErr = applyMaterializedAudio(form, materialized); materializeErr != nil {
+			writeError(tracked, 503, "server_error", "audio_asset_unavailable", "audio asset unavailable")
+			return
+		}
+	}
 	if handler.models == nil || handler.executor == nil {
 		writeError(tracked, 503, "server_error", "provider_unavailable", "provider unavailable")
 		return
@@ -264,7 +286,7 @@ func (handler *TranslationHandler) beginCharge(writer http.ResponseWriter, reque
 
 func translationFingerprint(form *transcriptionForm, route audiooperation.TranslationModel) ([32]byte, error) {
 	hash := sha256.New()
-	for _, value := range []string{"openai", audiooperation.Translation, route.ID, route.ChannelID, route.ProviderModel, form.filename, form.fileType} {
+	for _, value := range []string{"openai", audiooperation.Translation, route.ID, route.ChannelID, route.ProviderModel, form.filename, form.fileType, form.assetID} {
 		_, _ = hash.Write([]byte(strconv.Itoa(len(value))))
 		_, _ = hash.Write([]byte{':'})
 		_, _ = hash.Write([]byte(value))

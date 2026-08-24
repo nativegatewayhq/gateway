@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -11,6 +12,16 @@ func TestReplicateWebhookMetadataUsesBoundedRouteWithoutCapability(t *testing.T)
 	protocol, operation, route := requestMetadata(request)
 	if protocol != "replicate" || operation != "image.generate" || route != "/internal/webhooks/replicate/{job}/{token}" || boundedRoute(route) != route {
 		t.Fatalf("metadata=%s/%s/%s", protocol, operation, route)
+	}
+}
+
+func TestAudioAssetMetadataUsesBoundedRouteWithoutAssetIdentity(t *testing.T) {
+	for _, test := range []struct{ method, path, operation, route string }{{http.MethodPost, "https://gateway.example/v1/audio/assets", "audio.asset.create", "/v1/audio/assets"}, {http.MethodGet, "https://gateway.example/v1/audio/assets/audasset_private", "audio.asset.get", "/v1/audio/assets/{id}"}, {http.MethodDelete, "https://gateway.example/v1/audio/assets/audasset_private", "audio.asset.delete", "/v1/audio/assets/{id}"}} {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		protocol, operation, route := requestMetadata(request)
+		if protocol != "openai" || operation != test.operation || route != test.route || boundedOperation(operation) != operation || boundedRoute(route) != route || strings.Contains(route, "audasset_private") {
+			t.Fatalf("metadata=%s/%s/%s", protocol, operation, route)
+		}
 	}
 }
 

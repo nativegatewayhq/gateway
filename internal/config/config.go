@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nativegatewayhq/gateway/internal/audioassets"
 	"github.com/nativegatewayhq/gateway/internal/clientip"
 	"github.com/nativegatewayhq/gateway/internal/imagestorage"
 	"github.com/nativegatewayhq/gateway/internal/providerhealth"
@@ -158,6 +159,7 @@ type Config struct {
 	ProviderHealthMode              ProviderHealthMode
 	ProviderHealth                  providerhealth.Config
 	ImageStorage                    imagestorage.Config
+	AudioInputStorage               audioassets.Config
 	VideoStorage                    videostorage.Config
 	Telemetry                       telemetry.Config
 	TrustedProxyPrefixes            []netip.Prefix
@@ -302,6 +304,7 @@ func Load(lookup LookupEnv) (Config, error) {
 		ProviderHealthMode:              ProviderHealthDisabled,
 		ProviderHealth:                  providerhealth.DefaultConfig(),
 		ImageStorage:                    imagestorage.DefaultConfig(),
+		AudioInputStorage:               audioassets.DefaultConfig(),
 		VideoStorage:                    videostorage.DefaultConfig(),
 		Telemetry:                       telemetry.DefaultConfig(),
 		ReplicateEndpoint:               "https://api.replicate.com",
@@ -809,6 +812,9 @@ func Load(lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if err := loadImageStorage(&cfg, lookup); err != nil {
+		return Config{}, err
+	}
+	if err := loadAudioInputStorage(&cfg, lookup); err != nil {
 		return Config{}, err
 	}
 	if err := loadVideoStorage(&cfg, lookup); err != nil {
@@ -1358,6 +1364,56 @@ func loadImageStorage(cfg *Config, lookup LookupEnv) error {
 	}
 	if err := cfg.ImageStorage.Validate(); err != nil {
 		return fmt.Errorf("GATEWAY_IMAGE_STORAGE_*: settings are invalid")
+	}
+	return nil
+}
+
+func loadAudioInputStorage(cfg *Config, lookup LookupEnv) error {
+	if value, ok := lookup("GATEWAY_AUDIO_INPUT_STORAGE_MODE"); ok {
+		cfg.AudioInputStorage.Mode = audioassets.Mode(strings.ToLower(strings.TrimSpace(value)))
+	}
+	for _, setting := range []struct {
+		key    string
+		target *string
+	}{{"GATEWAY_AUDIO_INPUT_STORAGE_ENDPOINT", &cfg.AudioInputStorage.Endpoint}, {"GATEWAY_AUDIO_INPUT_STORAGE_REGION", &cfg.AudioInputStorage.Region}, {"GATEWAY_AUDIO_INPUT_STORAGE_BUCKET", &cfg.AudioInputStorage.Bucket}, {"GATEWAY_AUDIO_INPUT_STORAGE_ACCESS_KEY_ID", &cfg.AudioInputStorage.AccessKeyID}, {"GATEWAY_AUDIO_INPUT_STORAGE_SECRET_ACCESS_KEY", &cfg.AudioInputStorage.SecretAccessKey}, {"GATEWAY_AUDIO_INPUT_STORAGE_SERVER_SIDE_ENCRYPTION", &cfg.AudioInputStorage.ServerSideEncryption}, {"GATEWAY_AUDIO_INPUT_STORAGE_TEMP_DIR", &cfg.AudioInputStorage.TemporaryDirectory}} {
+		if value, ok := lookup(setting.key); ok {
+			*setting.target = strings.TrimSpace(value)
+		}
+	}
+	if value, ok := lookup("GATEWAY_AUDIO_INPUT_STORAGE_MAX_BYTES"); ok {
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return fmt.Errorf("GATEWAY_AUDIO_INPUT_STORAGE_MAX_BYTES: must be a valid bounded integer")
+		}
+		cfg.AudioInputStorage.MaximumBytes = parsed
+	}
+	if value, ok := lookup("GATEWAY_AUDIO_INPUT_STORAGE_MAX_CONCURRENT_UPLOADS"); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("GATEWAY_AUDIO_INPUT_STORAGE_MAX_CONCURRENT_UPLOADS: must be a valid bounded integer")
+		}
+		cfg.AudioInputStorage.MaximumConcurrentUploads = parsed
+	}
+	for _, setting := range []struct {
+		key    string
+		target *time.Duration
+	}{{"GATEWAY_AUDIO_INPUT_STORAGE_UPLOAD_TIMEOUT", &cfg.AudioInputStorage.UploadTimeout}, {"GATEWAY_AUDIO_INPUT_STORAGE_DOWNLOAD_TIMEOUT", &cfg.AudioInputStorage.DownloadTimeout}, {"GATEWAY_AUDIO_INPUT_STORAGE_RETENTION", &cfg.AudioInputStorage.Retention}, {"GATEWAY_AUDIO_INPUT_STORAGE_CLEANUP_INTERVAL", &cfg.AudioInputStorage.CleanupInterval}, {"GATEWAY_AUDIO_INPUT_STORAGE_CLEANUP_LEASE", &cfg.AudioInputStorage.CleanupLease}} {
+		if value, ok := lookup(setting.key); ok {
+			parsed, err := time.ParseDuration(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("%s: must be a valid bounded duration", setting.key)
+			}
+			*setting.target = parsed
+		}
+	}
+	if value, ok := lookup("GATEWAY_AUDIO_INPUT_STORAGE_ALLOWED_CONTENT_TYPES"); ok {
+		cfg.AudioInputStorage.AllowedContentTypes = nil
+		for _, part := range strings.Split(value, ",") {
+			cfg.AudioInputStorage.AllowedContentTypes = append(cfg.AudioInputStorage.AllowedContentTypes, strings.TrimSpace(part))
+		}
+	}
+	if err := cfg.AudioInputStorage.Validate(); err != nil {
+		return fmt.Errorf("GATEWAY_AUDIO_INPUT_STORAGE_*: settings are invalid")
 	}
 	return nil
 }

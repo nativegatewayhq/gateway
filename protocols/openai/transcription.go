@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nativegatewayhq/gateway/internal/apikey"
+	"github.com/nativegatewayhq/gateway/internal/audioassets"
 	"github.com/nativegatewayhq/gateway/internal/audiobilling"
 	"github.com/nativegatewayhq/gateway/internal/audiopricing"
 	"github.com/nativegatewayhq/gateway/internal/idempotency"
@@ -60,6 +61,10 @@ type TranscriptionBilling interface {
 	Release(context.Context, string, string) (audiobilling.TranscriptionCharge, error)
 	MarkReconciling(context.Context, string, string, *audiobilling.TranscriptionEvidence) error
 }
+type AudioAssetMaterializer interface {
+	Materialize(context.Context, apikey.Principal, string) (audioassets.Materialized, error)
+	Release(context.Context, audioassets.Materialized) error
+}
 type TranscriptionHandler struct {
 	common                                                                         *Handler
 	models                                                                         TranscriptionRegistry
@@ -70,7 +75,10 @@ type TranscriptionHandler struct {
 	tempDir                                                                        string
 	telemetry                                                                      *telemetry.Recorder
 	billing                                                                        TranscriptionBilling
+	assets                                                                         AudioAssetMaterializer
 }
+
+func (h *TranscriptionHandler) SetAudioAssets(assets AudioAssetMaterializer) { h.assets = assets }
 
 func NewTranscriptionHandler(logger *slog.Logger, authenticator Authenticator, models TranscriptionRegistry, executor TranscriptionExecutor, health providerhealth.Gate, requestBytes, fileBytes, fieldBytes, responseBytes int64, spoolLimit int) *TranscriptionHandler {
 	if health == nil {
@@ -128,7 +136,12 @@ func (h *TranscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		writeError(tracked, 503, "server_error", "spool_capacity_exhausted", "transcription capacity unavailable")
 		return
 	}
-	form, err := h.parseMultipart(tracked, r, boundary)
+	assetID, assetRequested := requestedAudioAsset(r.Header)
+	if assetRequested && h.assets == nil {
+		writeError(tracked, 503, "server_error", "audio_asset_unavailable", "audio asset unavailable")
+		return
+	}
+	form, err := h.parseMultipart(tracked, r, boundary, assetRequested)
 	if err != nil {
 		err = classifyMultipart(err)
 		status, code := 400, "invalid_multipart"
@@ -139,6 +152,18 @@ func (h *TranscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer form.file.Cleanup()
+	if assetRequested {
+		materialized, materializeErr := h.assets.Materialize(r.Context(), principal, assetID)
+		if materializeErr != nil {
+			writeError(tracked, 404, "invalid_request_error", "asset_not_found", "audio asset not found")
+			return
+		}
+		defer h.assets.Release(context.WithoutCancel(r.Context()), materialized)
+		if materializeErr = applyMaterializedAudio(form, materialized); materializeErr != nil {
+			writeError(tracked, 503, "server_error", "audio_asset_unavailable", "audio asset unavailable")
+			return
+		}
+	}
 	if h.models == nil || h.executor == nil {
 		writeError(tracked, 503, "server_error", "provider_unavailable", "provider unavailable")
 		return
@@ -328,7 +353,7 @@ func (h *TranscriptionHandler) beginCharge(w http.ResponseWriter, r *http.Reques
 
 func transcriptionFingerprint(form *transcriptionForm, route audiooperation.TranscriptionModel) ([32]byte, error) {
 	hash := sha256.New()
-	for _, value := range []string{"openai", audiooperation.Transcription, route.ID, route.ChannelID, route.ProviderModel, form.filename, form.fileType} {
+	for _, value := range []string{"openai", audiooperation.Transcription, route.ID, route.ChannelID, route.ProviderModel, form.filename, form.fileType, form.assetID} {
 		_, _ = hash.Write([]byte(strconv.Itoa(len(value))))
 		_, _ = hash.Write([]byte{':'})
 		_, _ = hash.Write([]byte(value))
@@ -379,14 +404,14 @@ func (h *TranscriptionHandler) handleProviderFailure(w http.ResponseWriter, r *h
 
 type transcriptionField struct{ name, value string }
 type transcriptionForm struct {
-	model, filename, fileType string
-	fields                    []transcriptionField
-	file                      *transcriptionSpool
-	stream                    bool
-	responseFormat            string
+	model, filename, fileType, assetID string
+	fields                             []transcriptionField
+	file                               *transcriptionSpool
+	stream                             bool
+	responseFormat                     string
 }
 
-func (h *TranscriptionHandler) parseMultipart(w http.ResponseWriter, r *http.Request, boundary string) (*transcriptionForm, error) {
+func (h *TranscriptionHandler) parseMultipart(w http.ResponseWriter, r *http.Request, boundary string, allowMissingFile bool) (*transcriptionForm, error) {
 	reader := multipart.NewReader(http.MaxBytesReader(w, r.Body, h.maximumRequestBytes), boundary)
 	form := &transcriptionForm{file: newTranscriptionSpool(h.tempDir, transcriptionMemoryThreshold, h.maximumFileBytes)}
 	complete := false
@@ -459,7 +484,7 @@ func (h *TranscriptionHandler) parseMultipart(w http.ResponseWriter, r *http.Req
 		}
 		part.Close()
 	}
-	if form.file.Size() == 0 || form.model == "" || form.model != strings.TrimSpace(form.model) || len(form.model) > 200 || !seen["file"] || !seen["model"] {
+	if (!allowMissingFile && (form.file.Size() == 0 || !seen["file"])) || (allowMissingFile && seen["file"]) || form.model == "" || form.model != strings.TrimSpace(form.model) || len(form.model) > 200 || !seen["model"] {
 		return nil, errTranscriptionInvalid
 	}
 	complete = true

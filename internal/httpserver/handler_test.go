@@ -136,6 +136,22 @@ func TestOpenAITranslationsRouteIsExact(t *testing.T) {
 	}
 }
 
+func TestOpenAIAudioAssetRoutesAreMounted(t *testing.T) {
+	assets := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	handler := NewHandler(discardLogger(), nil, Routes{OpenAIAudioAssets: assets})
+	for path, want := range map[string]int{
+		"/v1/audio/assets":           http.StatusCreated,
+		"/v1/audio/assets/asset_123": http.StatusCreated,
+		"/v1/audio/asset":            http.StatusNotFound,
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != want {
+			t.Fatalf("%s=%d", path, response.Code)
+		}
+	}
+}
+
 func TestReplicatePredictionRoutesAreMounted(t *testing.T) {
 	t.Parallel()
 	predictions := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusAccepted) })

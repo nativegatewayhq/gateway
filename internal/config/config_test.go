@@ -59,6 +59,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ImageStorage.Mode != "provider" || cfg.ImageStorage.MaximumImages != 10 || cfg.ImageStorage.MaximumImageBytes != 32<<20 {
 		t.Errorf("image storage config = %+v", cfg.ImageStorage)
 	}
+	if cfg.AudioInputStorage.Mode != "disabled" || cfg.AudioInputStorage.MaximumBytes != 64<<20 || cfg.AudioInputStorage.Retention != 7*24*time.Hour {
+		t.Errorf("audio input storage config=%+v", cfg.AudioInputStorage)
+	}
 	if cfg.Telemetry.Mode != "disabled" || cfg.Telemetry.ServiceName != "native-ai-gateway" || cfg.Telemetry.SampleRatio != 0.1 {
 		t.Errorf("telemetry config=%+v", cfg.Telemetry)
 	}
@@ -506,6 +509,18 @@ func TestOpenAITranslationConfigurationSupportsManagedSettlement(t *testing.T) {
 	values["GATEWAY_BILLING_MODE"] = "required"
 	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err != nil {
 		t.Fatalf("managed translation error=%v", err)
+	}
+}
+
+func TestManagedAudioInputStorageConfiguration(t *testing.T) {
+	values := map[string]string{"GATEWAY_DATABASE_URL": "postgres://gateway", "GATEWAY_AUDIO_INPUT_STORAGE_MODE": "managed", "GATEWAY_AUDIO_INPUT_STORAGE_ENDPOINT": "http://127.0.0.1:9000", "GATEWAY_AUDIO_INPUT_STORAGE_REGION": "auto", "GATEWAY_AUDIO_INPUT_STORAGE_BUCKET": "audio-private", "GATEWAY_AUDIO_INPUT_STORAGE_ACCESS_KEY_ID": "access", "GATEWAY_AUDIO_INPUT_STORAGE_SECRET_ACCESS_KEY": "secret", "GATEWAY_AUDIO_INPUT_STORAGE_SERVER_SIDE_ENCRYPTION": "AES256", "GATEWAY_AUDIO_INPUT_STORAGE_MAX_BYTES": "1048576", "GATEWAY_AUDIO_INPUT_STORAGE_MAX_CONCURRENT_UPLOADS": "4", "GATEWAY_AUDIO_INPUT_STORAGE_RETENTION": "48h", "GATEWAY_AUDIO_INPUT_STORAGE_ALLOWED_CONTENT_TYPES": "audio/wav,audio/mpeg"}
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil || cfg.AudioInputStorage.Mode != "managed" || cfg.AudioInputStorage.ServerSideEncryption != "AES256" || cfg.AudioInputStorage.MaximumBytes != 1048576 || cfg.AudioInputStorage.Retention != 48*time.Hour || len(cfg.AudioInputStorage.AllowedContentTypes) != 2 {
+		t.Fatalf("config=%+v err=%v", cfg.AudioInputStorage, err)
+	}
+	values["GATEWAY_AUDIO_INPUT_STORAGE_ENDPOINT"] = "http://private.example"
+	if _, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("unsafe audio storage endpoint accepted")
 	}
 }
 

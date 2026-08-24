@@ -26,6 +26,7 @@ type Routes struct {
 	OpenAISpeech         http.Handler
 	OpenAITranscriptions http.Handler
 	OpenAITranslations   http.Handler
+	OpenAIAudioAssets    http.Handler
 	Anthropic            http.Handler
 	Replicate            http.Handler
 	ReplicateWebhook     http.Handler
@@ -74,6 +75,10 @@ func NewHandlerWithTelemetry(logger *slog.Logger, ready ReadyFunc, resolver *cli
 	}
 	if len(routeSets) > 0 && routeSets[0].OpenAITranslations != nil {
 		mux.Handle("/v1/audio/translations", routeSets[0].OpenAITranslations)
+	}
+	if len(routeSets) > 0 && routeSets[0].OpenAIAudioAssets != nil {
+		mux.Handle("/v1/audio/assets", routeSets[0].OpenAIAudioAssets)
+		mux.Handle("/v1/audio/assets/", routeSets[0].OpenAIAudioAssets)
 	}
 	if len(routeSets) > 0 && routeSets[0].Anthropic != nil {
 		mux.Handle("/v1/messages", routeSets[0].Anthropic)
